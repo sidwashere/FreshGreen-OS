@@ -29,7 +29,7 @@ export class ApertureBuilder {
     
     return {
       jsonLd,
-      llmsTxt: `# ${title}\n\nBrand: ${this.brandName}\nKeywords: ${(targetKeywords || []).join(', ')}\n\n${content.replace(/<[^>]+>/g, '').substring(0, 500)}...`
+      llmsTxt: `# \${title}\\n\\nBrand: \${this.brandName}\\nKeywords: \${(targetKeywords || []).join(', ')}\\n\\n\${content.replace(/<[^>]+>/g, '').substring(0, 500)}...`
     };
   }
 }

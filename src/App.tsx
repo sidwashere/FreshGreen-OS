@@ -9,7 +9,7 @@ import { WorkspaceHub } from './components/WorkspaceHub';
 import { SettingsTab } from './components/SettingsTab';
 import { INITIAL_BRANDS, INITIAL_CONTENT } from './data/initialData';
 import { Brand, ContentItem, PipelineStatus } from './types';
-import { initAuth, googleSignIn, googleSignInRedirect, demoSignIn, USE_EMULATORS, db } from './lib/firebase';
+import { initAuth, googleSignIn, db } from './lib/firebase';
 import { User } from 'firebase/auth';
 import { collection, query, where, onSnapshot, doc, setDoc, deleteDoc, getDoc } from 'firebase/firestore';
 
@@ -139,33 +139,6 @@ export default function App() {
       }
     } catch (err) {
       console.error('Login failed:', err);
-    } finally {
-      setIsLoggingIn(false);
-    }
-  };
-
-  const handleRedirectLogin = async () => {
-    setIsLoggingIn(true);
-    try {
-      // Full-page redirect flow: the browser leaves the app for Google and
-      // returns with the session, which initAuth() resolves on reload.
-      await googleSignInRedirect();
-    } catch (err) {
-      console.error('Redirect login failed:', err);
-      setIsLoggingIn(false);
-    }
-  };
-
-  const handleDemoLogin = async () => {
-    setIsLoggingIn(true);
-    try {
-      const result = await demoSignIn();
-      if (result) {
-        setUser(result.user);
-        setNeedsAuth(false);
-      }
-    } catch (err) {
-      console.error('Demo login failed:', err);
     } finally {
       setIsLoggingIn(false);
     }
@@ -335,29 +308,9 @@ export default function App() {
             </svg>
             <span>{isLoggingIn ? 'Signing in...' : 'Sign in with Google'}</span>
           </button>
-
-          <button
-            type="button"
-            onClick={handleRedirectLogin}
-            disabled={isLoggingIn}
-            className="w-full bg-slate-800 text-white hover:bg-slate-700 font-medium py-2.5 px-4 rounded-lg text-sm transition"
-          >
-            {isLoggingIn ? 'Redirecting to Google...' : 'Sign in via redirect (for embedded browsers)'}
-          </button>
-
-          {USE_EMULATORS && (
-            <button
-              type="button"
-              onClick={handleDemoLogin}
-              disabled={isLoggingIn}
-              className="w-full bg-emerald-600 text-white hover:bg-emerald-500 font-medium py-2.5 px-4 rounded-lg text-sm transition"
-            >
-              {isLoggingIn ? 'Signing in...' : 'Demo sign-in (local emulators)'}
-            </button>
-          )}
-
+          
           <div className="text-[11px] text-slate-400 mt-4 leading-relaxed bg-slate-50 p-3 rounded-lg text-left">
-            <strong>Note:</strong> If the sign-in popup gets blocked or fails to open, please open this application in a <strong>New Tab</strong> using the button in the top right corner of the AI Studio preview window, or use the <strong>redirect</strong> option above.
+            <strong>Note:</strong> If the sign-in popup gets blocked or fails to open, please open this application in a <strong>New Tab</strong> using the button in the top right corner of the AI Studio preview window.
           </div>
         </div>
       </div>
