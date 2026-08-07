@@ -4,14 +4,16 @@ export class Humanizer {
   private tone: string;
   private bannedWords: string[];
   private levers: any;
+  private model: string;
 
   constructor(options: any) {
     this.tone = options.tone || 'conversational';
     this.bannedWords = options.bannedWords || [];
     this.levers = options.levers || {};
+    this.model = options.model || 'gemini-flash-latest';
   }
 
-  async rewriteHtml(html: string, aiKey?: string): Promise<string> {
+  async rewriteHtml(html: string, aiKey?: string, model?: string): Promise<string> {
     const aiApiKey = aiKey || process.env.GEMINI_API_KEY;
     if (!aiApiKey) return html;
     
@@ -26,7 +28,7 @@ HTML Content:
 ${html}`;
 
       const response = await ai.models.generateContent({
-        model: 'gemini-3.5-flash',
+        model: model || this.model,
         contents: prompt,
         config: {
           systemInstruction: 'You are an expert humanizer. Return ONLY the raw rewritten HTML. Do not wrap in markdown code blocks.',

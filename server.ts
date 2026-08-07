@@ -7,7 +7,14 @@ import { Humanizer } from './src/lib/patina-core.js';
 
 dotenv.config();
 
-const GEMINI_TEXT_MODEL = 'gemini-3.5-flash';
+// Primary text model (override with GEMINI_MODEL env var). gemini-flash-latest
+// is the default because it carries a separate free-tier quota bucket from
+// gemini-3.5-flash, which exhausts quickly on free keys.
+const GEMINI_TEXT_MODEL = process.env.GEMINI_MODEL || 'gemini-flash-latest';
+// Fallback = whichever bucket the primary ISN'T, so the chain always spans two
+// distinct free-tier quota buckets.
+const GEMINI_TEXT_FALLBACK_MODEL =
+  GEMINI_TEXT_MODEL === 'gemini-flash-latest' ? 'gemini-3.5-flash' : 'gemini-flash-latest';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -30,22 +37,49 @@ function getGeminiClient() {
 
 // Retry transient Gemini failures (503 high demand, 429 rate limit, RESOURCE_EXHAUSTED)
 // with exponential backoff so spiky demand doesn't fail user generations.
+// Free-tier quotas are per-model, so when one model's bucket is exhausted we
+// switch to the fallback model (separate bucket) instead of grinding. Each
+// model gets a bounded number of attempts honoring the API's "retry in Xs".
 async function generateContentWithRetry(ai: any, params: any, retries = 3) {
+  // Always try the requested model first, then the fallback (which carries a
+  // separate free-tier quota bucket). Dedupe so they're never tried twice.
+  const modelChain = Array.from(new Set([params.model, GEMINI_TEXT_FALLBACK_MODEL]));
   let lastErr: any;
-  for (let attempt = 0; attempt < retries; attempt++) {
-    try {
-      return await ai.models.generateContent(params);
-    } catch (err: any) {
-      lastErr = err;
-      const msg = err?.message || '';
-      const isTransient = /(code.?[:=]?\s?(503|429)|RESOURCE_EXHAUSTED|UNAVAILABLE|high demand|rate limit)/i.test(msg);
-      if (!isTransient || attempt === retries - 1) throw err;
-      const delayMs = [2500, 8000, 15000][attempt] || 15000;
-      console.log(`[AI] Transient Gemini error, retrying in ${delayMs / 1000}s (attempt ${attempt + 2}/${retries})...`);
-      await new Promise((r) => setTimeout(r, delayMs));
+  for (const model of modelChain) {
+    for (let attempt = 0; attempt < retries; attempt++) {
+      try {
+        return await ai.models.generateContent({ ...params, model });
+      } catch (err: any) {
+        lastErr = err;
+        const msg = err?.message || '';
+        const isTransient = /(code.?[:=]?\s?(503|429)|RESOURCE_EXHAUSTED|UNAVAILABLE|high demand|rate limit)/i.test(msg);
+        if (!isTransient) throw err;
+        // Quota exhausted on this model: jump to the fallback model (own bucket)
+        // immediately — no point waiting out a bucket that won't refill soon.
+        if (/RESOURCE_EXHAUSTED|free_tier_requests/.test(msg) && modelChain.length > 1) {
+          console.log(`[AI] Free-tier quota on ${model}, switching to ${modelChain[1]}...`);
+          break;
+        }
+        if (attempt === retries - 1) break;
+        // Honor the API's "Please retry in Xs" hint (capped at 45s) when present,
+        // otherwise exponential backoff.
+        const retryAfterMs = parseRetryAfterHint(msg);
+        const delayMs = retryAfterMs !== null ? retryAfterMs : ([2500, 8000, 15000][attempt] || 15000);
+        console.log(`[AI] Transient Gemini error on ${model}, retrying in ${Math.round(delayMs / 1000)}s (attempt ${attempt + 2}/${retries})...`);
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
     }
   }
   throw lastErr;
+}
+
+// Extract "Please retry in 36.9s" from a Gemini 429 RESOURCE_EXHAUSTED message.
+function parseRetryAfterHint(msg: string): number | null {
+  const m = msg.match(/Please retry in ([\d.]+)s/);
+  if (!m) return null;
+  const secs = parseFloat(m[1]);
+  if (!Number.isFinite(secs) || secs <= 0) return null;
+  return Math.min(Math.ceil(secs * 1000) + 500, 45000);
 }
 
 // Normalize a count value (string|number|null|undefined) to a safe non-NaN number.
@@ -63,7 +97,7 @@ app.post('/api/ai/generate-article', async (req, res) => {
   try {
     const { title, contentType, primaryKeyword, secondaryKeywords, seoBrief, brand, byokKeys, applyHumanization, targetWordCount } = req.body;
 
-    const aiApiKey = process.env.GEMINI_API_KEY;
+    const aiApiKey = byokKeys?.gemini || process.env.GEMINI_API_KEY;
 
     const ai = aiApiKey ? new GoogleGenAI({ apiKey: aiApiKey }) : null;
 
@@ -154,7 +188,7 @@ Additional Context / Brief: "${seoBrief || 'Focus on high value, reader satisfac
       });
 
       // Rewrite the HTML content while preserving tags
-      parsed.bodyHtml = await patina.rewriteHtml(parsed.bodyHtml, aiApiKey);
+      parsed.bodyHtml = await patina.rewriteHtml(parsed.bodyHtml, aiApiKey, GEMINI_TEXT_MODEL);
       parsed.seoBrief += "\n\n**Note:** Content has been processed through Patina to bypass AI detection.";
     }
 
@@ -170,6 +204,8 @@ Additional Context / Brief: "${seoBrief || 'Focus on high value, reader satisfac
     let errorMessage = err.message || 'Failed to generate article with Gemini.';
     if (errorMessage.includes('API_KEY_INVALID') || errorMessage.includes('API key not valid')) {
       errorMessage = 'Invalid Gemini API Key. Please provide a valid key in BYOK Settings.';
+    } else if (errorMessage.includes('free_tier_requests') || errorMessage.includes('RESOURCE_EXHAUSTED')) {
+      errorMessage = 'Gemini free-tier quota reached on both models. Wait a few minutes and retry (the app auto-switches models when one is exhausted), or add a paid Gemini API key in Settings > BYOK for unlimited generation.';
     }
     return res.status(400).json({ error: errorMessage });
   }
@@ -182,7 +218,7 @@ app.post('/api/ai/rewrite-block', async (req, res) => {
   try {
     const { block, direction, applyHumanization, brand, byokKeys } = req.body;
 
-    const aiApiKey = process.env.GEMINI_API_KEY; 
+    const aiApiKey = byokKeys?.gemini || process.env.GEMINI_API_KEY;
     const ai = aiApiKey ? new GoogleGenAI({ apiKey: aiApiKey }) : null;
 
     if (!ai) {
@@ -235,7 +271,7 @@ Return the rewritten block.`;
         bannedWords: brand?.bannedWords || [],
         levers: { complexity: 0.4, burstiness: 0.8 }
       });
-      parsed.content = await patina.rewriteHtml(parsed.content, aiApiKey);
+      parsed.content = await patina.rewriteHtml(parsed.content, aiApiKey, GEMINI_TEXT_MODEL);
     }
 
     return res.json({ success: true, data: parsed });
@@ -250,7 +286,7 @@ app.post('/api/ai/nano-banana-prompts', async (req, res) => {
   try {
     const { title, brandName, voiceGuidelines, byokKeys } = req.body;
     
-    const aiApiKey = process.env.GEMINI_API_KEY;
+    const aiApiKey = byokKeys?.gemini || process.env.GEMINI_API_KEY;
 
     const ai = aiApiKey ? new GoogleGenAI({ apiKey: aiApiKey }) : null;
 
@@ -378,7 +414,7 @@ app.post('/api/ai/generate-nano-image', async (req, res) => {
     }
 
     // Default: Gemini Image
-    const aiApiKey = process.env.GEMINI_API_KEY;
+    const aiApiKey = byokKeys?.gemini || process.env.GEMINI_API_KEY;
 
     const ai = aiApiKey ? new GoogleGenAI({ apiKey: aiApiKey }) : null;
 
@@ -418,7 +454,7 @@ app.post('/api/ai/seo-audit', async (req, res) => {
   try {
     const { bodyHtml, primaryKeyword, secondaryKeywords, title, byokKeys } = req.body;
     
-    const aiApiKey = process.env.GEMINI_API_KEY;
+    const aiApiKey = byokKeys?.gemini || process.env.GEMINI_API_KEY;
 
     const ai = aiApiKey ? new GoogleGenAI({ apiKey: aiApiKey }) : null;
 
