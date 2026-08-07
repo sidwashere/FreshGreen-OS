@@ -21,8 +21,35 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<string>('pipeline');
   const [activeItemId, setActiveItemId] = useState<string>('item-1');
 
+  // Sidebar state: desktop collapse (persisted) + mobile drawer
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('greenops_sidebar_collapsed') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+
+  const toggleSidebar = () => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('greenops_sidebar_collapsed', next ? '1' : '0');
+      } catch {
+        // ignore storage errors (private mode etc.)
+      }
+      return next;
+    });
+  };
+
+  const navigateTab = (tab: string) => {
+    setActiveTab(tab);
+    setMobileSidebarOpen(false);
+  };
+
   useEffect(() => {
-    if (brands.length > 0 && !brands.find(b => b.id === selectedBrandId)) {
+    if (brands.length > 0 && selectedBrandId !== 'all' && !brands.find(b => b.id === selectedBrandId)) {
       setSelectedBrandId(brands[0].id);
     }
   }, [brands, selectedBrandId]);
@@ -338,17 +365,33 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[#e9ecef] flex p-2 md:p-4 font-sans antialiased text-slate-900 overflow-hidden">
+    <div className="h-[100dvh] bg-[#e9ecef] flex p-0 md:p-4 font-sans antialiased text-slate-900 overflow-hidden">
       {/* App Shell Container */}
-      <div className="flex-1 flex flex-col md:flex-row overflow-hidden bg-[#f4f6f8] rounded-[2rem] shadow-2xl border border-white/40 relative">
-        {/* Left Sidebar */}
-        <div className="bg-white rounded-l-[2rem] shadow-sm z-20">
-          <Sidebar
-            activeTab={activeTab}
-            onNavigateTab={setActiveTab}
-            plannedCount={plannedCount}
-            draftCount={draftCount}
+      <div className="flex-1 flex flex-col md:flex-row overflow-hidden bg-[#f4f6f8] md:rounded-[2rem] shadow-2xl border-0 md:border border-white/40 relative">
+        {/* Mobile Sidebar Backdrop */}
+        {mobileSidebarOpen && (
+          <div
+            className="fixed inset-0 bg-slate-950/50 backdrop-blur-sm z-30 md:hidden"
+            onClick={() => setMobileSidebarOpen(false)}
           />
+        )}
+
+        {/* Left Sidebar: fixed drawer on mobile, static rail on desktop */}
+        <div
+          className={`fixed inset-y-0 left-0 z-40 transform transition-transform duration-300 ease-in-out
+            md:static md:translate-x-0 md:z-20 md:transition-none
+            ${mobileSidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}
+        >
+          <div className="h-full bg-white md:rounded-l-[2rem] shadow-2xl md:shadow-sm">
+            <Sidebar
+              activeTab={activeTab}
+              onNavigateTab={navigateTab}
+              plannedCount={plannedCount}
+              draftCount={draftCount}
+              collapsed={sidebarCollapsed}
+              onToggleCollapse={toggleSidebar}
+            />
+          </div>
         </div>
 
         {/* Main Content Column */}
@@ -359,12 +402,20 @@ export default function App() {
             selectedBrandId={selectedBrandId}
             onSelectBrand={setSelectedBrandId}
             onOpenBrandModal={() => setActiveTab('brands')}
-            onNavigateTab={setActiveTab}
+            onNavigateTab={navigateTab}
             activeTab={activeTab}
+            onToggleSidebar={() => {
+              if (window.innerWidth < 768) {
+                setMobileSidebarOpen(true);
+              } else {
+                toggleSidebar();
+              }
+            }}
+            sidebarCollapsed={sidebarCollapsed}
           />
 
           {/* Workspace Content Area */}
-          <main className="flex-1 overflow-y-auto bg-transparent p-2">
+          <main className="flex-1 overflow-y-auto bg-transparent p-2 md:p-4">
             {activeTab === 'pipeline' && (
               <Dashboard
                 items={items}

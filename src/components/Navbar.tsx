@@ -1,6 +1,6 @@
 import React from 'react';
 import { Brand } from '../types';
-import { Sparkles, Globe, ChevronDown, Plus, Server, LogOut, Settings } from 'lucide-react';
+import { Globe, ChevronDown, Plus, LogOut, Settings, Menu, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { logout } from '../lib/firebase';
 
 interface NavbarProps {
@@ -10,6 +10,8 @@ interface NavbarProps {
   onOpenBrandModal: () => void;
   onNavigateTab: (tab: string) => void;
   activeTab: string;
+  onToggleSidebar?: () => void;
+  sidebarCollapsed?: boolean;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -18,26 +20,44 @@ export const Navbar: React.FC<NavbarProps> = ({
   onSelectBrand,
   onOpenBrandModal,
   onNavigateTab,
-  activeTab
+  activeTab,
+  onToggleSidebar,
+  sidebarCollapsed = false
 }) => {
   const currentBrand = brands.find(b => b.id === selectedBrandId) || brands[0];
 
   return (
-    <header className="h-[72px] bg-transparent text-slate-700 flex items-center justify-between px-6 sticky top-0 z-40">
+    <header className="h-[72px] bg-transparent text-slate-700 flex items-center justify-between px-3 md:px-6 sticky top-0 z-40">
       {/* Brand Identity / Left Side */}
-      <div className="flex items-center space-x-4">
+      <div className="flex items-center space-x-2 md:space-x-4 min-w-0">
+        {/* Sidebar Toggle: mobile opens drawer, desktop collapses rail */}
+        {onToggleSidebar && (
+          <button
+            onClick={onToggleSidebar}
+            title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            className="flex items-center justify-center w-9 h-9 rounded-xl bg-white hover:bg-slate-50 text-slate-500 border border-slate-200/60 shadow-sm transition shrink-0"
+          >
+            <Menu className="w-5 h-5 md:hidden" />
+            {sidebarCollapsed ? (
+              <PanelLeftOpen className="w-5 h-5 hidden md:block" />
+            ) : (
+              <PanelLeftClose className="w-5 h-5 hidden md:block" />
+            )}
+          </button>
+        )}
+
         {/* Brand Selector Dropdown */}
-        <div className="relative group">
-          <div className="flex items-center space-x-3 bg-white hover:bg-slate-50 border border-slate-200/60 shadow-sm rounded-xl px-4 py-2 transition cursor-pointer">
+        <div className="relative group min-w-0">
+          <div className="flex items-center space-x-2 md:space-x-3 bg-white hover:bg-slate-50 border border-slate-200/60 shadow-sm rounded-xl px-2.5 md:px-4 py-2 transition cursor-pointer max-w-[52vw] md:max-w-none">
             <div 
-              className="w-3 h-3 rounded-full shadow-sm"
+              className="w-3 h-3 rounded-full shadow-sm shrink-0"
               style={{ backgroundColor: currentBrand?.primaryColor || '#4f46e5' }}
             />
             <span className="text-xs font-bold text-slate-500 uppercase tracking-wider hidden lg:inline">Active Brand:</span>
             <select
               value={selectedBrandId}
               onChange={(e) => onSelectBrand(e.target.value)}
-              className="bg-transparent text-sm font-bold text-slate-800 focus:outline-none cursor-pointer pr-4 appearance-none"
+              className="bg-transparent text-sm font-bold text-slate-800 focus:outline-none cursor-pointer pr-3 appearance-none truncate max-w-[32vw] md:max-w-[220px]"
             >
               {brands.map((b) => (
                 <option key={b.id} value={b.id} className="text-slate-900">
@@ -45,13 +65,13 @@ export const Navbar: React.FC<NavbarProps> = ({
                 </option>
               ))}
             </select>
-            <ChevronDown className="w-4 h-4 text-slate-400 pointer-events-none" />
+            <ChevronDown className="w-4 h-4 text-slate-400 pointer-events-none shrink-0" />
           </div>
         </div>
       </div>
 
       {/* Quick Status Bar & Actions */}
-      <div className="flex items-center space-x-4">
+      <div className="flex items-center space-x-2 md:space-x-4 shrink-0">
         {/* WP Bridge Status Indicator */}
         <button
           onClick={() => onNavigateTab('settings')}

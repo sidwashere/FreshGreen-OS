@@ -57,10 +57,10 @@ export const WorkspaceHub: React.FC = () => {
         Connect to Google Workspace to import briefs, send email campaigns, or schedule content.
       </p>
 
-      <div className="flex space-x-4 border-b border-slate-200">
+      <div className="flex space-x-4 border-b border-slate-200 overflow-x-auto">
         <button
           onClick={() => { setActiveTab('sheets'); setResult(null); }}
-          className={`pb-3 px-2 flex items-center gap-2 text-sm font-medium border-b-2 transition ${
+          className={`pb-3 px-2 flex items-center gap-2 text-sm font-medium border-b-2 transition whitespace-nowrap ${
             activeTab === 'sheets' ? 'border-emerald-500 text-emerald-600' : 'border-transparent text-slate-500 hover:text-slate-700'
           }`}
         >
@@ -69,7 +69,7 @@ export const WorkspaceHub: React.FC = () => {
         </button>
         <button
           onClick={() => { setActiveTab('gmail'); setResult(null); }}
-          className={`pb-3 px-2 flex items-center gap-2 text-sm font-medium border-b-2 transition ${
+          className={`pb-3 px-2 flex items-center gap-2 text-sm font-medium border-b-2 transition whitespace-nowrap ${
             activeTab === 'gmail' ? 'border-emerald-500 text-emerald-600' : 'border-transparent text-slate-500 hover:text-slate-700'
           }`}
         >
@@ -78,7 +78,7 @@ export const WorkspaceHub: React.FC = () => {
         </button>
         <button
           onClick={() => { setActiveTab('calendar'); setResult(null); }}
-          className={`pb-3 px-2 flex items-center gap-2 text-sm font-medium border-b-2 transition ${
+          className={`pb-3 px-2 flex items-center gap-2 text-sm font-medium border-b-2 transition whitespace-nowrap ${
             activeTab === 'calendar' ? 'border-emerald-500 text-emerald-600' : 'border-transparent text-slate-500 hover:text-slate-700'
           }`}
         >
