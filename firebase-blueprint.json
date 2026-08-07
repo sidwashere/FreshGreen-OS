@@ -1,0 +1,59 @@
+{
+  "entities": {
+    "Brand": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "maxLength": 255 },
+        "slug": { "type": "string", "maxLength": 100 },
+        "wpUrl": { "type": "string", "maxLength": 255 },
+        "wpUsername": { "type": "string", "maxLength": 100 },
+        "wpAppPassword": { "type": "string", "maxLength": 255 },
+        "voiceGuidelines": { "type": "string", "maxLength": 5000 },
+        "bannedWords": { "type": "string", "maxLength": 2000 },
+        "primaryColor": { "type": "string", "maxLength": 7 },
+        "pageTemplates": { "type": "string", "maxLength": 2000 },
+        "defaultStatus": { "type": "string", "maxLength": 20 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "slug", "wpUrl", "wpUsername", "userId"]
+    },
+    "ContentItem": {
+      "type": "object",
+      "properties": {
+        "brandId": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 255 },
+        "slug": { "type": "string", "maxLength": 255 },
+        "contentType": { "type": "string", "maxLength": 20 },
+        "wpTemplate": { "type": "string", "maxLength": 100 },
+        "status": { "type": "string", "maxLength": 20 },
+        "primaryKeyword": { "type": "string", "maxLength": 255 },
+        "secondaryKeywords": { "type": "string", "maxLength": 1000 },
+        "seoBrief": { "type": "string", "maxLength": 2000 },
+        "metaTitle": { "type": "string", "maxLength": 255 },
+        "metaDescription": { "type": "string", "maxLength": 1000 },
+        "bodyHtml": { "type": "string", "maxLength": 100000 },
+        "nanoBananaPrompt": { "type": "string", "maxLength": 2000 },
+        "featuredImageUrl": { "type": "string", "maxLength": 500 },
+        "wpPostId": { "type": "number" },
+        "wpPreviewUrl": { "type": "string", "maxLength": 1000 },
+        "wpLiveUrl": { "type": "string", "maxLength": 1000 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["brandId", "title", "slug", "userId"]
+    }
+  },
+  "firestore": {
+    "brands/{brandId}": {
+      "schema": { "$ref": "#/entities/Brand" },
+      "description": "Brands managed by the user"
+    },
+    "content_items/{itemId}": {
+      "schema": { "$ref": "#/entities/ContentItem" },
+      "description": "Content items for a brand"
+    }
+  }
+}

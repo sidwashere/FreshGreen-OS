@@ -1,0 +1,83 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function isValidBrand(data) {
+      return data.size() >= 5
+        && data.name is string && data.name.size() <= 255
+        && data.slug is string && data.slug.size() <= 100
+        && data.wpUrl is string && data.wpUrl.size() <= 255
+        && data.wpUsername is string && data.wpUsername.size() <= 100
+        && data.userId == request.auth.uid;
+    }
+
+    match /settings/{docId} {
+      allow read, write: if isSignedIn();
+    }
+    match /users/{userId} {
+      allow read, write: if isSignedIn() && request.auth.uid == userId;
+    }
+    match /brands/{brandId} {
+      allow get: if isSignedIn() && isValidId(brandId) && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && existing().userId == request.auth.uid;
+      allow create: if isSignedIn() 
+                    && isValidId(brandId) 
+                    && isValidBrand(incoming());
+      allow update: if isSignedIn() 
+                    && isValidId(brandId) 
+                    && existing().userId == request.auth.uid
+                    && isValidBrand(incoming())
+                    && incoming().userId == existing().userId;
+      allow delete: if isSignedIn() && isValidId(brandId) && existing().userId == request.auth.uid;
+    }
+
+    match /content_items/{itemId} {
+      function isValidContentItem(data) {
+        return data.size() >= 4
+          && data.brandId is string
+          && data.title is string && data.title.size() <= 255
+          && data.slug is string && data.slug.size() <= 255
+          && data.userId == request.auth.uid;
+      }
+      
+      function parentBrandExistsAndOwned() {
+        let parentBrand = get(/databases/$(database)/documents/brands/$(incoming().brandId));
+        return parentBrand != null && parentBrand.data.userId == request.auth.uid;
+      }
+
+      allow get: if isSignedIn() && isValidId(itemId) && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && existing().userId == request.auth.uid;
+      allow create: if isSignedIn() 
+                    && isValidId(itemId) 
+                    && isValidContentItem(incoming())
+                    && parentBrandExistsAndOwned();
+      allow update: if isSignedIn() 
+                    && isValidId(itemId) 
+                    && existing().userId == request.auth.uid
+                    && isValidContentItem(incoming())
+                    && incoming().userId == existing().userId
+                    && parentBrandExistsAndOwned();
+      allow delete: if isSignedIn() && isValidId(itemId) && existing().userId == request.auth.uid;
+    }
+  }
+}
