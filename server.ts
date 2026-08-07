@@ -1,13 +1,20 @@
 import express from 'express';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI, Type } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 import { Humanizer } from './src/lib/patina-core.js';
+import { ApertureBuilder } from './src/lib/aperture-geo.js';
 
 dotenv.config();
 
-const GEMINI_TEXT_MODEL = 'gemini-3.5-flash';
+
+
+const _filename = typeof __filename !== 'undefined' ? __filename : (typeof import.meta !== 'undefined' && import.meta.url ? fileURLToPath(import.meta.url) : '');
+const _dirname = typeof __dirname !== 'undefined' ? __dirname : (typeof _filename === 'string' && _filename ? path.dirname(_filename) : process.cwd());
+
+
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -28,32 +35,6 @@ function getGeminiClient() {
   });
 }
 
-// Retry transient Gemini failures (503 high demand, 429 rate limit, RESOURCE_EXHAUSTED)
-// with exponential backoff so spiky demand doesn't fail user generations.
-async function generateContentWithRetry(ai: any, params: any, retries = 3) {
-  let lastErr: any;
-  for (let attempt = 0; attempt < retries; attempt++) {
-    try {
-      return await ai.models.generateContent(params);
-    } catch (err: any) {
-      lastErr = err;
-      const msg = err?.message || '';
-      const isTransient = /(code.?[:=]?\s?(503|429)|RESOURCE_EXHAUSTED|UNAVAILABLE|high demand|rate limit)/i.test(msg);
-      if (!isTransient || attempt === retries - 1) throw err;
-      const delayMs = [2500, 8000, 15000][attempt] || 15000;
-      console.log(`[AI] Transient Gemini error, retrying in ${delayMs / 1000}s (attempt ${attempt + 2}/${retries})...`);
-      await new Promise((r) => setTimeout(r, delayMs));
-    }
-  }
-  throw lastErr;
-}
-
-// Normalize a count value (string|number|null|undefined) to a safe non-NaN number.
-function safeCount(value: any): number {
-  const n = parseInt(String(value ?? ''), 10);
-  return Number.isFinite(n) ? n : 0;
-}
-
 // ==========================================
 // 1. AI API ENDPOINTS (Gemini Server-Side)
 // ==========================================
@@ -61,10 +42,10 @@ function safeCount(value: any): number {
 // API Endpoint: Generate Article Content with Gemini
 app.post('/api/ai/generate-article', async (req, res) => {
   try {
-    const { title, contentType, primaryKeyword, secondaryKeywords, seoBrief, brand, byokKeys, applyHumanization, targetWordCount } = req.body;
+    const { title, contentType, primaryKeyword, secondaryKeywords, seoBrief, brand, byokKeys, applyHumanization } = req.body;
 
-    const aiApiKey = process.env.GEMINI_API_KEY;
-
+    const aiApiKey = process.env.GEMINI_API_KEY; console.log("Using API KEY:", aiApiKey, "ENV KEY:", process.env.GEMINI_API_KEY ? "YES" : "NO");
+    
     const ai = aiApiKey ? new GoogleGenAI({ apiKey: aiApiKey }) : null;
 
     if (!ai) {
@@ -86,15 +67,7 @@ You will generate:
 3. "metaTitle": Optimized title tag under 60 characters.
 4. "metaDescription": Engaging meta description under 155 characters.
 5. "suggestedNanoPrompt": A 5-8 word image prompt for the Nano Banana Image Studio.
-6. "blocks": Array of 3-4 structured visual blocks (Hero, Paragraph, Product CTA, FAQ).
-
-SEO requirements:
-- Use the primary keyword naturally 2-3 times in the body, including once in the first paragraph (bold it once with <strong>).
-- Work the topic/title angle into at least one h2 or h3 subheading.
-- ${targetWordCount && targetWordCount > 0
-    ? `Aim for approximately ${targetWordCount} words total (within +/- 15% of that target).`
-    : 'Target 800-1200 words for a post (500-700 for a landing page).'}
-- Every sentence should read like it was written by a human expert, not an AI.`;
+6. "blocks": Array of 3-4 structured visual blocks (Hero, Paragraph, Product CTA, FAQ).`;
 
     const prompt = `Write a comprehensive, highly engaging, human-sounding ${contentType === 'page' ? 'Landing Page' : 'Blog Article'}.
 Topic / Title: "${title}"
@@ -102,8 +75,8 @@ Target Primary Keyword: "${primaryKeyword || title}"
 Secondary Keywords: ${Array.isArray(secondaryKeywords) ? secondaryKeywords.join(', ') : secondaryKeywords || 'None'}
 Additional Context / Brief: "${seoBrief || 'Focus on high value, reader satisfaction, and conversion.'}"`;
 
-    const response = await generateContentWithRetry(ai, {
-      model: GEMINI_TEXT_MODEL,
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.5-flash',
       contents: prompt,
       config: {
         systemInstruction,
@@ -207,8 +180,8 @@ Direction/Style: ${direction || 'Improve clarity and engagement'}
 
 Return the rewritten block.`;
 
-    const response = await generateContentWithRetry(ai, {
-      model: GEMINI_TEXT_MODEL,
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.5-flash',
       contents: prompt,
       config: {
         systemInstruction,
@@ -250,8 +223,8 @@ app.post('/api/ai/nano-banana-prompts', async (req, res) => {
   try {
     const { title, brandName, voiceGuidelines, byokKeys } = req.body;
     
-    const aiApiKey = process.env.GEMINI_API_KEY;
-
+    const aiApiKey = process.env.GEMINI_API_KEY; console.log("Using API KEY:", aiApiKey, "ENV KEY:", process.env.GEMINI_API_KEY ? "YES" : "NO");
+    
     const ai = aiApiKey ? new GoogleGenAI({ apiKey: aiApiKey }) : null;
 
     if (!ai) {
@@ -272,8 +245,8 @@ Topic/Title: ${title}
 
 Return JSON with an array of "prompts" containing object items with "prompt", "category", "style", "lighting".`;
 
-    const response = await generateContentWithRetry(ai, {
-      model: GEMINI_TEXT_MODEL,
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.5-flash',
       contents: `Generate 3 Nano Banana image prompts for article title: "${title}"`,
       config: {
         systemInstruction,
@@ -377,9 +350,9 @@ app.post('/api/ai/generate-nano-image', async (req, res) => {
       });
     }
 
-    // Default: Gemini Image
-    const aiApiKey = process.env.GEMINI_API_KEY;
-
+    // Default: Gemini 3.1 Flash Lite Image
+    const aiApiKey = process.env.GEMINI_API_KEY; console.log("Using API KEY:", aiApiKey, "ENV KEY:", process.env.GEMINI_API_KEY ? "YES" : "NO");
+    
     const ai = aiApiKey ? new GoogleGenAI({ apiKey: aiApiKey }) : null;
 
     if (ai) {
@@ -418,8 +391,8 @@ app.post('/api/ai/seo-audit', async (req, res) => {
   try {
     const { bodyHtml, primaryKeyword, secondaryKeywords, title, byokKeys } = req.body;
     
-    const aiApiKey = process.env.GEMINI_API_KEY;
-
+    const aiApiKey = process.env.GEMINI_API_KEY; console.log("Using API KEY:", aiApiKey, "ENV KEY:", process.env.GEMINI_API_KEY ? "YES" : "NO");
+    
     const ai = aiApiKey ? new GoogleGenAI({ apiKey: aiApiKey }) : null;
 
     if (!ai) {
@@ -446,8 +419,8 @@ app.post('/api/ai/seo-audit', async (req, res) => {
     const systemInstruction = `You are an SEO Auditor. Analyze the provided HTML blog content and primary keyword.
 Calculate an overall SEO health score (0-100), word count, readability level, keyword density %, list 3-4 actionable improvements, and generate an optimal meta title and meta description.`;
 
-    const response = await generateContentWithRetry(ai, {
-      model: GEMINI_TEXT_MODEL,
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.5-flash',
       contents: `Title: ${title}
 Primary Keyword: ${primaryKeyword}
 Secondary Keywords: ${JSON.stringify(secondaryKeywords || [])}
@@ -611,8 +584,7 @@ app.post('/api/wp/sync-content', async (req, res) => {
           message: `Successfully published ${contentItem.contentType} to WordPress as ${payload.status.toUpperCase()}!`,
           wpPostId,
           link,
-          previewUrl,
-          status: payload.status
+          previewUrl
         });
       } else {
         const errorData = await wpRes.text();
@@ -724,81 +696,18 @@ app.post('/api/wp/stats', async (req, res) => {
       fetchStat('media')
     ]);
 
-    const failed = [totalPosts, totalPages, totalComments, totalMedia].some((v) => v === 'Err' || v === 'N/A');
-
     return res.json({
       success: true,
       stats: {
-        totalPosts: safeCount(totalPosts),
-        totalPages: safeCount(totalPages),
-        totalComments: safeCount(totalComments),
-        totalMedia: safeCount(totalMedia),
-        error: failed,
+        totalPosts,
+        totalPages,
+        totalComments,
+        totalMedia
       }
     });
 
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-// ==========================================
-// 4b. SITE PREVIEW ENDPOINT
-// Fetches a brand's live site and extracts its real chrome (header, footer,
-// navigation, theme stylesheets) so the Blog Editor preview renders the
-// article inside the site's actual layout. Falls back gracefully when the
-// site is unreachable (e.g. DNS not live yet).
-// ==========================================
-app.post('/api/wp/site-preview', async (req, res) => {
-  const { wpUrl } = req.body;
-  if (!wpUrl) return res.status(400).json({ success: false, message: 'wpUrl is required' });
-
-  const baseUrl = wpUrl.replace(/\/+$/, '');
-
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
-    const response = await fetch(baseUrl + '/', {
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml',
-      },
-    });
-    clearTimeout(timeout);
-
-    if (!response.ok) {
-      return res.json({ success: false, reason: `Site returned HTTP ${response.status}` });
-    }
-
-    const html = await response.text();
-
-    // Extract theme stylesheets (Astra/Elementor/WooCommerce CSS = layout fidelity)
-    const headLinks = (html.match(/<link[^>]*rel=['"]stylesheet['"][^>]*>/gi) || [])
-      .slice(0, 25)
-      .join('\n');
-
-    // Extract the real header element (Astra: #masthead)
-    const headerMatch = html.match(/<header[^>]*>[\s\S]*?<\/header>/i);
-    const headerHtml = headerMatch ? headerMatch[0] : '';
-
-    // Extract the real footer element (Astra: #colophon)
-    const footerMatch = html.match(/<footer[^>]*>[\s\S]*?<\/footer>/i);
-    const footerHtml = footerMatch ? footerMatch[0] : '';
-
-    const titleMatch = html.match(/<title>([^<]*)<\/title>/i);
-    const siteTitle = titleMatch ? titleMatch[1] : baseUrl;
-
-    if (!headerHtml && !footerHtml) {
-      return res.json({ success: false, reason: 'No header/footer found on site' });
-    }
-
-    return res.json({
-      success: true,
-      data: { headLinks, headerHtml, footerHtml, siteTitle },
-    });
-  } catch (err: any) {
-    return res.json({ success: false, reason: err?.message || 'Failed to fetch site' });
   }
 });
 
