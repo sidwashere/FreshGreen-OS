@@ -1,8 +1,8 @@
 import { fetchGlobalKeys } from "../lib/keys";
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import ReactQuill from 'react-quill-new';
 import 'react-quill-new/dist/quill.snow.css';
-import { ContentItem, Brand, VisualBlock, VisualBlockType } from '../types';
+import { ContentItem, Brand, VisualBlock, VisualBlockType, PipelineStatus, SeoAuditResult } from '../types';
 import { 
   Sparkles, 
   Image as ImageIcon, 
@@ -33,7 +33,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
   onSyncToWP,
 }) => {
   const [editingItem, setEditingItem] = useState<ContentItem>(item);
-  const [applyHumanization, setApplyHumanization] = useState(false);
+  const [applyHumanization, setApplyHumanization] = useState(true);
   const [editorTab, setEditorTab] = useState<'visual' | 'html' | 'seo'>('visual');
   const [isGeneratingAi, setIsGeneratingAi] = useState(false);
   const [isSyncingWp, setIsSyncingWp] = useState(false);
@@ -46,6 +46,22 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
   const [blockRewriteDirections, setBlockRewriteDirections] = useState<Record<string, string>>({});
   const [isRewritingBlock, setIsRewritingBlock] = useState<Record<string, boolean>>({});
   const [saveStatus, setSaveStatus] = useState<'Saved' | 'Saving...' | 'Edited'>('Saved');
+  const [seoAudit, setSeoAudit] = useState<SeoAuditResult | null>(null);
+  const [isAuditing, setIsAuditing] = useState(false);
+  const [showSitePreview, setShowSitePreview] = useState(false);
+  const [previewChrome, setPreviewChrome] = useState<{ headLinks?: string; headerHtml?: string; footerHtml?: string; siteTitle?: string } | null>(null);
+  const [previewChromeState, setPreviewChromeState] = useState<'site' | 'brand' | 'loading'>('brand');
+
+  // Live word count from the article body (HTML stripped)
+  const wordCount = useMemo(() => {
+    const plain = (editingItem.bodyHtml || '')
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&[a-z]+;/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return plain ? plain.split(' ').filter(Boolean).length : 0;
+  }, [editingItem.bodyHtml]);
 
   useEffect(() => {
     setEditingItem(item);
@@ -86,6 +102,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
           brand,
           byokKeys,
           applyHumanization,
+          targetWordCount: editingItem.targetWordCount,
         }),
       });
 
@@ -122,6 +139,113 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
       alert('Generation Error: ' + e.message);
     } finally {
       setIsGeneratingAi(false);
+    }
+  };
+
+  const loadSiteChrome = async (force = false) => {
+    if (previewChrome && !force) return previewChrome;
+    setPreviewChromeState('loading');
+    try {
+      const res = await fetch('/api/wp/site-preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ wpUrl: brand?.wpUrl || '' }),
+      });
+      const data = await res.json();
+      if (data.success && data.data) {
+        setPreviewChrome(data.data);
+        setPreviewChromeState('site');
+        return data.data;
+      }
+    } catch (e) {
+      console.error('Failed to load live site chrome:', e);
+    }
+    setPreviewChromeState('brand');
+    return null;
+  };
+
+  const handleOpenSitePreview = async () => {
+    setShowSitePreview(true);
+    await loadSiteChrome();
+  };
+
+  const buildPreviewDoc = (chrome: { headLinks?: string; headerHtml?: string; footerHtml?: string; siteTitle?: string } | null) => {
+    const title = editingItem.metaTitle || editingItem.title || 'Untitled';
+    const body = editingItem.bodyHtml || '<p style="color:#888">No content yet — run Auto-Write or add blocks first.</p>';
+    const brandName = brand?.name || 'Brand';
+    const today = new Date().toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+    const baseStyles = `body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;margin:0}.entry-content{line-height:1.75;color:#333}.entry-content h2{font-size:1.75rem;font-weight:700;margin:1.8em 0 .6em;color:#111}.entry-content h3{font-size:1.3rem;font-weight:600;margin:1.5em 0 .5em;color:#222}.entry-content p{margin:0 0 1.1em}.entry-content ol,.entry-content ul{margin:0 0 1.2em;padding-left:1.5em}.entry-content strong{color:#111}`;
+
+    if (chrome && chrome.headerHtml) {
+      return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>${title}</title>
+${chrome.headLinks || ''}
+<style>${baseStyles}.ast-container{max-width:1200px;margin:0 auto;padding:0 20px}.article-shell{max-width:820px;margin:0 auto;padding:40px 20px}</style>
+</head>
+<body class="wp-singular ast-desktop ast-plain-container ast-no-sidebar astra-theme">
+${chrome.headerHtml}
+<main id="main" class="site-main"><div class="ast-container"><div class="article-shell">
+<article class="post type-post status-publish entry">
+<header class="entry-header ast-no-thumbnail ast-header-without-markup">
+<h1 class="entry-title" style="font-size:2.2rem;font-weight:800;margin:0 0 .3em">${title}</h1>
+<div style="font-size:.85rem;color:#888;margin-bottom:1.6em">${today} · ${brandName}</div>
+</header>
+<div class="entry-content">${body}</div>
+</article>
+</div></div></main>
+${chrome.footerHtml}
+</body></html>`;
+    }
+
+    // Branded fallback chrome (live site unreachable)
+    return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>${title}</title>
+<style>${baseStyles}</style>
+</head>
+<body>
+<header style="background:${brand?.primaryColor || '#4f46e5'};color:#fff">
+<div style="max-width:1200px;margin:0 auto;padding:16px 20px;display:flex;justify-content:space-between;align-items:center;gap:16px">
+<div style="font-weight:800;font-size:1.15rem;letter-spacing:.2px">${brandName}</div>
+<nav style="display:flex;gap:18px;font-size:.9rem;flex-wrap:wrap">${['Home', 'Shop', 'Blog', 'About', 'Contact'].map((l) => `<span style="opacity:.9">${l}</span>`).join('')}</nav>
+</div>
+</header>
+<main style="max-width:820px;margin:0 auto;padding:40px 20px">
+<article>
+<h1 style="font-size:2.2rem;font-weight:800;margin:0 0 .3em;color:#111">${title}</h1>
+<div style="font-size:.85rem;color:#888;margin-bottom:1.6em">${today} · ${brandName}</div>
+<div class="entry-content">${body}</div>
+</article>
+</main>
+<footer style="background:#111;color:#aaa;margin-top:60px">
+<div style="max-width:1200px;margin:0 auto;padding:24px 20px;font-size:.85rem;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap">
+<span>© ${new Date().getFullYear()} ${brandName}</span>
+<span>${brand?.wpUrl || ''}</span>
+</div>
+</footer>
+</body></html>`;
+  };
+
+  const handleRunSeoAudit = async () => {
+    setIsAuditing(true);
+    try {
+      const res = await fetch('/api/ai/seo-audit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: editingItem.title,
+          primaryKeyword: editingItem.primaryKeyword,
+          secondaryKeywords: editingItem.secondaryKeywords,
+          bodyHtml: editingItem.bodyHtml || '',
+        }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(typeof data.error === 'string' ? data.error : JSON.stringify(data.error));
+      if (data.success && data.data) {
+        setSeoAudit(data.data);
+      }
+    } catch (e: any) {
+      console.error('Error running SEO audit:', e);
+      alert('SEO Audit Error: ' + e.message);
+    } finally {
+      setIsAuditing(false);
     }
   };
 
@@ -204,7 +328,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
           wpPostId: data.wpPostId,
           wpPreviewUrl: data.previewUrl,
           wpLiveUrl: data.link,
-          status: 'Published' as const,
+          status: (data.status || 'Published') as PipelineStatus,
           lastSyncedAt: new Date().toISOString(),
         };
         setEditingItem(updated);
@@ -217,7 +341,10 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
       setSyncStatusMsg(`Network error: ${err.message}`);
     } finally {
       setIsSyncingWp(false);
-      setTimeout(() => setSyncStatusMsg(null), 3000);
+      // Keep error messages visible; only auto-clear successes.
+      setTimeout(() => {
+        setSyncStatusMsg((msg) => (msg && msg.includes('Synced') ? null : msg));
+      }, 3000);
     }
   };
 
@@ -234,7 +361,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
           direction,
           brand,
           byokKeys,
-          applyHumanization: false
+          applyHumanization
         }),
       });
       const data = await res.json();
@@ -291,6 +418,13 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
             <span className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded tracking-wider ${editingItem.status === 'Published' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
               {editingItem.status.replace('_', ' ')}
             </span>
+            <span
+              title="Live word count of the article body"
+              className="text-[10px] font-bold px-2 py-0.5 rounded tracking-wider bg-slate-100 text-slate-500"
+            >
+              {wordCount.toLocaleString()} words
+              {editingItem.targetWordCount ? ` / ${editingItem.targetWordCount.toLocaleString()}` : ''}
+            </span>
           </div>
           <input
             type="text"
@@ -302,6 +436,28 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
         </div>
 
         <div className="flex items-center gap-3 w-full md:w-auto">
+          <button
+            onClick={handleOpenSitePreview}
+            className="flex-1 md:flex-none flex items-center justify-center gap-2 px-4 py-2.5 bg-white border border-slate-200 text-slate-700 rounded-xl text-sm font-semibold hover:bg-slate-50 transition shadow-sm"
+            title="Preview the article inside the site's layout"
+          >
+            <Eye className="w-4 h-4 text-slate-400" />
+            Preview
+          </button>
+
+          <label
+            title="Rewrites generated content to read as naturally human-written"
+            className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-slate-600 text-xs font-semibold cursor-pointer select-none hover:bg-slate-50 transition shadow-sm"
+          >
+            <input
+              type="checkbox"
+              checked={applyHumanization}
+              onChange={(e) => setApplyHumanization(e.target.checked)}
+              className="w-4 h-4 accent-emerald-600"
+            />
+            Humanise
+          </label>
+
           <button
             onClick={handleGenerateWithGemini}
             disabled={isGeneratingAi}
@@ -440,6 +596,12 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
 
           {editorTab === 'html' && (
             <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
+              <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-100 bg-slate-50/60">
+                <span className="text-xs font-semibold text-slate-500">HTML Editor</span>
+                <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${editingItem.targetWordCount && wordCount > 0 && Math.abs(wordCount - editingItem.targetWordCount) / editingItem.targetWordCount > 0.2 ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}`}>
+                  {wordCount.toLocaleString()} words{editingItem.targetWordCount ? ` · target ${editingItem.targetWordCount.toLocaleString()}` : ''}
+                </span>
+              </div>
               <ReactQuill 
                 theme="snow"
                 value={editingItem.bodyHtml || ''}
@@ -491,6 +653,83 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                     ))}
                   </select>
                 </div>
+              </div>
+
+              <div className="pt-4 border-t border-slate-100">
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5">Secondary Keywords <span className="font-normal text-slate-400">(comma separated)</span></label>
+                <input
+                  type="text"
+                  value={(editingItem.secondaryKeywords || []).join(', ')}
+                  onChange={(e) => setEditingItem({ ...editingItem, secondaryKeywords: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) })}
+                  placeholder="e.g. grain-free treats, puppy training snacks"
+                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 text-sm focus:outline-none focus:border-slate-400 bg-slate-50"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5">SEO Brief</label>
+                <textarea
+                  value={editingItem.seoBrief || ''}
+                  onChange={(e) => setEditingItem({ ...editingItem, seoBrief: e.target.value })}
+                  rows={3}
+                  placeholder="Target audience, search intent, and what the page should rank for..."
+                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 text-sm focus:outline-none focus:border-slate-400 bg-slate-50"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-4 pt-4 border-t border-slate-100">
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 mb-1.5">Target Word Count</label>
+                  <input
+                    type="number"
+                    min={300}
+                    max={3000}
+                    step={50}
+                    value={editingItem.targetWordCount || ''}
+                    onChange={(e) => setEditingItem({ ...editingItem, targetWordCount: e.target.value ? Number(e.target.value) : undefined })}
+                    placeholder="e.g. 900"
+                    className="w-full px-4 py-2.5 rounded-xl border border-slate-200 text-sm focus:outline-none focus:border-slate-400 bg-slate-50"
+                  />
+                  <p className="text-[11px] text-slate-400 mt-1">Generation aims within ±15% of this. Current: {wordCount.toLocaleString()} words.</p>
+                </div>
+              </div>
+
+              <div className="pt-4 border-t border-slate-100">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="font-bold text-slate-900 text-sm flex items-center gap-2">
+                    <BarChart2 className="w-4 h-4 text-slate-400" />
+                    SEO Score
+                  </h3>
+                  <button
+                    onClick={handleRunSeoAudit}
+                    disabled={isAuditing || !editingItem.bodyHtml}
+                    className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold transition disabled:opacity-50 flex items-center gap-2"
+                  >
+                    {isAuditing ? <RefreshCw className="w-3 h-3 animate-spin" /> : <BarChart2 className="w-3 h-3" />}
+                    {isAuditing ? 'Auditing...' : 'Run SEO Audit'}
+                  </button>
+                </div>
+                {seoAudit ? (
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-16 h-16 rounded-2xl flex items-center justify-center text-white font-bold text-lg ${seoAudit.score >= 80 ? 'bg-emerald-500' : seoAudit.score >= 60 ? 'bg-amber-500' : 'bg-red-500'}`}>
+                        {seoAudit.score}
+                      </div>
+                      <div className="space-y-1 text-sm">
+                        <p className="font-semibold text-slate-700">Readability: <span className="text-slate-500 font-normal">{seoAudit.readability}</span></p>
+                        <p className="font-semibold text-slate-700">Word count: <span className="text-slate-500 font-normal">{seoAudit.wordCount}</span></p>
+                        <p className="font-semibold text-slate-700">Keyword density: <span className="text-slate-500 font-normal">{seoAudit.keywordDensity}%</span></p>
+                      </div>
+                    </div>
+                    <div className="bg-slate-50 rounded-xl border border-slate-200 p-4 space-y-2">
+                      <p className="text-xs font-bold text-slate-400 uppercase tracking-wider">Suggested Improvements</p>
+                      {(seoAudit.suggestions || []).map((s, i) => (
+                        <p key={i} className="text-sm text-slate-700">• {s}</p>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-sm text-slate-400">Generate content first, then run an audit to check keyword density, readability and SEO health.</p>
+                )}
               </div>
             </div>
           )}
@@ -566,6 +805,49 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
           )}
         </div>
       </div>
+
+      {/* Site Layout Preview Modal */}
+      {showSitePreview && (
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex p-4 md:p-8">
+          <div className="bg-white rounded-2xl shadow-2xl flex-1 flex flex-col overflow-hidden">
+            <div className="p-4 border-b border-slate-100 flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-3">
+                <h3 className="font-bold text-slate-900">Article Preview</h3>
+                <span className="text-[10px] font-bold px-2 py-1 rounded-full bg-slate-100 text-slate-600 uppercase tracking-wider">
+                  {previewChromeState === 'site' ? 'Live site layout' : previewChromeState === 'loading' ? 'Loading site…' : 'Brand template'}
+                </span>
+                <span className="text-[10px] font-bold px-2 py-1 rounded-full bg-indigo-50 text-indigo-600 uppercase tracking-wider">
+                  Template: {editingItem.wpTemplate || 'default'}
+                </span>
+                <span className="text-[10px] font-bold px-2 py-1 rounded-full bg-slate-100 text-slate-600">
+                  {wordCount.toLocaleString()} words
+                </span>
+              </div>
+              <div className="flex gap-2">
+                {previewChromeState === 'brand' && (
+                  <button
+                    onClick={() => loadSiteChrome(true)}
+                    className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold transition"
+                    title="Re-fetch the live site's header/footer"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5 inline mr-1" />
+                    Use live site
+                  </button>
+                )}
+                <button onClick={() => setShowSitePreview(false)} className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-sm font-semibold transition">
+                  Close
+                </button>
+              </div>
+            </div>
+            <iframe
+              srcDoc={buildPreviewDoc(previewChrome)}
+              sandbox="allow-same-origin allow-scripts allow-popups"
+              className="flex-1 w-full bg-white"
+              title="Article preview"
+            />
+          </div>
+        </div>
+      )}
 
       {/* Preview Modal */}
       {showPreviewModal && editingItem.wpPreviewUrl && (

@@ -53,6 +53,7 @@ export interface ContentItem {
   primaryKeyword: string;
   secondaryKeywords: string[];
   seoBrief: string;
+  targetWordCount?: number;
   metaTitle?: string;
   metaDescription?: string;
   bodyHtml: string;

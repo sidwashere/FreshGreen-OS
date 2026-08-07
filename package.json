@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
-    "start": "node dist/server.cjs",
+    "dev:emulated": "VITE_USE_EMULATORS=true tsx server.ts",
+    "emulators": "firebase emulators:start --only auth,firestore",
+    "build": "vite build && esbuild server.ts --bundle --platform=node --format=esm --packages=external --sourcemap --outfile=dist/server.mjs",
+    "start": "node dist/server.mjs",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
   },
@@ -31,6 +33,7 @@
     "@types/node": "^22.14.0",
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.25.0",
+    "firebase-tools": "^15.26.0",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.23.9",
     "typescript": "~5.8.2",

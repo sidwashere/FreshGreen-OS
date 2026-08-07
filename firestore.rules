@@ -31,8 +31,8 @@ service cloud.firestore {
         && data.userId == request.auth.uid;
     }
 
-    match /settings/{docId} {
-      allow read, write: if isSignedIn();
+    match /settings/{userId} {
+      allow read, write: if isSignedIn() && request.auth.uid == userId;
     }
     match /users/{userId} {
       allow read, write: if isSignedIn() && request.auth.uid == userId;

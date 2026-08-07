@@ -132,10 +132,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
       let totalMedia = 0;
       Object.values(brandStats).forEach((stat: any) => {
         if (!stat.error) {
-          totalPosts += parseInt(stat.totalPosts || '0', 10);
-          totalPages += parseInt(stat.totalPages || '0', 10);
-          totalComments += parseInt(stat.totalComments || '0', 10);
-          totalMedia += parseInt(stat.totalMedia || '0', 10);
+          totalPosts += Number.isFinite(Number(stat.totalPosts)) ? Number(stat.totalPosts) : 0;
+          totalPages += Number.isFinite(Number(stat.totalPages)) ? Number(stat.totalPages) : 0;
+          totalComments += Number.isFinite(Number(stat.totalComments)) ? Number(stat.totalComments) : 0;
+          totalMedia += Number.isFinite(Number(stat.totalMedia)) ? Number(stat.totalMedia) : 0;
         }
       });
       return { totalPosts, totalPages, totalComments, totalMedia };
@@ -145,8 +145,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
         return { totalPosts: 0, totalPages: 0, totalComments: 0, totalMedia: 0 };
       }
       return {
-        totalPosts: parseInt(stat.totalPosts || '0', 10),
-        totalPages: parseInt(stat.totalPages || '0', 10),
+        totalPosts: Number.isFinite(Number(stat.totalPosts)) ? Number(stat.totalPosts) : 0,
+        totalPages: Number.isFinite(Number(stat.totalPages)) ? Number(stat.totalPages) : 0,
         totalComments: parseInt(stat.totalComments || '0', 10),
         totalMedia: parseInt(stat.totalMedia || '0', 10),
       };
@@ -377,7 +377,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
               {brands.map((brand, i) => {
                 const stat = brandStats[brand.id];
                 const isError = stat?.error;
-                const total = parseInt(stat?.totalPosts || '0', 10);
+                const total = Number.isFinite(Number(stat?.totalPosts)) ? Number(stat?.totalPosts) : 0;
                 // We'll calculate a percentage relative to a target of 100 posts for the progress bar
                 const percent = isError ? 0 : Math.min(100, Math.round((total / 100) * 100));
 

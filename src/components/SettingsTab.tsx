@@ -26,7 +26,7 @@ const ApiKeysTab: React.FC = () => {
   useEffect(() => {
     const loadKeys = async () => {
       try {
-        const docRef = doc(db, 'settings', 'global');
+        const docRef = doc(db, 'settings', auth.currentUser?.uid || 'global');
         const docSnap = await getDoc(docRef);
         if (docSnap.exists() && docSnap.data().apiKeys) {
           setKeys(docSnap.data().apiKeys);
@@ -55,7 +55,7 @@ const ApiKeysTab: React.FC = () => {
       localStorage.setItem('greenops_byok_keys', JSON.stringify(keys)); // keep local backup
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
-      await setDoc(doc(db, 'settings', 'global'), { apiKeys: keys }, { merge: true });
+      await setDoc(doc(db, 'settings', auth.currentUser?.uid || 'global'), { apiKeys: keys }, { merge: true });
     } catch (err) {
       console.debug('Saved keys locally but skipped cloud sync due to network or permissions.', err);
     }
