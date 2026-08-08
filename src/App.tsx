@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Navbar } from './components/Navbar';
 import { Sidebar } from './components/Sidebar';
 import { Dashboard } from './components/Dashboard';
@@ -8,8 +8,9 @@ import { NanoBananaStudioModal } from './components/NanoBananaStudioModal';
 import { WorkspaceHub } from './components/WorkspaceHub';
 import { SettingsTab } from './components/SettingsTab';
 import { INITIAL_BRANDS, INITIAL_CONTENT } from './data/initialData';
-import { Brand, ContentItem, PipelineStatus } from './types';
-import { initAuth, googleSignIn, db } from './lib/firebase';
+import { Brand, ContentItem, PipelineStatus, AppUser } from './types';
+import { initAuth, usernameSignIn, createUsernameUser, logout, db } from './lib/firebase';
+import { LoginScreen, LoginMode } from './components/LoginScreen';
 import { User } from 'firebase/auth';
 import { collection, query, where, onSnapshot, doc, setDoc, deleteDoc, getDoc } from 'firebase/firestore';
 
@@ -56,16 +57,76 @@ export default function App() {
 
   const [needsAuth, setNeedsAuth] = useState(true);
   const [user, setUser] = useState<User | null>(null);
+  const [appUser, setAppUser] = useState<AppUser | null>(null);
+  const [pendingApproval, setPendingApproval] = useState(false);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [authMode, setAuthMode] = useState<LoginMode>('signin');
+  const [isFirstRun, setIsFirstRun] = useState<boolean | null>(null);
+
+  // First-run detection: no admin exists yet → the first registration becomes admin
+  useEffect(() => {
+    let cancelled = false;
+    const checkBootstrap = async () => {
+      try {
+        const snap = await getDoc(doc(db, 'app_meta', 'bootstrap'));
+        if (!cancelled) setIsFirstRun(!snap.exists());
+      } catch {
+        if (!cancelled) setIsFirstRun(false); // can't check — assume initialized
+      }
+    };
+    checkBootstrap();
+    return () => { cancelled = true; };
+  }, [needsAuth]);
+
+  // Read the user's app_users profile and decide approved / pending / legacy
+  const checkApproval = async (u: User): Promise<AppUser | null> => {
+    const ref = doc(db, 'app_users', u.uid);
+    const snap = await getDoc(ref);
+    if (snap.exists()) {
+      const profile = { id: u.uid, ...snap.data() } as AppUser;
+      setAppUser(profile);
+      return profile;
+    }
+    // Legacy account (e.g. previously signed in with Google): no profile yet.
+    // Auto-create an approved member profile so existing users aren't locked out.
+    const isLegacy = !(u.email || '').endsWith('@greenops.local');
+    if (isLegacy) {
+      const profile: AppUser = {
+        id: u.uid,
+        username: (u.email || 'user').split('@')[0].replace(/[^a-zA-Z0-9._-]/g, '') || 'user',
+        role: 'member',
+        approved: true,
+        createdAt: new Date().toISOString(),
+        userId: u.uid,
+      };
+      await setDoc(ref, profile as any);
+      setAppUser(profile);
+      return profile;
+    }
+    setAppUser(null);
+    return null;
+  };
+
+  const handleAuthUser = async (authUser: User) => {
+    setUser(authUser);
+    setLoginError(null);
+    setPendingApproval(true);
+    setNeedsAuth(true);
+    const profile = await checkApproval(authUser);
+    if (profile && profile.approved) {
+      setPendingApproval(false);
+      setNeedsAuth(false);
+    }
+  };
 
   useEffect(() => {
     const unsubscribe = initAuth(
-      (authUser) => {
-        setUser(authUser);
-        setNeedsAuth(false);
-      },
+      (authUser) => { handleAuthUser(authUser); },
       () => {
         setUser(null);
+        setAppUser(null);
+        setPendingApproval(false);
         setNeedsAuth(true);
         setBrands([]);
         setItems([]);
@@ -73,6 +134,54 @@ export default function App() {
     );
     return () => unsubscribe();
   }, []);
+
+  const handleAuthSubmit = async (username: string, password: string) => {
+    setLoginError(null);
+    setIsLoggingIn(true);
+    try {
+      if (authMode === 'signin') {
+        // Triggers onAuthStateChanged → handleAuthUser → approval check
+        await usernameSignIn(username, password);
+      } else {
+        const { user: newUser } = await createUsernameUser(username, password);
+        const isAdmin = isFirstRun === true;
+        await setDoc(doc(db, 'app_users', newUser.uid), {
+          username: username.trim(),
+          role: isAdmin ? 'admin' : 'member',
+          approved: isAdmin,
+          createdAt: new Date().toISOString(),
+          userId: newUser.uid,
+        });
+        if (isAdmin) {
+          await setDoc(doc(db, 'app_meta', 'bootstrap'), {
+            initialized: true,
+            adminUid: newUser.uid,
+            at: new Date().toISOString(),
+          });
+        }
+        await handleAuthUser(newUser);
+      }
+    } catch (err: any) {
+      const code = err?.code || '';
+      if (code === 'auth/invalid-credential' || code === 'auth/user-not-found' || code === 'auth/wrong-password') {
+        setLoginError('Incorrect username or password.');
+      } else if (code === 'auth/email-already-in-use') {
+        setLoginError('That username is already taken — try signing in instead.');
+      } else if (code === 'auth/weak-password') {
+        setLoginError('Password too weak — use at least 6 characters.');
+      } else if (code === 'auth/too-many-requests') {
+        setLoginError('Too many attempts — wait a moment and try again.');
+      } else {
+        setLoginError(err?.message || 'Something went wrong. Please try again.');
+      }
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    await logout();
+  };
 
   useEffect(() => {
     if (!user) return;
@@ -89,13 +198,24 @@ export default function App() {
         if (!userDoc.exists() || !userDoc.data().isSeeded) {
           // Mark as seeded first to avoid race conditions
           await setDoc(userDocRef, { isSeeded: true }, { merge: true });
-          
+
+          // Brand/content docs are scoped to the user (prefix the seed id with
+          // the uid) so every account gets its own workspace copy — global ids
+          // would collide: a second user's seed would be a denied update of the
+          // first user's brand (ownership rules).
+          const scope = (id: string) => `${user.uid}_${id}`;
+          const scopedBrandIds = new Map<string, string>();
+
           for (const brand of INITIAL_BRANDS) {
-            await setDoc(doc(db, 'brands', brand.id), { ...brand, userId: user.uid });
+            const brandId = scope(brand.id);
+            scopedBrandIds.set(brand.id, brandId);
+            await setDoc(doc(db, 'brands', brandId), { ...brand, id: brandId, userId: user.uid });
           }
-          
+
           for (const item of INITIAL_CONTENT) {
-            await setDoc(doc(db, 'content_items', item.id), { ...item, userId: user.uid });
+            const itemId = scope(item.id);
+            const brandId = scopedBrandIds.get(item.brandId) || scope(item.brandId);
+            await setDoc(doc(db, 'content_items', itemId), { ...item, id: itemId, brandId, userId: user.uid });
           }
         }
         localStorage.setItem(storageKey, 'true');
@@ -128,21 +248,6 @@ export default function App() {
       unsubscribeItems();
     };
   }, [user]);
-
-  const handleLogin = async () => {
-    setIsLoggingIn(true);
-    try {
-      const result = await googleSignIn();
-      if (result) {
-        setUser(result.user);
-        setNeedsAuth(false);
-      }
-    } catch (err) {
-      console.error('Login failed:', err);
-    } finally {
-      setIsLoggingIn(false);
-    }
-  };
 
   // Brand Management Actions
   const handleSaveBrand = async (updatedBrand: Brand) => {
@@ -275,45 +380,83 @@ export default function App() {
     }
   };
 
-  // Find active item & active brand
-  const activeItem = items.find((i) => i.id === activeItemId) || items[0];
+  // Find active item & active brand.
+  // The editor is brand-scoped: it always shows content for the selected brand,
+  // so switching brands (navbar or elsewhere) switches the editor to that
+  // brand's own drafts instead of staying pinned to a foreign item.
+  const activeItem = useMemo(() => {
+    if (activeTab !== 'editor') {
+      return items.find((i) => i.id === activeItemId) || items[0] || null;
+    }
+    const open = items.find((i) => i.id === activeItemId);
+    if (open && open.brandId === selectedBrandId) return open;
+    const brandItems = items.filter((i) => i.brandId === selectedBrandId);
+    if (brandItems.length === 0) return null;
+    return [...brandItems].sort(
+      (a, b) => new Date(b.updatedAt || b.createdAt).getTime() - new Date(a.updatedAt || a.createdAt).getTime()
+    )[0];
+  }, [items, activeItemId, selectedBrandId, activeTab]);
   const activeBrand = brands.find((b) => b.id === selectedBrandId) || brands[0];
+
+  // Keep the editor's internal selection in sync with the selected brand:
+  // switching brand while inside the editor jumps to that brand's newest item.
+  useEffect(() => {
+    if (activeTab !== 'editor') return;
+    const open = items.find((i) => i.id === activeItemId);
+    if (open && open.brandId === selectedBrandId) return;
+    const brandItems = items.filter((i) => i.brandId === selectedBrandId);
+    if (brandItems.length === 0) return; // editor shows the brand empty state
+    const newest = [...brandItems].sort(
+      (a, b) => new Date(b.updatedAt || b.createdAt).getTime() - new Date(a.updatedAt || a.createdAt).getTime()
+    )[0];
+    setActiveItemId(newest.id);
+  }, [selectedBrandId, activeTab, items, activeItemId]);
 
   const plannedCount = items.filter((i) => i.status === 'Planned' || i.status === 'Researching').length;
   const draftCount = items.filter((i) => i.status === 'Draft_Ready' || i.status === 'Generating').length;
 
   if (needsAuth) {
-    return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center font-sans">
-        <div className="bg-white p-8 rounded-2xl shadow-sm border border-slate-200 max-w-sm w-full text-center space-y-6">
-          <div className="w-12 h-12 bg-emerald-500 rounded-xl mx-auto flex items-center justify-center shadow-sm">
-            <span className="text-white font-bold text-xl">G</span>
-          </div>
-          <div>
-            <h1 className="text-xl font-bold text-slate-900">Welcome to FreshGreenOps Studio</h1>
-            <p className="text-sm text-slate-500 mt-2">Please sign in with your Google account to access Workspace integrations.</p>
-          </div>
-          
-          <button 
-            onClick={handleLogin}
-            disabled={isLoggingIn}
-            className="w-full bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 font-medium py-2.5 px-4 rounded-lg flex items-center justify-center space-x-2 transition"
-          >
-            <svg version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" className="w-5 h-5">
-              <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"></path>
-              <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"></path>
-              <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"></path>
-              <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"></path>
-              <path fill="none" d="M0 0h48v48H0z"></path>
-            </svg>
-            <span>{isLoggingIn ? 'Signing in...' : 'Sign in with Google'}</span>
-          </button>
-          
-          <div className="text-[11px] text-slate-400 mt-4 leading-relaxed bg-slate-50 p-3 rounded-lg text-left">
-            <strong>Note:</strong> If the sign-in popup gets blocked or fails to open, please open this application in a <strong>New Tab</strong> using the button in the top right corner of the AI Studio preview window.
+    if (pendingApproval && appUser === null) {
+      // Signed in but no approved profile yet (fresh request or legacy name conflict)
+      return (
+        <div className="min-h-screen bg-slate-50 flex items-center justify-center font-sans p-4">
+          <div className="bg-white p-8 rounded-2xl shadow-sm border border-slate-200 max-w-sm w-full text-center space-y-5">
+            <div className="w-14 h-14 bg-amber-100 rounded-2xl mx-auto flex items-center justify-center">
+              <span className="text-amber-600 font-bold text-xl">⏳</span>
+            </div>
+            <div>
+              <h1 className="text-xl font-bold text-slate-900">Awaiting approval</h1>
+              <p className="text-sm text-slate-500 mt-2">
+                Your account is registered but hasn't been approved by an administrator yet.
+                Ask your admin to approve it in <strong>Settings → User Management</strong>, then reload.
+              </p>
+            </div>
+            <button
+              onClick={() => window.location.reload()}
+              className="w-full px-4 py-2.5 rounded-xl bg-slate-800 text-white font-semibold text-sm transition hover:bg-slate-700"
+            >
+              Check again
+            </button>
+            <button
+              onClick={handleSignOut}
+              className="w-full px-4 py-2.5 rounded-xl border border-slate-300 text-slate-600 font-semibold text-sm transition hover:bg-slate-50"
+            >
+              Sign out
+            </button>
           </div>
         </div>
-      </div>
+      );
+    }
+
+    return (
+      <LoginScreen
+        mode={authMode}
+        onModeChange={setAuthMode}
+        onSubmit={handleAuthSubmit}
+        error={loginError}
+        busy={isLoggingIn}
+        isFirstRun={isFirstRun === true}
+      />
     );
   }
 
@@ -365,6 +508,7 @@ export default function App() {
               }
             }}
             sidebarCollapsed={sidebarCollapsed}
+            currentUser={appUser}
           />
 
           {/* Workspace Content Area */}
@@ -381,14 +525,15 @@ export default function App() {
               />
             )}
 
-            {activeTab === 'editor' && activeItem && (
+            {activeTab === 'editor' && (
               <ZenEditor
                 item={activeItem}
-                brand={brands.find((b) => b.id === activeItem.brandId) || activeBrand}
+                brand={activeItem ? brands.find((b) => b.id === activeItem.brandId) || activeBrand : activeBrand}
                 onSaveItem={handleSaveItem}
                 onSyncToWP={async (item) => {
                   handleSaveItem(item);
                 }}
+                onCreateNewItem={handleCreateNewItem}
               />
             )}
 
@@ -412,6 +557,7 @@ export default function App() {
             <SettingsTab
               brands={brands}
               selectedBrandId={selectedBrandId}
+              currentUser={appUser}
             />
           )}
           </main>

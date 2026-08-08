@@ -37,6 +37,30 @@ service cloud.firestore {
     match /users/{userId} {
       allow read, write: if isSignedIn() && request.auth.uid == userId;
     }
+
+    // Username login (bypasses Google sign-in):
+    // - app_meta/bootstrap is publicly readable so the login screen can detect
+    //   first-run (no admin yet → first registration becomes admin).
+    // - app_users/{uid} holds username/role/approved; owners create their own
+    //   profile, any signed-in user can read, and admins manage approval/roles
+    //   from Settings → User Management.
+    function isAdmin() {
+      let caller = get(/databases/$(database)/documents/app_users/$(request.auth.uid));
+      return caller != null
+        && caller.data.role == 'admin'
+        && caller.data.approved == true;
+    }
+
+    match /app_meta/{docId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+    match /app_users/{userId} {
+      allow create: if isSignedIn() && request.auth.uid == userId && incoming().userId == request.auth.uid;
+      allow read: if isSignedIn();
+      allow update: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow delete: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+    }
     match /brands/{brandId} {
       allow get: if isSignedIn() && isValidId(brandId) && existing().userId == request.auth.uid;
       allow list: if isSignedIn() && existing().userId == request.auth.uid;

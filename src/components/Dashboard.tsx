@@ -17,11 +17,18 @@ import {
   Rocket,
   X,
   ArrowRight,
-  Image as ImageIcon
+  Image as ImageIcon,
+  Gauge,
+  TrendingUp,
+  Users,
+  Wifi
 } from 'lucide-react';
 import {
   LineChart,
   Line,
+  BarChart,
+  Bar,
+  Cell,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -41,10 +48,12 @@ interface WpStats {
   media: number | null;
   categories: number | null;
   tags: number | null;
+  users?: number | null;
 }
 
 interface WpOverview {
   stats?: WpStats;
+  siteInfo?: { name?: string; description?: string; url?: string; home?: string } | null;
   recentPosts?: any[];
   recentComments?: any[];
   wpRestMs?: number | null;
@@ -58,11 +67,22 @@ interface WpPerf {
   ttfbMs?: number | null;
   totalMs?: number | null;
   htmlBytes?: number | null;
+  transferKb?: number | null;
+  htmlKb?: number | null;
+  compressed?: boolean;
+  contentEncoding?: string | null;
+  savedPct?: number;
+  serverHeader?: string | null;
+  cacheControl?: string | null;
+  cdn?: string | null;
   scriptCount?: number;
   styleCount?: number;
   imgCount?: number;
   lazyImgCount?: number;
+  fontCount?: number;
   wpRestMs?: number | null;
+  analytics?: string[];
+  perfScore?: { score: number; grade: string } | null;
   measuredAt?: string;
 }
 
@@ -80,6 +100,33 @@ const timeAgo = (iso: string): string => {
 
 const postTitle = (p: any): string =>
   typeof p === 'string' ? p : p?.title?.rendered || p?.title || 'Untitled post';
+
+const decodeHtml = (s?: string): string =>
+  (s || '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&nbsp;/g, ' ');
+
+// Hover/focus tooltip explaining what a stat means. Styled bubble appears above
+// (or below) the wrapped element on hover and on keyboard focus. Use the native
+// `title` attribute instead inside overflow-hidden / scrollable containers,
+// where the bubble would be clipped.
+const Tip: React.FC<{ text: string; side?: 'top' | 'bottom'; className?: string; children: React.ReactNode }> = ({
+  text,
+  side = 'top',
+  className = '',
+  children,
+}) => (
+  <span className={`group relative inline-block ${className}`}>
+    {children}
+    <span
+      role="tooltip"
+      className={`pointer-events-none absolute left-1/2 -translate-x-1/2 z-50 w-max max-w-[280px] rounded-lg bg-slate-900 text-white text-[11px] font-medium leading-snug px-3 py-2 shadow-xl opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-150 ${
+        side === 'top' ? 'bottom-full mb-2' : 'top-full mt-2'
+      }`}
+    >
+      {text}
+      <span className={`absolute left-1/2 -translate-x-1/2 border-4 border-transparent ${side === 'top' ? 'top-full border-t-slate-900' : 'bottom-full border-b-slate-900'}`} />
+    </span>
+  </span>
+);
 
 interface DashboardProps {
   items: ContentItem[];
@@ -223,6 +270,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const mediaTotal = sumStat('media');
   const pagesTotal = sumStat('pages');
   const categoriesTotal = sumStat('categories');
+  const usersTotal = sumStat('users');
 
   const metricValue = (v: number | null) => (v === null ? '—' : v.toLocaleString());
 
@@ -379,6 +427,103 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   const kb = (bytes?: number | null) => (bytes == null ? '—' : `${(bytes / 1024).toFixed(1)} KB`);
 
+  // ---- Publishing cadence: real posts per month (last 12 months) ----
+  const postCadence = useMemo(() => {
+    const months: { key: string; label: string; posts: number }[] = [];
+    const now = new Date();
+    for (let i = 11; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      months.push({ key: `${d.getFullYear()}-${d.getMonth()}`, label: d.toLocaleDateString('en-GB', { month: 'short' }), posts: 0 });
+    }
+    brandList.forEach((b) => {
+      (overviews[b.id]?.recentPosts || []).forEach((p: any) => {
+        if (p.status !== 'publish') return;
+        const d = new Date(p.date);
+        if (isNaN(d.getTime())) return;
+        const m = months.find((mm) => mm.key === `${d.getFullYear()}-${d.getMonth()}`);
+        if (m) m.posts += 1;
+      });
+    });
+    return months;
+  }, [overviews, brandList]);
+  const cadenceHasData = postCadence.some((m) => m.posts > 0);
+  const cadenceTotal = postCadence.reduce((a, m) => a + m.posts, 0);
+
+  // ---- Traffic & engagement signals (server-measured, per brand) ----
+  const DAY30 = 30 * 24 * 3600 * 1000;
+  const DAY90 = 90 * 24 * 3600 * 1000;
+  const trafficSignals = useMemo(() => {
+    const now = Date.now();
+    return brandList.map((b) => {
+      const ov = overviews[b.id];
+      const p = perf[b.id];
+      const posts = ov?.stats?.posts ?? null;
+      const comments = ov?.stats?.comments ?? null;
+      const pending = ov?.stats?.commentsPending ?? null;
+      const recentComments = (ov?.recentComments || []).filter((c: any) => {
+        const t = new Date(c.date).getTime();
+        return !isNaN(t) && now - t <= DAY30;
+      }).length;
+      const recentPosts = (ov?.recentPosts || []).filter((pp: any) => {
+        const t = new Date(pp.date).getTime();
+        return pp.status === 'publish' && !isNaN(t) && now - t <= DAY90;
+      }).length;
+      const cadence = recentPosts > 0 ? +(recentPosts / 3).toFixed(1) : 0; // per month over ~90 days
+      const engagement = comments != null && posts != null && posts > 0
+        ? +(comments / posts).toFixed(2)
+        : null;
+      return {
+        brand: b,
+        posts,
+        comments,
+        pending,
+        recentComments,
+        cadence,
+        engagement,
+        users: ov?.stats?.users ?? null,
+        analytics: p?.analytics || [],
+        siteName: ov?.siteInfo?.name || '',
+        hasAuth: ov?.hasAuth,
+        error: ov?.error,
+      };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overviews, perf, brandList]);
+  const trafficTotals = useMemo(() => {
+    let comments = 0, pending = 0, recent = 0, posts = 0, cadence = 0, measured = 0;
+    trafficSignals.forEach((t) => {
+      if (t.comments != null) { comments += t.comments; measured += 1; }
+      if (t.pending != null) pending += t.pending;
+      recent += t.recentComments;
+      if (t.posts != null) posts += t.posts;
+      cadence += t.cadence;
+    });
+    const n = Math.max(1, trafficSignals.length);
+    return { comments, pending, recent, posts, cadence: +(cadence / n).toFixed(1) };
+  }, [trafficSignals]);
+
+  // ---- Cross-site speed summary ----
+  const perfSummary = useMemo(() => {
+    const vals = brandList
+      .map((b) => ({ b, ttfb: perf[b.id]?.ttfbMs ?? null, status: perf[b.id]?.httpStatus ?? null }))
+      .filter((v) => v.ttfb != null && typeof v.ttfb === 'number');
+    const avg = vals.length ? Math.round(vals.reduce((a, v) => a + (v.ttfb as number), 0) / vals.length) : null;
+    const best = vals.length ? vals.reduce((a, v) => ((v.ttfb as number) < (a.ttfb as number) ? v : a)) : null;
+    const slowest = vals.length ? vals.reduce((a, v) => ((v.ttfb as number) > (a.ttfb as number) ? v : a)) : null;
+    const live = brandList.filter((b) => perf[b.id]?.httpStatus === 200).length;
+    return { avg, best: best?.b, bestMs: best?.ttfb, slowest: slowest?.b, slowestMs: slowest?.ttfb, live, total: brandList.length };
+  }, [perf, brandList]);
+
+  const perfGradeColor = (grade?: string) =>
+    grade === 'A' ? 'text-emerald-600' : grade === 'B' ? 'text-green-600' : grade === 'C' ? 'text-amber-600' : 'text-red-600';
+  const perfGradeRing = (grade?: string) =>
+    grade === 'A' ? '#059669' : grade === 'B' ? '#16a34a' : grade === 'C' ? '#d97706' : '#dc2626';
+
+  const ANALYTICS_LABELS: Record<string, string> = {
+    ga4: 'GA4', gtm: 'GTM', ua: 'UA', meta: 'Meta Pixel', clarity: 'Clarity', hotjar: 'Hotjar',
+    plausible: 'Plausible', cfwa: 'CF Analytics', jetpack: 'Jetpack', bing: 'Bing UET', yandex: 'Yandex',
+  };
+
   return (
     <div className="p-4 md:p-8 max-w-[1600px] mx-auto min-h-full font-sans bg-slate-50 text-slate-900">
       
@@ -392,49 +537,56 @@ export const Dashboard: React.FC<DashboardProps> = ({
               placeholder="Search content..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
+              title="Filter the pipeline list below by title, keyword or any text in a post."
               className="w-full pl-9 pr-4 py-2.5 rounded-xl bg-slate-100 border-none text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-none text-slate-800 placeholder:text-slate-500"
             />
           </div>
-          <select
-            value={selectedBrandId}
-            onChange={(e) => onSelectBrand(e.target.value)}
-            className="px-4 py-2.5 rounded-xl bg-white border border-slate-200 text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-sm cursor-pointer"
-          >
-            <option value="all">All Brands Properties ({items.length})</option>
-            {brands.map((b) => (
-              <option key={b.id} value={b.id}>{b.name}</option>
-            ))}
-          </select>
+          <Tip text="Which site(s) the dashboard stats cover: all four properties at once, or a single brand's numbers." side="bottom">
+            <select
+              value={selectedBrandId}
+              onChange={(e) => onSelectBrand(e.target.value)}
+              className="px-4 py-2.5 rounded-xl bg-white border border-slate-200 text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-sm cursor-pointer"
+            >
+              <option value="all">All Brands Properties ({items.length})</option>
+              {brands.map((b) => (
+                <option key={b.id} value={b.id}>{b.name}</option>
+              ))}
+            </select>
+          </Tip>
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
-          <span className="hidden md:flex items-center gap-1.5 text-[11px] font-semibold text-slate-400">
+          <span className="hidden md:flex items-center gap-1.5 text-[11px] font-semibold text-slate-400" title="Live data indicator — the dashboard re-fetches every stat from each site's WordPress REST API every 60 seconds.">
             <span className="relative flex h-2 w-2">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
               <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
             </span>
             Live · auto-refresh 60s
           </span>
-          <button 
-            onClick={handleSyncData}
-            disabled={syncing}
-            className="flex items-center space-x-2 px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-50 transition shadow-sm disabled:opacity-70 disabled:cursor-wait"
-          >
-            <RefreshCcw className={`w-4 h-4 text-slate-400 ${syncing ? 'animate-spin' : ''}`} />
-            <span>{syncing ? 'Syncing...' : 'Sync Data'}</span>
-          </button>
-          <button
-            onClick={() => {
-              if (selectedBrandId !== 'all') setNewBrandId(selectedBrandId);
-              setShowCreateModal(true);
-            }}
-            disabled={brands.length === 0}
-            title={brands.length === 0 ? "Please create a brand first" : ""}
-            className="flex items-center space-x-2 px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-sm transition shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Create New Blog</span>
-          </button>
+          <Tip text="Re-fetch every statistic from each connected WordPress site right now (normally refreshes automatically every 60 seconds)." side="bottom">
+            <button 
+              onClick={handleSyncData}
+              disabled={syncing}
+              className="flex items-center space-x-2 px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-50 transition shadow-sm disabled:opacity-70 disabled:cursor-wait"
+            >
+              <RefreshCcw className={`w-4 h-4 text-slate-400 ${syncing ? 'animate-spin' : ''}`} />
+              <span>{syncing ? 'Syncing...' : 'Sync Data'}</span>
+            </button>
+          </Tip>
+          <Tip text="Start a new blog post or landing page in the editor for the selected brand." side="bottom">
+            <button
+              onClick={() => {
+                if (selectedBrandId !== 'all') setNewBrandId(selectedBrandId);
+                setShowCreateModal(true);
+              }}
+              disabled={brands.length === 0}
+              title={brands.length === 0 ? "Please create a brand first" : ""}
+              className="flex items-center space-x-2 px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-sm transition shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Create New Blog</span>
+            </button>
+          </Tip>
         </div>
       </div>
 
@@ -443,12 +595,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
         {[
           { label: 'Live Published Posts', value: metricValue(livePostsTotal), subtext: livePostsTotal === null ? 'Waiting for first sync' : 'Direct from WP REST API', icon: Activity, color: 'text-white', bg: 'bg-white/20', badge: 'Live', isPrimary: true, details: `Posts with status "publish" across ${brandList.length} site${brandList.length === 1 ? '' : 's'}. Fetched via the WP REST API — counts update every 60 seconds.` },
           { label: 'Drafts Awaiting', value: metricValue(draftTotal), subtext: draftTotal === null ? 'Needs WP auth' : 'On the live site', icon: FileText, color: 'text-blue-600', bg: 'bg-blue-50', badge: 'Live', details: 'Posts currently sitting as drafts on WordPress. Requires Application Password access to count — otherwise shown as "—".' },
-          { label: 'Total Comments', value: metricValue(commentsTotal), subtext: pendingComments ? `${pendingComments.toLocaleString()} awaiting moderation` : 'User engagement', icon: MessageSquare, color: 'text-emerald-600', bg: 'bg-emerald-50', badge: 'Live', details: 'Approved comments on published content. Pending/hold comments are tracked separately.' },
-          { label: 'Media Library Items', value: metricValue(mediaTotal), subtext: pagesTotal !== null ? `${pagesTotal.toLocaleString()} pages · ${categoriesTotal === null ? '—' : categoriesTotal.toLocaleString()} categories` : 'Images and assets', icon: ImageIcon, color: 'text-purple-600', bg: 'bg-purple-50', badge: 'Live', details: 'Attachments in the WordPress media library, plus live page and category counts.' }
+          { label: 'Total Comments', value: metricValue(commentsTotal), subtext: trafficTotals.recent > 0 ? `${trafficTotals.recent.toLocaleString()} new in last 30 days` : (pendingComments ? `${pendingComments.toLocaleString()} awaiting moderation` : 'User engagement'), icon: MessageSquare, color: 'text-emerald-600', bg: 'bg-emerald-50', badge: 'Live', details: `Approved comments on published content, plus live engagement signals: ${trafficTotals.recent.toLocaleString()} comments landed in the last 30 days and ${pendingComments === 0 ? 'none' : (pendingComments ?? '?')} are awaiting moderation across ${brandList.length} site${brandList.length === 1 ? '' : 's'}.` },
+          { label: 'Media Library Items', value: metricValue(mediaTotal), subtext: pagesTotal !== null ? `${pagesTotal.toLocaleString()} pages · ${categoriesTotal === null ? '—' : categoriesTotal.toLocaleString()} categories · ${usersTotal === null ? '—' : usersTotal.toLocaleString()} users` : 'Images and assets', icon: ImageIcon, color: 'text-purple-600', bg: 'bg-purple-50', badge: 'Live', details: 'Attachments in the WordPress media library, plus live page, category and user counts across the sites in scope.' }
         ].map((metric, idx) => (
           <div 
             key={idx} 
             onClick={() => setExpandedInsight(expandedInsight === idx ? null : idx)}
+            title={metric.details}
             className={`p-6 rounded-[24px] border cursor-pointer ${metric.isPrimary ? 'bg-[#185e46] border-[#134937] text-white shadow-lg shadow-[#185e46]/20' : 'bg-white border-slate-200/60 shadow-sm'} flex flex-col justify-between hover:shadow-md transition group relative overflow-hidden`}
           >
             <div className="flex items-center justify-between mb-4">
@@ -500,6 +653,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
               <button
                 key={stage.key}
                 onClick={() => setStageFilter(isActive ? 'all' : stage.key)}
+                title={`${count} post${count === 1 ? '' : 's'} currently in the "${stage.label}" stage of the workflow. Click to filter the list below (click again to clear).`}
                 className={`group relative flex items-center gap-3 p-4 rounded-2xl border text-left transition-all ${
                   isActive
                     ? `${stage.bg} ${stage.border} ring-2 ${stage.ring}`
@@ -524,7 +678,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
         {stageCounts.error > 0 && (
           <div className="mt-3 flex flex-wrap items-center justify-between gap-2 bg-red-50 border border-red-100 rounded-xl px-4 py-2.5">
-            <span className="text-xs font-bold text-red-700 flex items-center gap-2">
+            <span className="text-xs font-bold text-red-700 flex items-center gap-2" title="Items that failed during AI generation or WordPress sync — open them to see the error and retry.">
               <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
               {stageCounts.error} item{stageCounts.error > 1 ? 's' : ''} hit an error during sync or generation
             </span>
@@ -540,7 +694,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
       {/* Up Next: Continue where you left off */}
       {nextActionItem && stageFilter === 'all' && (
-        <div className="mb-6 bg-slate-900 text-white p-5 rounded-[24px] shadow-lg shadow-slate-900/10 flex flex-col sm:flex-row sm:items-center justify-between gap-4 border border-slate-800">
+        <div className="mb-6 bg-slate-900 text-white p-5 rounded-[24px] shadow-lg shadow-slate-900/10 flex flex-col sm:flex-row sm:items-center justify-between gap-4 border border-slate-800" title="The highest-priority item waiting for your attention — the oldest or most recently updated post that isn't finished yet. Click to jump straight into the editor.">
           <div className="flex items-start gap-4 min-w-0">
             <div className="w-10 h-10 rounded-xl bg-indigo-500/20 text-indigo-300 flex items-center justify-center shrink-0">
               <Sparkles className="w-5 h-5" />
@@ -579,6 +733,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                   <button
                     key={r}
                     onClick={() => setChartRange(r)}
+                    title={`Show publishing activity for the last ${r} days (posts published vs drafts edited, from each site's WP post dates).`}
                     className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${
                       chartRange === r ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'
                     }`}
@@ -610,6 +765,244 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 </div>
               )}
             </div>
+          </div>
+
+          {/* Real Publishing Cadence: posts per month (12 months) */}
+          <div className="bg-white p-6 rounded-[24px] border border-slate-200/60 shadow-sm">
+            <div className="flex items-center justify-between mb-2 flex-wrap gap-3">
+              <div>
+                <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                  <TrendingUp className="w-5 h-5 text-emerald-500" /> Publishing Cadence
+                </h2>
+                <p className="text-sm text-slate-500">
+                  Real posts published per month across {brandList.length} site{brandList.length === 1 ? '' : 's'}, straight from each site's WP post dates.
+                  <Tip text="Total posts published to WordPress in the last 12 months across the sites in scope. Each bar is one calendar month — grey months had no published posts.">
+                    <span className="text-xs font-bold text-slate-500 bg-slate-100 rounded-full px-2 py-0.5 ml-1 inline-flex">{cadenceTotal.toLocaleString()} posts in the last 12 months</span>
+                  </Tip>
+                </p>
+              </div>
+            </div>
+            <div className="h-52 w-full mt-4">
+              {cadenceHasData ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={postCadence} margin={{ top: 5, right: 10, bottom: 0, left: -20 }}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                    <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 11 }} dy={8} interval="preserveStartEnd" />
+                    <YAxis axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 11 }} allowDecimals={false} />
+                    <Tooltip cursor={{ fill: 'rgba(148,163,184,0.08)' }} contentStyle={{ borderRadius: '16px', border: '1px solid #e2e8f0', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }} />
+                    <Bar dataKey="posts" name="Posts published" radius={[6, 6, 0, 0]}>
+                      {postCadence.map((m, i) => (
+                        <Cell key={i} fill={m.posts > 0 ? '#10b981' : '#e2e8f0'} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="h-full flex flex-col items-center justify-center text-slate-400 border-2 border-dashed border-slate-200 rounded-[20px] bg-slate-50/50">
+                  <TrendingUp className="w-8 h-8 mb-2 text-slate-300" />
+                  <p className="text-sm font-medium text-slate-500">No published posts found in the last 12 months</p>
+                  <p className="text-xs text-slate-400 mt-1">Publish a post to WordPress and it will appear here.</p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Real Site Performance & Speed: server-measured, with A–F grade */}
+          <div className="bg-white p-6 rounded-[24px] border border-slate-200/60 shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
+              <div>
+                <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                  <Gauge className="w-5 h-5 text-indigo-500" /> Site Performance & Speed
+                </h2>
+                <p className="text-xs text-slate-500 mt-1">Real HTTP measurements of each homepage — response time, page weight, compression — with a server-measured A–F grade.</p>
+              </div>
+              <Tip text="Re-measure all sites in scope right now (TTFB, page weight, compression, analytics detection). Normally re-measured automatically every 10 minutes." side="bottom">
+                <button
+                  onClick={() => { setSyncingPerf(true); Promise.all(brandList.map((b) => fetchPerfFor(b, true))).finally(() => setSyncingPerf(false)); }}
+                  disabled={syncingPerf}
+                  className="p-2 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-50 transition disabled:opacity-60"
+                  title="Re-measure all sites now"
+                >
+                  <RefreshCcw className={`w-4 h-4 ${syncingPerf ? 'animate-spin' : ''}`} />
+                </button>
+              </Tip>
+            </div>
+
+            {/* Cross-site summary */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-5">
+              <Tip text="Average Time To First Byte across the sites in scope — how long the server takes to start sending the homepage. Under 600ms is good, over 1200ms is slow." className="w-full">
+                <div className="bg-slate-50 rounded-xl border border-slate-100 p-3">
+                  <div className={`text-xl font-extrabold ${perfSummary.avg != null ? ttfbTone(perfSummary.avg) : 'text-slate-400'}`}>{perfSummary.avg != null ? `${perfSummary.avg}ms` : '—'}</div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Avg TTFB</div>
+                </div>
+              </Tip>
+              <Tip text="The site with the fastest homepage response in the current measurement round — lowest Time To First Byte." className="w-full">
+                <div className="bg-slate-50 rounded-xl border border-slate-100 p-3">
+                  <div className="text-xl font-extrabold text-emerald-600 truncate">{perfSummary.best ? `${perfSummary.bestMs}ms` : '—'}</div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 truncate">Fastest · {perfSummary.best?.name || '—'}</div>
+                </div>
+              </Tip>
+              <Tip text="The site with the slowest homepage response in the current measurement round — highest Time To First Byte." className="w-full">
+                <div className="bg-slate-50 rounded-xl border border-slate-100 p-3">
+                  <div className="text-xl font-extrabold text-red-600 truncate">{perfSummary.slowest ? `${perfSummary.slowestMs}ms` : '—'}</div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 truncate">Slowest · {perfSummary.slowest?.name || '—'}</div>
+                </div>
+              </Tip>
+              <Tip text="How many of the sites in scope responded successfully to the last performance measurement, out of the total." className="w-full">
+                <div className="bg-slate-50 rounded-xl border border-slate-100 p-3">
+                  <div className="text-xl font-extrabold text-slate-900">{perfSummary.live}<span className="text-sm text-slate-400 font-bold">/{perfSummary.total}</span></div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Sites live</div>
+                </div>
+              </Tip>
+            </div>
+
+            <div className="space-y-5">
+              {brandList.map((brand) => {
+                const p = perf[brand.id];
+                const ov = overviews[brand.id];
+                const score = p?.perfScore;
+                const ttfb = p?.ttfbMs;
+                const posts = ov?.stats?.posts;
+                const ttfbPct = ttfb != null ? Math.min(100, Math.round((ttfb / 2000) * 100)) : 0;
+                const weightPct = p?.htmlKb != null ? Math.min(100, Math.round((p.htmlKb / 1200) * 100)) : 0;
+                const R = 26;
+                const CIRC = 2 * Math.PI * R;
+                const cacheOff = p?.cacheControl != null && /no-cache|no-store|max-age=0/i.test(p.cacheControl);
+                return (
+                  <div key={brand.id} className="bg-slate-50 rounded-2xl border border-slate-200/60 p-4">
+                    <div className="flex items-center justify-between gap-2 mb-3">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div
+                          className="w-8 h-8 rounded-[10px] flex items-center justify-center font-bold text-[10px] text-white shadow-sm shrink-0"
+                          style={{ backgroundColor: brand.primaryColor || '#185e46' }}
+                        >
+                          {brand.name.substring(0, 2).toUpperCase()}
+                        </div>
+                        <div className="min-w-0">
+                          <div className="font-bold text-slate-900 text-sm leading-tight truncate">{brand.name}</div>
+                          <a href={brand.wpUrl} target="_blank" rel="noreferrer" className="text-[10px] text-slate-400 font-medium truncate block hover:text-indigo-600 transition">
+                            {brand.wpUrl.replace(/^https?:\/\//, '')}
+                          </a>
+                        </div>
+                      </div>
+                      {p?.httpStatus === 200 ? (
+                        <span title="The homepage responded successfully (HTTP 200) to the last performance measurement." className="flex items-center gap-1.5 text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-100 px-2 py-1 rounded-full shrink-0">
+                          <span className="relative flex h-1.5 w-1.5">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                            <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+                          </span>
+                          LIVE
+                        </span>
+                      ) : p?.httpStatus ? (
+                        <span title={`The site responded, but with HTTP status ${p.httpStatus} instead of the expected 200.`} className="text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-100 px-2 py-1 rounded-full shrink-0">HTTP {p.httpStatus}</span>
+                      ) : p ? (
+                        <span title="The site could not be reached during the last measurement — DNS, TLS or connection failure. This is usually an external hosting/DNS problem." className="text-[10px] font-bold text-red-700 bg-red-50 border border-red-100 px-2 py-1 rounded-full shrink-0">UNREACHABLE</span>
+                      ) : (
+                        <span title="Waiting for the first performance measurement — this badge appears while the server is fetching the homepage." className="text-[10px] font-bold text-slate-500 bg-slate-100 border border-slate-200 px-2 py-1 rounded-full shrink-0">MEASURING…</span>
+                      )}
+                    </div>
+
+                    <div className="flex flex-col md:flex-row gap-4">
+                      {/* A–F score ring */}
+                      <Tip text="Overall performance grade for this homepage, from the server-measured readings (TTFB, page weight, compression, asset count). A = fast & light, F = slow or heavy. Heuristic, not a formal audit." className="shrink-0">
+                        <div className="flex items-center gap-3 md:flex-col md:items-center justify-center shrink-0">
+                        {score ? (
+                          <div className="relative w-16 h-16">
+                            <svg viewBox="0 0 64 64" className="w-16 h-16 -rotate-90">
+                              <circle cx="32" cy="32" r={R} fill="none" stroke="#e2e8f0" strokeWidth="6" />
+                              <circle
+                                cx="32" cy="32" r={R} fill="none"
+                                stroke={perfGradeRing(score.grade)} strokeWidth="6" strokeLinecap="round"
+                                strokeDasharray={CIRC} strokeDashoffset={CIRC * (1 - score.score / 100)}
+                              />
+                            </svg>
+                            <div className="absolute inset-0 flex flex-col items-center justify-center">
+                              <span className={`text-lg font-extrabold leading-none ${perfGradeColor(score.grade)}`}>{score.grade}</span>
+                              <span className="text-[8px] font-bold text-slate-400">{score.score}/100</span>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="w-16 h-16 rounded-full bg-slate-200/60 flex items-center justify-center text-[10px] font-bold text-slate-400">—</div>
+                        )}
+                        <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 text-center">Score</span>
+                        </div>
+                      </Tip>
+
+                      {/* Metric grid + target bars */}
+                      <div className="flex-1 min-w-0">
+                        <div className="grid grid-cols-4 gap-2 text-center">
+                          {[
+                            { label: 'TTFB', value: ttfb != null ? `${ttfb}ms` : '—', cls: ttfbTone(ttfb), tip: 'Time To First Byte — how long the server takes to start sending the homepage. Under 600ms is good, over 1200ms is slow.' },
+                            { label: 'WP API', value: p?.wpRestMs != null ? `${p.wpRestMs}ms` : '—', cls: p?.wpRestMs != null ? (p.wpRestMs < 1200 ? 'text-emerald-600' : 'text-amber-600') : 'text-slate-400', tip: 'How long the WordPress REST API took to answer the server\'s stats request — a proxy for how responsive the admin/CMS is, separate from the public homepage.' },
+                            { label: 'Page', value: kb(p?.htmlBytes), cls: 'text-slate-700', tip: 'Size of the homepage HTML document the server downloaded (before compression). The transfer bar below shows what a visitor actually downloads.' },
+                            { label: 'Posts', value: posts != null ? posts.toLocaleString() : '—', cls: 'text-slate-700', tip: 'Number of published posts on this site, straight from its WP REST API.' },
+                          ].map((m) => (
+                            <div key={m.label} title={m.tip} className="bg-white rounded-xl border border-slate-100 py-2 px-1 cursor-help">
+                              <div className={`text-sm font-extrabold ${m.cls}`}>{m.value}</div>
+                              <div className="text-[9px] font-bold uppercase tracking-wider text-slate-400 mt-0.5">{m.label}</div>
+                            </div>
+                          ))}
+                        </div>
+
+                        <div className="mt-3 space-y-2.5">
+                          <div>
+                            <div className="flex justify-between text-[10px] font-semibold mb-1">
+                              <span className="text-slate-500">Server response (TTFB)</span>
+                              <span title="Target: under 600ms. Green = under target, amber = 600–1200ms, red = over 1200ms." className={ttfbTone(ttfb)}>{ttfb != null ? `${ttfb}ms` : '—'}<span className="text-slate-400 font-normal"> / 600ms target</span></span>
+                            </div>
+                            <div className="h-2 rounded-full bg-slate-200/80 overflow-hidden">
+                              <div
+                                className={`h-full rounded-full transition-all ${ttfb != null ? (ttfb < 600 ? 'bg-emerald-500' : ttfb < 1200 ? 'bg-amber-500' : 'bg-red-500') : 'bg-slate-200'}`}
+                                style={{ width: `${ttfbPct}%` }}
+                              />
+                            </div>
+                          </div>
+                          <div>
+                            <div className="flex justify-between text-[10px] font-semibold mb-1">
+                              <span className="text-slate-500">Page weight</span>
+                              <span title="Full HTML size vs what a visitor downloads after gzip/br compression — the % is the bandwidth saved." className="text-slate-700">
+                                {p?.htmlKb != null ? `${p.htmlKb} KB` : '—'}
+                                {p?.transferKb != null ? ` · ${p.transferKb} KB transfer` : ''}
+                                {p?.savedPct ? ` · −${p.savedPct}% ${p.contentEncoding || 'gzip'}` : ''}
+                              </span>
+                            </div>
+                            <div className="h-2 rounded-full bg-slate-200/80 overflow-hidden">
+                              <div className="h-full rounded-full bg-indigo-500 transition-all" style={{ width: `${weightPct}%` }} />
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Infrastructure + tracking chips */}
+                    <div className="mt-3 flex flex-wrap items-center gap-1.5" title="Hosting/CDN and tracking stack detected in the homepage's HTTP headers and HTML: CDN provider, web server, compression, page caching, analytics scripts, and how many scripts/styles/images/fonts the page loads.">
+                      {p?.cdn && <span className="text-[9px] font-bold text-slate-600 bg-white border border-slate-200 px-2 py-0.5 rounded-full">☁ {p.cdn}</span>}
+                      {p?.serverHeader && <span className="text-[9px] font-bold text-slate-600 bg-white border border-slate-200 px-2 py-0.5 rounded-full">Server · {p.serverHeader}</span>}
+                      {p?.compressed && <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-100 px-2 py-0.5 rounded-full">Compression · −{p.savedPct}%</span>}
+                      {p?.cacheControl != null && (
+                        <span className={`text-[9px] font-bold px-2 py-0.5 rounded-full border ${cacheOff ? 'text-amber-700 bg-amber-50 border-amber-100' : 'text-emerald-700 bg-emerald-50 border-emerald-100'}`} title={cacheOff ? 'The homepage sent cache-disabling headers — every visit hits the server fresh. Consider enabling page caching.' : 'The homepage serves cache-friendly headers, so repeat visitors load it faster.'}>
+                          {cacheOff ? 'Cache · off' : 'Cache · on'}
+                        </span>
+                      )}
+                      {p?.analytics?.length ? (
+                        <span className="text-[9px] font-bold text-indigo-700 bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded-full" title="Analytics/tracking systems detected in the homepage HTML — e.g. GA4, GTM, Meta Pixel. These are the tools the site itself uses to measure traffic.">
+                          Tracking · {p.analytics.map((a) => ANALYTICS_LABELS[a] || a).join(', ')}
+                        </span>
+                      ) : p ? (
+                        <span className="text-[9px] font-bold text-slate-500 bg-white border border-slate-200 px-2 py-0.5 rounded-full" title="No known analytics or tracking scripts were found in the homepage HTML — visitor traffic isn't being measured by any tool the dashboard can detect.">No analytics detected</span>
+                      ) : null}
+                      <span className="ml-auto text-[10px] text-slate-400 font-medium" title="Number of external scripts, stylesheets, images and fonts the homepage loads. Lots of scripts make a page slower — image lazy-loading (shown in brackets) is good.">
+                        {p?.scriptCount != null ? `${p.scriptCount} scripts · ${p.styleCount} styles · ${p.imgCount} imgs (${p.lazyImgCount} lazy) · ${p.fontCount} fonts` : ''}
+                      </span>
+                    </div>
+                    <div className="mt-1.5 text-right text-[10px] text-slate-400" title="When the last performance measurement was taken. Measurements are cached for 10 minutes to avoid hammering the live sites.">{p?.measuredAt ? `Measured ${timeAgo(p.measuredAt)}` : ''}</div>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="mt-4 text-[10px] text-slate-400 leading-relaxed">
+              Measured server-side with a real HTTP fetch of each homepage (TTFB, transfer vs HTML weight, compression, asset counts) — no third-party APIs. The A–F grade is a heuristic from those readings. Re-measures every 10 minutes.
+            </p>
           </div>
 
           {/* Structured Card Grid */}
@@ -660,7 +1053,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 {filteredItems.slice(0, 6).map(item => {
                   const brand = brands.find(b => b.id === item.brandId);
                   return (
-                    <div key={item.id} className="p-4 rounded-[16px] border border-slate-100 hover:border-indigo-200 hover:shadow-md transition bg-slate-50/50 hover:bg-white group cursor-pointer" onClick={() => onEditItem(item)}>
+                    <div key={item.id} className="p-4 rounded-[16px] border border-slate-100 hover:border-indigo-200 hover:shadow-md transition bg-slate-50/50 hover:bg-white group cursor-pointer" onClick={() => onEditItem(item)} title={`"${item.title}" — currently in the ${item.status.replace('_', ' ')} stage of the workflow${item.primaryKeyword ? `, targeting keyword "${item.primaryKeyword}"` : ''}. Click to open in the editor.`}>
                       <div className="flex items-center justify-between mb-2 text-xs">
                         <span 
                           className="px-2 py-1 rounded-md font-bold uppercase tracking-wider text-[10px]"
@@ -722,83 +1115,103 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
         {/* Right Column: Multi-Brand Health & Activity Logs */}
         <div className="space-y-6">
-          {/* Real Site Performance */}
+          {/* Real Traffic & Engagement: server-measured audience signals */}
           <div className="bg-white p-6 rounded-[24px] border border-slate-200/60 shadow-sm">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-lg font-bold text-slate-900">Site Performance</h2>
-              <button
-                onClick={() => { setSyncingPerf(true); Promise.all(brandList.map((b) => fetchPerfFor(b, true))).finally(() => setSyncingPerf(false)); }}
-                disabled={syncingPerf}
-                className="p-2 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-50 transition disabled:opacity-60"
-                title="Re-measure all sites now"
-              >
-                <RefreshCcw className={`w-4 h-4 ${syncingPerf ? 'animate-spin' : ''}`} />
-              </button>
+            <div className="flex items-center justify-between mb-5">
+              <div>
+                <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                  <Users className="w-5 h-5 text-sky-500" /> Traffic & Engagement
+                </h2>
+                <p className="text-xs text-slate-500 mt-1">Server-measured audience signals pulled from each site.</p>
+              </div>
+              <span className="text-[10px] font-bold text-slate-400 bg-slate-100 px-2 py-1 rounded-full border border-slate-200">LIVE signals</span>
             </div>
-            <div className="space-y-5">
-              {brandList.map((brand) => {
-                const p = perf[brand.id];
-                const ov = overviews[brand.id];
-                const ok = p && p.success !== false;
-                const posts = ov?.stats?.posts;
-                return (
-                  <div key={brand.id} className="bg-slate-50 rounded-2xl border border-slate-200/60 p-4">
-                    <div className="flex items-center justify-between gap-2 mb-3">
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <div
-                          className="w-8 h-8 rounded-[10px] flex items-center justify-center font-bold text-[10px] text-white shadow-sm shrink-0"
-                          style={{ backgroundColor: brand.primaryColor || '#185e46' }}
-                        >
-                          {brand.name.substring(0, 2).toUpperCase()}
-                        </div>
-                        <div className="min-w-0">
-                          <div className="font-bold text-slate-900 text-sm leading-tight truncate">{brand.name}</div>
-                          <a href={brand.wpUrl} target="_blank" rel="noreferrer" className="text-[10px] text-slate-400 font-medium truncate block hover:text-indigo-600 transition">
-                            {brand.wpUrl.replace(/^https?:\/\//, '')}
-                          </a>
-                        </div>
+
+            {/* Aggregated signals */}
+            <div className="grid grid-cols-2 gap-2 mb-4">
+              <Tip text="Total approved comments across all sites in scope, straight from each site's WP REST API." className="w-full">
+                <div className="bg-slate-50 rounded-xl border border-slate-100 p-3">
+                  <div className="text-xl font-extrabold text-slate-900">{trafficTotals.comments != null ? trafficTotals.comments.toLocaleString() : '—'}</div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Total comments</div>
+                </div>
+              </Tip>
+              <Tip text="Comments received in the last 30 days across the sites in scope — a fresh sign of audience engagement." className="w-full">
+                <div className="bg-slate-50 rounded-xl border border-slate-100 p-3">
+                  <div className="text-xl font-extrabold text-sky-600">{trafficTotals.recent.toLocaleString()}</div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">New comments · 30d</div>
+                </div>
+              </Tip>
+              <Tip text="Comments awaiting moderation (the WP hold queue). Needs a working Application Password — otherwise shown as a dash." className="w-full">
+                <div className="bg-slate-50 rounded-xl border border-slate-100 p-3">
+                  <div className="text-xl font-extrabold text-amber-600">{trafficTotals.pending != null ? trafficTotals.pending.toLocaleString() : '—'}</div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">In moderation queue</div>
+                </div>
+              </Tip>
+              <Tip text="Average publishing rate across the sites in scope — published posts over roughly the last 90 days, expressed per month. A steady 1+ posts/month keeps a blog growing." className="w-full">
+                <div className="bg-slate-50 rounded-xl border border-slate-100 p-3">
+                  <div className="text-xl font-extrabold text-emerald-600">{trafficTotals.cadence}</div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Posts / month · avg</div>
+                </div>
+              </Tip>
+            </div>
+
+            <div className="space-y-3 max-h-[560px] overflow-y-auto pr-1">
+              {trafficSignals.map((t) => (
+                <div key={t.brand.id} className="bg-slate-50 rounded-2xl border border-slate-200/60 p-3.5" title={`Engagement for ${t.siteName ? decodeHtml(t.siteName) : t.brand.name} (${t.brand.wpUrl}): approved comments total, comments in the last 30 days, comments in the moderation queue, and publishing rate (posts/month over ~90 days). Measured server-side from the site's WP REST API — true visitor counts need GA4 or Jetpack connected.`}>
+                  <div className="flex items-center justify-between gap-2 mb-2.5">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <div
+                        className="w-7 h-7 rounded-[9px] flex items-center justify-center font-bold text-[9px] text-white shadow-sm shrink-0"
+                        style={{ backgroundColor: t.brand.primaryColor || '#185e46' }}
+                      >
+                        {t.brand.name.substring(0, 2).toUpperCase()}
                       </div>
-                      {p?.httpStatus === 200 ? (
-                        <span className="flex items-center gap-1.5 text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-100 px-2 py-1 rounded-full shrink-0">
-                          <span className="relative flex h-1.5 w-1.5">
-                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                            <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
-                          </span>
-                          LIVE
-                        </span>
-                      ) : p?.httpStatus ? (
-                        <span className="text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-100 px-2 py-1 rounded-full shrink-0">HTTP {p.httpStatus}</span>
-                      ) : p ? (
-                        <span className="text-[10px] font-bold text-red-700 bg-red-50 border border-red-100 px-2 py-1 rounded-full shrink-0">UNREACHABLE</span>
-                      ) : (
-                        <span className="text-[10px] font-bold text-slate-500 bg-slate-100 border border-slate-200 px-2 py-1 rounded-full shrink-0">MEASURING…</span>
-                      )}
-                    </div>
-                    <div className="grid grid-cols-4 gap-2 text-center">
-                      {[
-                        { label: 'TTFB', value: p?.ttfbMs != null ? `${p.ttfbMs}ms` : '—', cls: ttfbTone(p?.ttfbMs) },
-                        { label: 'WP API', value: p?.wpRestMs != null ? `${p.wpRestMs}ms` : '—', cls: p?.wpRestMs != null ? (p.wpRestMs < 1200 ? 'text-emerald-600' : 'text-amber-600') : 'text-slate-400' },
-                        { label: 'Page', value: kb(p?.htmlBytes), cls: 'text-slate-700' },
-                        { label: 'Posts', value: posts != null ? posts.toLocaleString() : '—', cls: 'text-slate-700' },
-                      ].map((m) => (
-                        <div key={m.label} className="bg-white rounded-xl border border-slate-100 py-2 px-1">
-                          <div className={`text-sm font-extrabold ${m.cls}`}>{m.value}</div>
-                          <div className="text-[9px] font-bold uppercase tracking-wider text-slate-400 mt-0.5">{m.label}</div>
+                      <div className="min-w-0">
+                        <div className="font-bold text-slate-900 text-xs leading-tight truncate">
+                          {t.siteName ? decodeHtml(t.siteName) : t.brand.name}
                         </div>
-                      ))}
+                        <div className="text-[9px] text-slate-400 truncate">{t.brand.wpUrl.replace(/^https?:\/\//, '')}</div>
+                      </div>
                     </div>
-                    <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-400 font-medium">
-                      <span>
-                        {p?.scriptCount != null ? `${p.scriptCount} scripts · ${p.styleCount} styles · ${p.imgCount} imgs (${p.lazyImgCount} lazy)` : 'No measurements yet'}
-                      </span>
-                      <span>{p?.measuredAt ? timeAgo(p.measuredAt) : '—'}</span>
-                    </div>
+                    {t.error ? (
+                      <span className="text-[9px] font-bold text-red-600 bg-red-50 border border-red-100 px-2 py-0.5 rounded-full shrink-0" title="The site couldn't be reached, so no engagement signals are available.">UNREACHABLE</span>
+                    ) : t.comments == null && t.posts == null ? (
+                      <span className="text-[9px] font-bold text-slate-400 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-full shrink-0" title="No stats could be read from this site yet (still syncing, or the WP REST API didn't answer).">NO DATA</span>
+                    ) : null}
                   </div>
-                );
-              })}
+                  <div className="grid grid-cols-4 gap-2 text-center">
+                    {[
+                      { label: 'Comments', value: t.comments != null ? t.comments.toLocaleString() : '—', cls: 'text-slate-900', tip: 'Total approved comments on this site.' },
+                      { label: 'Last 30d', value: t.recentComments.toLocaleString(), cls: 'text-sky-600', tip: 'Comments received in the last 30 days.' },
+                      { label: 'Mod queue', value: t.pending != null ? t.pending.toLocaleString() : '—', cls: 'text-amber-600', tip: 'Comments awaiting moderation. "—" means the moderation queue couldn\'t be read (needs a working Application Password).' },
+                      { label: 'Posts/mo', value: t.cadence ? `${t.cadence}` : '—', cls: 'text-emerald-600', tip: 'Published posts per month over roughly the last 90 days. "—" means no recent publishing activity to measure.' },
+                    ].map((m) => (
+                      <div key={m.label} title={m.tip} className="bg-white rounded-xl border border-slate-100 py-1.5 px-1 cursor-help">
+                        <div className={`text-sm font-extrabold ${m.cls}`}>{m.value}</div>
+                        <div className="text-[8px] font-bold uppercase tracking-wider text-slate-400 mt-0.5">{m.label}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5" title="Extra signals: engagement ratio (comments per published post), registered WordPress users, and the analytics/tracking stack the site runs.">
+                    {t.engagement != null && (
+                      <span className="text-[9px] font-bold text-slate-600 bg-white border border-slate-200 px-2 py-0.5 rounded-full">{t.engagement} comments / post</span>
+                    )}
+                    {t.users != null && (
+                      <span className="text-[9px] font-bold text-slate-600 bg-white border border-slate-200 px-2 py-0.5 rounded-full">{t.users.toLocaleString()} users</span>
+                    )}
+                    {t.analytics.length > 0 ? (
+                      <span className="text-[9px] font-bold text-indigo-700 bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded-full" title="Analytics tools this site already runs (detected in its homepage HTML) — the dashboard doesn't read their data, it just shows which systems are installed.">
+                        <Wifi className="w-2.5 h-2.5 inline mr-0.5" /> {t.analytics.map((a) => ANALYTICS_LABELS[a] || a).join(', ')}
+                      </span>
+                    ) : (
+                      <span className="text-[9px] font-bold text-slate-400 bg-white border border-slate-200 px-2 py-0.5 rounded-full" title="No known analytics or tracking scripts found on this site's homepage — visitor traffic isn't being measured.">No traffic tracking installed</span>
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
             <p className="mt-4 text-[10px] text-slate-400 leading-relaxed">
-              Measured server-side with a real HTTP fetch of each homepage (TTFB, payload size, asset counts) — no third-party APIs. Re-measures every 10 minutes.
+              These are engagement signals measured server-side from each site's WP REST API (comment counts, moderation queue, publishing cadence) and from the tracking scripts installed on its homepage. True visitor counts need GA4 or Jetpack connected — the Tracking chips show which system each site already uses.
             </p>
           </div>
 
@@ -819,7 +1232,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
             ) : (
               <div className="space-y-1 max-h-[480px] overflow-y-auto pr-1">
                 {activityFeed.map((e) => (
-                  <div key={e.id} className="flex items-start gap-3 p-2.5 rounded-xl hover:bg-slate-50 transition group">
+                  <div key={e.id} className="flex items-start gap-3 p-2.5 rounded-xl hover:bg-slate-50 transition group" title={e.kind === 'comment'
+                    ? `New comment by ${e.author} on "${e.title}" (${e.brandName}) — ${timeAgo(e.date)}.`
+                    : e.kind === 'published'
+                    ? `Post published to WordPress: "${e.title}" (${e.brandName}) — ${timeAgo(e.date)}.`
+                    : `Draft edited: "${e.title}" (${e.brandName}) — ${timeAgo(e.date)}.`}>
                     <div
                       className="w-8 h-8 rounded-[10px] flex items-center justify-center shrink-0"
                       style={{ backgroundColor: `${e.brandColor || '#185e46'}18`, color: e.brandColor || '#185e46' }}
@@ -853,7 +1270,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
           <div className="bg-white p-6 rounded-[24px] border border-slate-200/60 shadow-sm">
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-lg font-bold text-slate-900">Live WordPress Posts</h2>
-              <button className="text-slate-400 hover:text-slate-600">
+              <button className="text-slate-400 hover:text-slate-600" title="Recent posts pulled straight from each connected WordPress site. Click a post to import it into the editor.">
                 <Globe className="w-5 h-5" />
               </button>
             </div>
@@ -871,6 +1288,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                   <button 
                     key={`${post.brandId}-${post.id}`} 
                     onClick={() => onImportWPPost && onImportWPPost(post)}
+                    title={`"${post.title?.rendered || 'Untitled Post'}" — published ${new Date(post.date).toLocaleDateString()} on ${post.brandName}. Click to pull this post into the editor.`}
                     className="group block relative flex items-start gap-4 p-3 rounded-2xl hover:bg-slate-50 transition border border-transparent hover:border-slate-100 w-full text-left"
                   >
                     <div className="w-10 h-10 rounded-[12px] flex items-center justify-center font-bold text-xs text-white shadow-sm shrink-0"

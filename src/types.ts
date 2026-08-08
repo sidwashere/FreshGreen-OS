@@ -2,6 +2,16 @@ export type ContentType = 'post' | 'page';
 
 export type PipelineStatus = 'Planned' | 'Researching' | 'Generating' | 'Draft_Ready' | 'Published' | 'Error';
 
+/** Workspace user profile (username login — no Google account required). */
+export interface AppUser {
+  id: string; // Firebase auth UID
+  username: string;
+  role: 'admin' | 'member';
+  approved: boolean;
+  createdAt?: string;
+  userId: string;
+}
+
 export interface Brand {
   id: string;
   name: string;
@@ -42,6 +52,26 @@ export interface VisualBlock {
   accentColor?: string;
 }
 
+/** One recorded AI generation run (model attribution + history with timestamps). */
+export interface GenerationLogEntry {
+  at: string;            // ISO timestamp
+  action: string;        // e.g. 'Auto-Write', 'SEO Refine · fix-failures', 'Rewrite Block', 'Image Ideas'
+  provider: string;      // 'gemini' | 'openrouter' | 'custom'
+  model: string;         // e.g. 'gemini-3.5-flash', 'deepseek/deepseek-chat:free'
+  fallback?: boolean;    // true when the preferred provider was out of quota
+  words?: number;
+  durationMs?: number;
+  ok: boolean;
+  error?: string;
+}
+
+/** Runtime AI model preference — which provider/model runs every AI action. */
+export interface AiModelPref {
+  provider: 'gemini' | 'openrouter' | 'custom';
+  model: string;
+  autoFallback: boolean;
+}
+
 export interface ContentItem {
   id: string;
   brandId: string;
@@ -65,6 +95,7 @@ export interface ContentItem {
   wpPreviewUrl?: string;
   wpLiveUrl?: string;
   lastSyncedAt?: string;
+  generationLog?: GenerationLogEntry[];
   createdAt: string;
   updatedAt: string;
 }

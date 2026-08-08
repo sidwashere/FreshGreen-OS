@@ -1,4 +1,4 @@
-import { fetchGlobalKeys } from "../lib/keys";
+import { fetchGlobalKeys, fetchAiPref } from "../lib/keys";
 import React, { useState } from 'react';
 import { Brand } from '../types';
 import { Sparkles, Wand2, Image as ImageIcon, RefreshCw, Check, Copy } from 'lucide-react';
@@ -20,8 +20,11 @@ export const NanoBananaStudioModal: React.FC<NanoBananaStudioModalProps> = ({
   const [generatedPrompt, setGeneratedPrompt] = useState('');
   const [generatedImage, setGeneratedImage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isRefining, setIsRefining] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [modelProvider, setModelProvider] = useState('gemini');
+  const [aiPref] = useState(() => fetchAiPref());
 
   if (!currentBrand) {
     return (
@@ -34,10 +37,12 @@ export const NanoBananaStudioModal: React.FC<NanoBananaStudioModalProps> = ({
   const handleBuildPrompt = () => {
     const full = `${subject.trim()}, ${environment.trim()}, ${lighting.trim()}`;
     setGeneratedPrompt(full);
+    setError(null);
   };
 
   const handleGenerateImage = async () => {
     setIsLoading(true);
+    setError(null);
     const fullPrompt = generatedPrompt || `${subject}, ${environment}, ${lighting}`;
     const byokKeys = await fetchGlobalKeys();
 
@@ -49,20 +54,62 @@ export const NanoBananaStudioModal: React.FC<NanoBananaStudioModalProps> = ({
           prompt: fullPrompt, 
           aspectRatio: '16:9',
           modelProvider,
-          byokKeys
+          // The blog topic is prepended server-side so every render matches it,
+          // even if the prompt formula drifts off-topic.
+          topicContext: topic.trim()
+            ? `Blog article topic: "${topic.trim()}". Brand: ${currentBrand?.name || ''}. Editorial, photorealistic, warm and authentic — no text or logos.`
+            : '',
+          byokKeys,
+          modelPref: aiPref,
         }),
       });
       const data = await res.json();
       if (data.success && data.imageUrl) {
         setGeneratedImage(data.imageUrl);
       } else if (data.error) {
-        alert('Generation Error: ' + data.error);
+        setError('Generation Error: ' + data.error);
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error(e);
-      alert('Generation Failed. Check console for details.');
+      setError('Generation Failed: ' + (e?.message || 'Check console for details.'));
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  // AI refinement: rewrites the prompt so it stays on-topic and visual.
+  const handleRefinePrompt = async () => {
+    const fullPrompt = generatedPrompt || `${subject}, ${environment}, ${lighting}`;
+    if (!fullPrompt.trim()) {
+      setError('Build a prompt first, then refine it.');
+      return;
+    }
+    setIsRefining(true);
+    setError(null);
+    const byokKeys = await fetchGlobalKeys();
+    try {
+      const res = await fetch('/api/ai/refine-image-prompt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: fullPrompt,
+          title: topic.trim(),
+          brandName: currentBrand?.name || '',
+          voiceGuidelines: currentBrand?.voiceGuidelines || '',
+          byokKeys,
+          modelPref: aiPref,
+        }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      if (data.success && data.data?.prompt) {
+        setGeneratedPrompt(data.data.prompt);
+      }
+    } catch (e: any) {
+      console.error('Refine failed:', e);
+      setError('Refinement failed: ' + (e?.message || 'Please try again.'));
+    } finally {
+      setIsRefining(false);
     }
   };
 
@@ -113,6 +160,20 @@ export const NanoBananaStudioModal: React.FC<NanoBananaStudioModalProps> = ({
             </div>
 
             <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Blog Topic <span className="text-amber-600">· locked into every render</span>
+              </label>
+              <input
+                type="text"
+                value={topic}
+                onChange={(e) => setTopic(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm focus:ring-2 focus:ring-amber-500"
+                placeholder="e.g. Benefits of daily dog walking for senior pets"
+              />
+              <p className="text-[10px] text-slate-400 mt-1">The server prepends this topic to every image prompt, so renders always match the article.</p>
+            </div>
+
+            <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">1. Main Subject Token</label>
               <input
                 type="text"
@@ -145,21 +206,38 @@ export const NanoBananaStudioModal: React.FC<NanoBananaStudioModalProps> = ({
               />
             </div>
 
-            <div className="pt-2 flex gap-3">
+            <div className="pt-2 flex flex-wrap gap-3">
               <button
                 onClick={handleBuildPrompt}
-                className="flex-1 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs border border-slate-300 transition"
+                className="flex-1 min-w-[140px] py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs border border-slate-300 transition"
               >
                 Build Nano Formula String
               </button>
               <button
+                onClick={handleRefinePrompt}
+                disabled={isRefining || isLoading}
+                className="flex-1 min-w-[140px] py-2.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold text-xs border border-indigo-200 transition disabled:opacity-50 flex items-center justify-center gap-1.5"
+              >
+                {isRefining ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5" />}
+                {isRefining ? 'Refining...' : 'Refine with AI'}
+              </button>
+              <button
                 onClick={handleGenerateImage}
-                disabled={isLoading}
-                className="flex-1 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition shadow-sm disabled:opacity-50"
+                disabled={isLoading || isRefining}
+                className="flex-1 min-w-[140px] py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition shadow-sm disabled:opacity-50"
               >
                 {isLoading ? 'Rendering Image...' : '🎨 Render Image Now'}
               </button>
             </div>
+
+            {error && (
+              <div className="flex items-start justify-between gap-2 px-3 py-2.5 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs font-medium">
+                <span>{error}</span>
+                <button onClick={() => setError(null)} className="text-red-400 hover:text-red-600 shrink-0">
+                  ✕
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Generated Formula Box */}

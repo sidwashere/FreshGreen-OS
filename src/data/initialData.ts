@@ -5,7 +5,7 @@ export const INITIAL_BRANDS: Brand[] = [
     id: 'dtp-brand',
     name: "Daniel's Tasty Petfoods",
     slug: 'daniels-tasty-petfoods',
-    wpUrl: 'https://daniels-tasty-petfoods.com',
+    wpUrl: 'https://danielstastypetfoods.co.uk',
     wpUsername: 'admin_dtp',
     wpAppPassword: 'xxxx xxxx xxxx xxxx',
     voiceGuidelines: 'Warm, empathetic, pet-first, scientifically backed yet accessible. Emphasize natural ingredients, wholesome nutrition, and tail-wagging joy.',

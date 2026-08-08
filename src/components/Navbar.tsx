@@ -1,6 +1,6 @@
 import React from 'react';
-import { Brand } from '../types';
-import { Globe, ChevronDown, Plus, LogOut, Settings, Menu, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { Brand, AppUser } from '../types';
+import { Globe, ChevronDown, Plus, LogOut, Settings, Menu, PanelLeftClose, PanelLeftOpen, ShieldCheck } from 'lucide-react';
 import { logout } from '../lib/firebase';
 
 interface NavbarProps {
@@ -12,6 +12,7 @@ interface NavbarProps {
   activeTab: string;
   onToggleSidebar?: () => void;
   sidebarCollapsed?: boolean;
+  currentUser?: AppUser | null;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -22,7 +23,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   onNavigateTab,
   activeTab,
   onToggleSidebar,
-  sidebarCollapsed = false
+  sidebarCollapsed = false,
+  currentUser,
 }) => {
   const currentBrand = brands.find(b => b.id === selectedBrandId) || brands[0];
 
@@ -106,6 +108,18 @@ export const Navbar: React.FC<NavbarProps> = ({
         >
           <Settings className="w-4 h-4" />
         </button>
+
+        {/* Current User Chip */}
+        {currentUser && (
+          <button
+            onClick={() => onNavigateTab('settings')}
+            className="hidden md:flex items-center space-x-1.5 px-3 py-2 rounded-xl bg-white hover:bg-slate-50 text-slate-600 text-xs font-semibold border border-slate-200/60 shadow-sm transition"
+            title={`Signed in as ${currentUser.username}${currentUser.role === 'admin' ? ' (admin)' : ''}`}
+          >
+            {currentUser.role === 'admin' && <ShieldCheck className="w-3.5 h-3.5 text-indigo-500" />}
+            <span className="truncate max-w-[120px]">{currentUser.username}</span>
+          </button>
+        )}
 
         {/* Logout Button */}
         <button

@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { GenerationLogEntry, AiModelPref } from '../types';
 import {
   Search,
   Target,
@@ -55,6 +56,10 @@ interface SeoPanelProps {
   siteUrl?: string;
   wordCount: number;
   onScore?: (pct: number | null) => void;
+  /** Reports each AI refine run (timestamp + model attribution) to the editor's history. */
+  onGeneration?: (entry: GenerationLogEntry) => void;
+  /** Runtime AI model preference sent with every refine request. */
+  modelPref?: AiModelPref;
 }
 
 // ---------- Helpers ----------
@@ -183,7 +188,7 @@ function CountBar({ value, min, max, hint }: { value: number; min: number; max: 
 
 // ---------- Component ----------
 
-export const SeoPanel: React.FC<SeoPanelProps> = ({ item, onChange, siteUrl, wordCount, onScore }) => {
+export const SeoPanel: React.FC<SeoPanelProps> = ({ item, onChange, siteUrl, wordCount, onScore, onGeneration, modelPref }) => {
   const [data, setData] = useState<SeoAnalyzeData | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [refining, setRefining] = useState(false);
@@ -331,6 +336,7 @@ export const SeoPanel: React.FC<SeoPanelProps> = ({ item, onChange, siteUrl, wor
             .filter((r) => r.status === 'poor' || r.status === 'ok')
             .map((r) => ({ id: r.id, title: r.title, description: r.description })),
           options: { tone, readability, densityTarget },
+          modelPref,
         }),
       });
       const json = await res.json();
@@ -339,8 +345,24 @@ export const SeoPanel: React.FC<SeoPanelProps> = ({ item, onChange, siteUrl, wor
         onChange({ bodyHtml: json.data.bodyHtml });
         setError(null);
       }
+      onGeneration?.({
+        at: new Date().toISOString(),
+        action: `SEO Refine · ${effectiveMode}`,
+        provider: json.data?.provider || modelPref?.provider || 'gemini',
+        model: json.data?.model || modelPref?.model || 'unknown',
+        fallback: !!json.data?.fallback,
+        ok: true,
+      });
     } catch (e: any) {
       setError(e?.message || 'Refine failed');
+      onGeneration?.({
+        at: new Date().toISOString(),
+        action: `SEO Refine · ${effectiveMode}`,
+        provider: modelPref?.provider || 'gemini',
+        model: modelPref?.model || 'unknown',
+        ok: false,
+        error: (e?.message || 'Refine failed').slice(0, 200),
+      });
     } finally {
       setRefining(false);
     }
