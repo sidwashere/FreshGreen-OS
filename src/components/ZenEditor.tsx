@@ -2,7 +2,7 @@ import { fetchGlobalKeys, fetchAiPref, saveAiPref, AI_MODEL_OPTIONS } from "../l
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import ReactQuill from 'react-quill-new';
 import 'react-quill-new/dist/quill.snow.css';
-import { ContentItem, Brand, VisualBlock, VisualBlockType, PipelineStatus, GenerationLogEntry, AiModelPref } from '../types';
+import { ContentItem, Brand, VisualBlock, VisualBlockType, PipelineStatus, GenerationLogEntry, AiModelPref, BlockTune } from '../types';
 import { SeoPanel } from './SeoPanel';
 import { 
   Sparkles, 
@@ -37,7 +37,8 @@ import {
   Pencil,
   Wand2,
   Target,
-  GripVertical
+  GripVertical,
+  SlidersHorizontal
 } from 'lucide-react';
 
 // Blog production workflow — the order every post moves through
@@ -134,6 +135,9 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
   const [visualCatFilter, setVisualCatFilter] = useState<string>('All');
   const [isGeneratingPrompts, setIsGeneratingPrompts] = useState(false);
   const [isGeneratingImage, setIsGeneratingImage] = useState(false);
+  // Meta about the last rendered featured image (used to surface placeholder
+  // fallbacks so the user knows the image is NOT a real AI render).
+  const [nanoImageMeta, setNanoImageMeta] = useState<{ isPlaceholder?: boolean; message?: string; provider?: string; model?: string; isAiGenerated?: boolean } | null>(null);
   // Editable image prompt: seeded from the article's suggested prompt or a
   // library concept, editable before rendering, and refinable via AI so the
   // final image always matches the blog topic.
@@ -508,7 +512,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
         body: JSON.stringify({
           prompt: promptToUse,
           aspectRatio: '16:9',
-          modelProvider: 'gemini',
+          modelProvider: 'auto',
           topicContext: imageTopicContext,
           byokKeys,
           applyHumanization,
@@ -524,6 +528,13 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
           featuredImageUrl: data.imageUrl,
           updatedAt: new Date().toISOString(),
         }));
+        setNanoImageMeta({
+          isPlaceholder: !!data.isPlaceholder,
+          message: data.message,
+          provider: data.provider,
+          model: data.model,
+          isAiGenerated: !!data.isAiGenerated,
+        });
         logGeneration({
           at: new Date().toISOString(),
           action: 'Render Featured Image',
@@ -624,6 +635,34 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
     }
   };
 
+  // Flow context for rewriting block `idx`: the article title/keyword, the
+  // blocks just before it, the block right after it, and the FAQ items at the
+  // end — so the rewrite reads as one continuous piece no matter which model
+  // produces it.
+  const buildArticleContext = (idx: number) => {
+    const blocks = editingItem.blocks || [];
+    const previous = blocks
+      .slice(0, idx)
+      .filter((b) => (b.content || '').trim())
+      .slice(-2)
+      .map((b) => ({ type: b.type, title: b.title || '', content: (b.content || '').slice(0, 500) }));
+    const next = blocks
+      .slice(idx + 1)
+      .find((b) => (b.content || '').trim() || (b.title || '').trim());
+    const faqBlocks = blocks.filter((b) => b.type === 'faq');
+    const faqItems = faqBlocks
+      .flatMap((b) => (b.faqItems || []).map((i) => ({ question: i.question, answer: (i.answer || '').slice(0, 300) })))
+      .slice(0, 6);
+    return {
+      title: editingItem.title || '',
+      keyword: editingItem.primaryKeyword || '',
+      brandName: brand?.name || '',
+      previousBlocks: previous,
+      nextBlock: next ? { type: next.type, title: next.title || '', content: (next.content || '').slice(0, 350) } : null,
+      faqItems,
+    };
+  };
+
   const handleRewriteBlock = async (blockIdx: number, block: VisualBlock) => {
     setIsRewritingBlock(prev => ({ ...prev, [block.id]: true }));
     const byokKeys = await fetchGlobalKeys();
@@ -635,6 +674,8 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
         body: JSON.stringify({
           block,
           direction,
+          tune: block.tune || {},
+          articleContext: buildArticleContext(blockIdx),
           brand,
           byokKeys,
           applyHumanization,
@@ -1480,6 +1521,92 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                         Rewrite
                       </button>
                     </div>
+
+                    {/* Per-block AI fine-tuning */}
+                    <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-3 space-y-2.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+                          <SlidersHorizontal className="w-3 h-3" /> Fine-tune this block
+                        </span>
+                        <span className="text-[10px] text-slate-400 italic">Applies to the next Rewrite</span>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2">
+                        <label className="block">
+                          <span className="text-[10px] font-semibold text-slate-500">Tone</span>
+                          <select
+                            value={block.tune?.tone || 'brand'}
+                            onChange={(e) => {
+                              const newBlocks = [...editingItem.blocks];
+                              newBlocks[idx].tune = { ...(newBlocks[idx].tune || {}), tone: e.target.value as BlockTune['tone'] };
+                              setEditingItem({ ...editingItem, blocks: newBlocks });
+                            }}
+                            className="w-full mt-0.5 text-xs bg-white border border-slate-200 rounded-lg px-2 py-1.5 focus:outline-none"
+                          >
+                            <option value="brand">Brand voice</option>
+                            <option value="professional">Professional</option>
+                            <option value="warm">Warm</option>
+                            <option value="playful">Playful</option>
+                            <option value="formal">Formal</option>
+                            <option value="casual">Casual</option>
+                          </select>
+                        </label>
+                        <label className="block">
+                          <span className="text-[10px] font-semibold text-slate-500">Length</span>
+                          <select
+                            value={block.tune?.length || 'medium'}
+                            onChange={(e) => {
+                              const newBlocks = [...editingItem.blocks];
+                              newBlocks[idx].tune = { ...(newBlocks[idx].tune || {}), length: e.target.value as BlockTune['length'] };
+                              setEditingItem({ ...editingItem, blocks: newBlocks });
+                            }}
+                            className="w-full mt-0.5 text-xs bg-white border border-slate-200 rounded-lg px-2 py-1.5 focus:outline-none"
+                          >
+                            <option value="short">Short</option>
+                            <option value="medium">Medium</option>
+                            <option value="long">Long</option>
+                          </select>
+                        </label>
+                        <label className="block">
+                          <span className="text-[10px] font-semibold text-slate-500">Creativity</span>
+                          <select
+                            value={block.tune?.creativity || 'medium'}
+                            onChange={(e) => {
+                              const newBlocks = [...editingItem.blocks];
+                              newBlocks[idx].tune = { ...(newBlocks[idx].tune || {}), creativity: e.target.value as BlockTune['creativity'] };
+                              setEditingItem({ ...editingItem, blocks: newBlocks });
+                            }}
+                            className="w-full mt-0.5 text-xs bg-white border border-slate-200 rounded-lg px-2 py-1.5 focus:outline-none"
+                          >
+                            <option value="low">Low</option>
+                            <option value="medium">Medium</option>
+                            <option value="high">High</option>
+                          </select>
+                        </label>
+                      </div>
+                      <textarea
+                        value={block.tune?.guidance || ''}
+                        onChange={(e) => {
+                          const newBlocks = [...editingItem.blocks];
+                          newBlocks[idx].tune = { ...(newBlocks[idx].tune || {}), guidance: e.target.value };
+                          setEditingItem({ ...editingItem, blocks: newBlocks });
+                        }}
+                        rows={2}
+                        placeholder="Extra guidance (e.g. 'Emphasise the eco packaging, keep it under 60 words')"
+                        className="w-full text-xs bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 focus:outline-none placeholder:text-slate-400"
+                      />
+                      <p className="text-[10px] text-slate-400 leading-relaxed">
+                        Rewrites are woven from the article title "{editingItem.title || '—'}"{(() => {
+                          const prevBlock = editingItem.blocks.slice(0, idx).filter((b: VisualBlock) => (b.content || '').trim()).slice(-1)[0];
+                          const faqCount = editingItem.blocks.filter((b) => b.type === 'faq').flatMap((b) => b.faqItems || []).length;
+                          return (
+                            <>
+                              , flowing on from {prevBlock ? `"${prevBlock.title || prevBlock.type}"` : 'the section above'}
+                              {faqCount > 0 ? ` and into the ${faqCount} FAQ answers below` : ''}
+                            </>
+                          );
+                        })()} — continuity is preserved no matter which model is used.
+                      </p>
+                    </div>
                   </div>
                 ))
               )}
@@ -1559,11 +1686,22 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                   <div className="relative rounded-xl overflow-hidden group border border-slate-200">
                     <img src={editingItem.featuredImageUrl} alt="Featured" className="w-full h-56 object-cover" />
                     <button
-                      onClick={() => setEditingItem({...editingItem, featuredImageUrl: undefined})}
+                      onClick={() => { setEditingItem({...editingItem, featuredImageUrl: undefined}); setNanoImageMeta(null); }}
                       className="absolute top-2 right-2 bg-white/90 text-red-600 p-1.5 rounded-lg shadow-sm opacity-0 group-hover:opacity-100 transition"
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
+                    {nanoImageMeta?.isPlaceholder && (
+                      <div className="absolute inset-x-0 bottom-0 bg-amber-500/95 text-white text-[11px] leading-snug p-2.5">
+                        <strong>Placeholder — not an AI render.</strong>{' '}
+                        {nanoImageMeta.message}
+                      </div>
+                    )}
+                    {nanoImageMeta?.isAiGenerated && (
+                      <span className="absolute top-2 left-2 bg-emerald-600/90 text-white text-[10px] font-bold px-2 py-1 rounded-md shadow-sm">
+                        AI · {nanoImageMeta.provider} · {nanoImageMeta.model}
+                      </span>
+                    )}
                   </div>
                 ) : (
                   <div className="h-56 rounded-xl border-2 border-dashed border-slate-200 bg-slate-50 flex flex-col items-center justify-center text-slate-400">

@@ -37,6 +37,14 @@ export type VisualBlockType =
   | 'callout'
   | 'image_banner';
 
+/** Per-block fine-tuning for AI rewriting on the Write tab. */
+export interface BlockTune {
+  tone?: 'brand' | 'professional' | 'warm' | 'playful' | 'formal' | 'casual';
+  length?: 'short' | 'medium' | 'long';
+  creativity?: 'low' | 'medium' | 'high';
+  guidance?: string;
+}
+
 export interface VisualBlock {
   id: string;
   type: VisualBlockType;
@@ -50,6 +58,8 @@ export interface VisualBlock {
   badge?: string;
   faqItems?: Array<{ question: string; answer: string }>;
   accentColor?: string;
+  /** Per-block AI fine-tuning (tone / length / creativity / guidance). */
+  tune?: BlockTune;
 }
 
 /** One recorded AI generation run (model attribution + history with timestamps). */

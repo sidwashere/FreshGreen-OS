@@ -23,7 +23,10 @@ export const NanoBananaStudioModal: React.FC<NanoBananaStudioModalProps> = ({
   const [isRefining, setIsRefining] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const [modelProvider, setModelProvider] = useState('gemini');
+  const [modelProvider, setModelProvider] = useState('auto');
+  // Meta about the last render: surfaces placeholder fallbacks clearly so a
+  // random stock photo is never mistaken for a real AI image.
+  const [renderMeta, setRenderMeta] = useState<{ isPlaceholder?: boolean; isAiGenerated?: boolean; provider?: string; model?: string; message?: string } | null>(null);
   const [aiPref] = useState(() => fetchAiPref());
 
   if (!currentBrand) {
@@ -66,6 +69,13 @@ export const NanoBananaStudioModal: React.FC<NanoBananaStudioModalProps> = ({
       const data = await res.json();
       if (data.success && data.imageUrl) {
         setGeneratedImage(data.imageUrl);
+        setRenderMeta({
+          isPlaceholder: !!data.isPlaceholder,
+          isAiGenerated: !!data.isAiGenerated,
+          provider: data.provider,
+          model: data.model,
+          message: data.message,
+        });
       } else if (data.error) {
         setError('Generation Error: ' + data.error);
       }
@@ -152,10 +162,11 @@ export const NanoBananaStudioModal: React.FC<NanoBananaStudioModalProps> = ({
                 onChange={(e) => setModelProvider(e.target.value)}
                 className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm focus:ring-2 focus:ring-amber-500"
               >
-                <option value="gemini">Gemini 3.1 Flash (Text-to-Image)</option>
+                <option value="auto">Auto — best available (Gemini → DALL-E 3 → SDXL)</option>
+                <option value="gemini">Gemini (Imagen 3 — free server key)</option>
                 <option value="huggingface">Hugging Face (Stable Diffusion - Free/BYOK)</option>
                 <option value="openai">OpenAI (DALL-E 3 - BYOK)</option>
-                <option value="replicate">Replicate (Flux/SDXL - BYOK)</option>
+                <option value="replicate">Replicate (Flux Schnell - BYOK)</option>
               </select>
             </div>
 
@@ -264,12 +275,25 @@ export const NanoBananaStudioModal: React.FC<NanoBananaStudioModalProps> = ({
 
           {generatedImage ? (
             <div className="rounded-2xl overflow-hidden border border-slate-200 shadow-md space-y-3">
-              <img
-                src={generatedImage}
-                alt="AI Generated"
-                className="w-full h-80 object-cover"
-                referrerPolicy="no-referrer"
-              />
+              <div className="relative">
+                <img
+                  src={generatedImage}
+                  alt="AI Generated"
+                  className="w-full h-80 object-cover"
+                  referrerPolicy="no-referrer"
+                />
+                {renderMeta?.isPlaceholder && (
+                  <div className="absolute inset-x-0 bottom-0 bg-amber-500/95 text-white text-[11px] leading-snug p-2.5">
+                    <strong>Placeholder — not an AI render.</strong>{' '}
+                    {renderMeta.message}
+                  </div>
+                )}
+                {renderMeta?.isAiGenerated && (
+                  <span className="absolute top-2 left-2 bg-emerald-600/90 text-white text-[10px] font-bold px-2 py-1 rounded-md shadow-sm">
+                    AI · {renderMeta.provider} · {renderMeta.model}
+                  </span>
+                )}
+              </div>
               <div className="p-4 bg-slate-50 flex items-center justify-between text-xs border-t border-slate-200">
                 <span className="font-semibold text-slate-700">Ready for WordPress Sideloading</span>
                 <a

@@ -182,6 +182,18 @@ const OPENROUTER_FREE_MODELS = [
   'poolside/laguna-s-2.1:free',
 ];
 
+// "Professional" tier for quality-critical jobs (SEO refine/audit): paid
+// OpenRouter models, live-verified 2026. Priced at a fraction of a cent per
+// call (~$0.0000004–0.000002/token), so a full-article rewrite is well under
+// $0.05. Ordered best-quality-first for the fallback chain.
+const OR_PROFESSIONAL_MODELS = [
+  'openai/gpt-5.6-terra',        // flagship-class, cheap, excellent editor
+  'anthropic/claude-sonnet-5',   // top-tier writing & judgment
+  'deepseek/deepseek-v4-pro',    // very cheap reasoning model, strong prose
+  'google/gemini-3.5-flash',     // strong all-rounder
+  'moonshotai/kimi-k3',          // long-context, creative
+];
+
 function isQuotaError(msg: string): boolean {
   return /(429|RESOURCE_EXHAUSTED|quota|rate limit|too many requests)/i.test(msg || '');
 }
@@ -196,6 +208,7 @@ async function fetchOpenAICompatible(opts: {
   prompt: string;
   json?: boolean;
   maxTokens?: number;
+  temperature?: number;
 }): Promise<string> {
   const url = `${opts.baseUrl.replace(/\/+$/, '')}/chat/completions`;
   const body: any = {
@@ -207,6 +220,7 @@ async function fetchOpenAICompatible(opts: {
     max_tokens: opts.maxTokens ?? 4096,
   };
   if (opts.json) body.response_format = { type: 'json_object' };
+  if (opts.temperature !== undefined) body.temperature = opts.temperature;
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${opts.apiKey}` },
@@ -228,7 +242,11 @@ async function fetchOpenAICompatible(opts: {
 
 // Build the ordered provider chain from the user's preference + available keys.
 // Preferred provider first, then fallbacks (auto) per provider.
-function buildProviderChain(byokKeys: any = {}, pref: any = {}): Array<{
+function buildProviderChain(
+  byokKeys: any = {},
+  pref: any = {},
+  opts?: { orProfessionalFirst?: boolean }
+): Array<{
   provider: 'gemini' | 'openrouter' | 'custom';
   model: string;
   run: (params: any) => Promise<{ text: string }>;
@@ -277,6 +295,7 @@ function buildProviderChain(byokKeys: any = {}, pref: any = {}): Array<{
           prompt: params.prompt,
           json: params.json,
           maxTokens: params.maxTokens,
+          temperature: params.temperature,
         }),
       }),
     });
@@ -295,6 +314,7 @@ function buildProviderChain(byokKeys: any = {}, pref: any = {}): Array<{
           prompt: params.prompt,
           json: params.json,
           maxTokens: params.maxTokens,
+          temperature: params.temperature,
         }),
       }),
     });
@@ -316,10 +336,13 @@ function buildProviderChain(byokKeys: any = {}, pref: any = {}): Array<{
     for (const m of geminiModels) {
       if (!chain.some((c) => c.provider === 'gemini' && c.model === m)) pushGemini(m);
     }
-    // 3) OpenRouter free tier — always available as the "free" escape hatch.
+    // 3) OpenRouter — professional tier first when requested (quality-critical
+    // jobs like SEO refine/audit), then the always-available free tier.
     const orKey = byokKeys.openrouter || process.env.OPENROUTER_API_KEY;
     if (orKey) {
-      const orModels = [OPENROUTER_FREE_MODELS[0], ...OPENROUTER_FREE_MODELS.slice(1)];
+      const orModels = opts?.orProfessionalFirst
+        ? [...OR_PROFESSIONAL_MODELS, ...OPENROUTER_FREE_MODELS]
+        : [OPENROUTER_FREE_MODELS[0], ...OPENROUTER_FREE_MODELS.slice(1)];
       for (const m of orModels) {
         if (!chain.some((c) => c.provider === 'openrouter' && c.model === m)) pushOpenRouter(m, orKey);
       }
@@ -333,15 +356,35 @@ function buildProviderChain(byokKeys: any = {}, pref: any = {}): Array<{
   return chain;
 }
 
+// Robust JSON extraction from model output: models frequently wrap JSON in
+// markdown code fences or stray prose. Strips fences, then falls back to
+// extracting the first balanced {...} object.
+function parseModelJson(text: string): any {
+  let t = String(text || '').trim();
+  t = t.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+  try {
+    return JSON.parse(t);
+  } catch { /* fall through */ }
+  const start = t.indexOf('{');
+  const end = t.lastIndexOf('}');
+  if (start >= 0 && end > start) {
+    const candidate = t.slice(start, end + 1);
+    try {
+      return JSON.parse(candidate);
+    } catch { /* fall through */ }
+  }
+  throw new Error('Model returned non-JSON output.');
+}
+
 // Unified non-streaming completion across providers. Returns the winning
 // provider + model so the UI can attribute every generation.
 async function completeWithProvider(
   byokKeys: any = {},
   pref: any = {},
-  params: { systemInstruction?: string; prompt: string; json?: boolean; jsonSchema?: any; geminiConfig?: any; maxTokens?: number },
-  opts?: { skipProviders?: Array<'gemini' | 'openrouter' | 'custom'> }
+  params: { systemInstruction?: string; prompt: string; json?: boolean; jsonSchema?: any; geminiConfig?: any; maxTokens?: number; temperature?: number },
+  opts?: { skipProviders?: Array<'gemini' | 'openrouter' | 'custom'>; orProfessionalFirst?: boolean }
 ): Promise<{ text: string; provider: string; model: string; fallback: boolean }> {
-  const chain = buildProviderChain(byokKeys, pref).filter((step) => !opts?.skipProviders?.includes(step.provider));
+  const chain = buildProviderChain(byokKeys, pref, { orProfessionalFirst: opts?.orProfessionalFirst }).filter((step) => !opts?.skipProviders?.includes(step.provider));
   if (!chain.length) {
     throw new Error('No AI provider configured. Add a Gemini key on the server, or an OpenRouter key in Settings > AI Models.');
   }
@@ -534,16 +577,18 @@ app.post('/api/ai/generate-article', async (req, res) => {
 Brand Voice & Tone Guidelines: ${brand.voiceGuidelines || 'Professional, clear, engaging, authoritative'}.
 ${bannedWordsText}
 
+THE ARTICLE TITLE IS THE SINGLE SOURCE OF TRUTH: "${title}". Every heading, sentence and FAQ entry must serve exactly that title — never drift to a side topic, never change the subject. The reader must feel one continuous, seamless narrative from the first sentence to the final FAQ answer.
+
 Output Format: Return ONLY the raw HTML article body. Use h1, h2, h3, p, ul, li, img, a tags. No markdown code fences, no JSON wrapper, no commentary before or after — just the HTML.
 
 SEO requirements (scored by an automated SEO analyzer, follow precisely):
 - Use exactly one <h1> containing the primary keyword. Structure with a logical hierarchy of <h2> and <h3> headings, a heading every 200-300 words.
 - Use the primary keyword naturally with density between 0.5% and 2.5% of total words, including: once in the first 100 words (bold it once with <strong>), in the h1, and in at least one <h2>.
 - Work the topic/title angle into at least one h2 or h3 subheading.
-- Keep paragraphs short (under 150 words each) and sentences readable (average under 20 words). Use transition words.
+- Keep paragraphs short (under 150 words each) and sentences readable (average under 20 words). Use transition words so every paragraph hands off to the next.
 - Use one <img> with a descriptive alt attribute containing the primary keyword (featured placeholder, e.g. <img src="https://placehold.co/1200x800?text=Alt" alt="...keyword...">).
 - Include 1-2 internal links as <a href="/blog/related-article"> with descriptive anchor text (never the bare keyword).
-- If suitable, include an FAQ section using an <h2> with <h3> questions, to target question-based (AEO) search results.
+- If suitable, include an FAQ section using an <h2> with <h3> questions, to target question-based (AEO) search results. The FAQ must grow naturally out of the preceding sections — reuse the article's own terms, examples and claims so the end of the piece reads as one flowing conversation, not a bolted-on list.
 - Write for humans first: natural, expert, specific. Never stuff keywords or repeat the same phrase back-to-back.
 - ${wordTarget}
 - Every sentence should read like it was written by a human expert, not an AI.`;
@@ -899,7 +944,7 @@ ${bodyHtml}`;
       systemInstruction,
       prompt,
       maxTokens: 4096,
-    });
+    }, { orProfessionalFirst: true });
     console.log(`[AI] SEO refine completed via ${genProvider}/${genModel}${fallback ? ' (fallback)' : ''} for "${title}".`);
 
     let improvedHtml = resultText
@@ -926,10 +971,12 @@ ${bodyHtml}`;
 
 
 
-// API Endpoint: Rewrite Visual Block
+// API Endpoint: Rewrite Visual Block (with full article context so the rewrite
+// flows seamlessly from the previous block into the next, through to the FAQ,
+// and stays aligned with the title — regardless of which model is used).
 app.post('/api/ai/rewrite-block', async (req, res) => {
   try {
-    const { block, direction, applyHumanization, brand, byokKeys } = req.body;
+    const { block, direction, applyHumanization, brand, byokKeys, articleContext, tune } = req.body;
 
     const aiApiKey = process.env.GEMINI_API_KEY;
 
@@ -937,19 +984,84 @@ app.post('/api/ai/rewrite-block', async (req, res) => {
       ? `STRICT BANNED WORDS (DO NOT USE ANY OF THESE): ${brand.bannedWords.join(', ')}.`
       : '';
 
+    // --- Per-block fine-tuning (tone / length / creativity / guidance) ------
+    const toneMap: Record<string, string> = {
+      brand: 'the brand voice exactly',
+      professional: 'professional, authoritative, expert',
+      warm: 'warm, friendly, approachable',
+      playful: 'playful, light-hearted, fun',
+      formal: 'formal, precise, measured',
+      casual: 'casual, conversational, relaxed',
+    };
+    const tone = tune?.tone && toneMap[tune.tone] ? toneMap[tune.tone] : tune?.tone || 'the brand voice';
+    const lengthTarget: Record<string, string> = {
+      short: 'Keep this block SHORT — roughly 2-4 sentences.',
+      medium: 'Keep this block MEDIUM length — roughly 4-6 sentences.',
+      long: 'Make this block LONG — roughly 7-10 sentences with more depth and detail.',
+    };
+    const lengthRule = lengthTarget[tune?.length] || '';
+    const creativity = tune?.creativity || 'medium';
+    const temperature = creativity === 'high' ? 0.9 : creativity === 'low' ? 0.3 : 0.6;
+
+    // --- Flow context: what comes before, what comes after, what follows ----
+    const ctx = articleContext || {};
+    const prevBlocks = Array.isArray(ctx.previousBlocks) ? ctx.previousBlocks.filter((b: any) => b?.content?.trim()) : [];
+    const nextBlock = ctx.nextBlock;
+    const faqItems = Array.isArray(ctx.faqItems) ? ctx.faqItems : [];
+
+    const flowPromptParts: string[] = [];
+    flowPromptParts.push(
+      `This block is PART OF a larger article titled "${ctx.title || '(untitled)'}"${
+        ctx.keyword ? `, focus keyphrase "${ctx.keyword}"` : ''
+      }, for brand "${ctx.brandName || brand?.name || 'the brand'}".`
+    );
+    if (prevBlocks.length) {
+      flowPromptParts.push(
+        `WHAT CAME IMMEDIATELY BEFORE this block (end of the previous section — your opening sentence must connect to it):\n${prevBlocks
+          .map((b: any) => `[${b.type || 'section'} "${b.title || ''}"] ${b.content}`)
+          .join('\n\n')}`
+      );
+    } else {
+      flowPromptParts.push('This is the FIRST section of the article — it must flow directly from the article title as a natural introduction.');
+    }
+    if (nextBlock && (nextBlock.title || nextBlock.content)) {
+      flowPromptParts.push(
+        `WHAT COMES IMMEDIATELY AFTER this block (the next section heading/content — end your text so it hands off to it naturally):\n[${nextBlock.type || 'section'} "${nextBlock.title || ''}"] ${nextBlock.content || ''}`
+      );
+    }
+    if (faqItems.length) {
+      flowPromptParts.push(
+        `THE ARTICLE ENDS WITH THIS FAQ SECTION (your content must be consistent with these questions/answers — do not contradict or repeat them verbatim):\n${faqItems
+          .slice(0, 6)
+          .map((f: any) => `Q: ${f.question}\nA: ${f.answer}`)
+          .join('\n\n')}`
+      );
+    }
+    if (ctx.title) {
+      flowPromptParts.push(
+        `CONSISTENCY RULE: the article title "${ctx.title}" is the single source of truth. Keep terminology, facts, tone and level of detail consistent with it and with the surrounding blocks. Never change the topic or introduce contradictory claims.`
+      );
+    }
+
     const systemInstruction = `You are a professional copywriter for "${brand?.name || 'a brand'}".
 Brand Voice & Tone Guidelines: ${brand?.voiceGuidelines || 'Professional, clear, engaging'}.
 ${bannedWordsText}
+Tone for THIS block: ${tone}.
+${lengthRule}
+Creativity level: ${creativity}.
 
-Rewrite the provided visual block content. Keep it formatted as JSON matching the schema.`;
+Rewrite the provided visual block content so it flows seamlessly within its article: it must read as a continuous piece of writing from the previous block, through this block, into the next, and finally into the FAQ section — a reader should never feel a break in flow. Keep the block's purpose (its type: hero/paragraph/faq/product_cta/callout) and its key facts intact. Keep it formatted as JSON matching the schema.`;
 
     const prompt = `Rewrite the following block content.
 Block Type: ${block.type}
 Current Title: ${block.title || 'None'}
 Current Content: ${block.content || 'None'}
-Direction/Style: ${direction || 'Improve clarity and engagement'}
+Direction/Style: ${direction || tune?.guidance || 'Improve clarity and engagement while keeping perfect flow with the surrounding article'}
 
-Return the rewritten block.`;
+ARTICLE FLOW CONTEXT (use this to keep the writing seamless):
+${flowPromptParts.join('\n\n')}
+
+Return the rewritten block as JSON.`;
 
     const { text: resultText, provider: genProvider, model: genModel, fallback } = await completeWithProvider(byokKeys, req.body.modelPref, {
       systemInstruction,
@@ -965,8 +1077,10 @@ Return the rewritten block.`;
         }
       },
       maxTokens: 2048,
+      temperature,
+      geminiConfig: { temperature },
     });
-    console.log(`[AI] Block rewrite via ${genProvider}/${genModel}${fallback ? ' (fallback)' : ''}.`);
+    console.log(`[AI] Block rewrite via ${genProvider}/${genModel}${fallback ? ' (fallback)' : ''} — tune: ${JSON.stringify(tune || {})}.`);
 
     const parsed = JSON.parse(resultText || '{}');
 
@@ -1033,8 +1147,9 @@ Return JSON with an array of "prompts" containing object items with "prompt", "c
     });
     console.log(`[AI] Nano Banana prompts via ${genProvider}/${genModel}${fallback ? ' (fallback)' : ''}.`);
 
-    const parsed = JSON.parse(resultText || '{"prompts":[]}');
-    return res.json({ success: true, data: parsed.prompts, model: genModel, provider: genProvider, fallback });
+    const parsed = parseModelJson(resultText);
+    const prompts = Array.isArray(parsed?.prompts) ? parsed.prompts : [];
+    return res.json({ success: true, data: prompts, model: genModel, provider: genProvider, fallback });
   } catch (err: any) {
     
     if (err.message && err.message.includes('API_KEY_INVALID')) {
@@ -1064,11 +1179,12 @@ app.post('/api/ai/generate-nano-image', async (req, res) => {
       return res.status(400).json({ error: 'An image prompt is required.' });
     }
 
-    // 1. OpenAI DALL-E 3 (BYOK)
-    if (modelProvider === 'openai') {
+    // Shared helpers -----------------------------------------------------------
+    const okJson = (payload: any) => res.json({ success: true, prompt: finalPrompt, aspectRatio: aspectRatio || '1:1', ...payload });
+
+    const tryDalle = async (): Promise<any | null> => {
       const apiKey = byokKeys?.openai || process.env.OPENAI_API_KEY;
-      if (!apiKey) throw new Error("OpenAI API key missing. Please add it in Settings.");
-      
+      if (!apiKey) return null;
       const response = await fetch('https://api.openai.com/v1/images/generations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
@@ -1080,76 +1196,121 @@ app.post('/api/ai/generate-nano-image', async (req, res) => {
           response_format: "url"
         })
       });
-      if (!response.ok) throw new Error("OpenAI Generation Failed: " + await response.text());
+      if (!response.ok) throw new Error("OpenAI Generation Failed: " + (await response.text()).slice(0, 200));
       const data = await response.json();
-      return res.json({ success: true, imageUrl: data.data[0].url, isAiGenerated: true, model: 'dall-e-3', provider: 'openai' });
-    }
+      if (!data.data?.[0]?.url) throw new Error('OpenAI returned no image.');
+      return okJson({ imageUrl: data.data[0].url, isAiGenerated: true, model: 'dall-e-3', provider: 'openai' });
+    };
 
-    // 2. Hugging Face (BYOK)
-    if (modelProvider === 'huggingface') {
+    const tryHuggingFace = async (): Promise<any | null> => {
       const apiKey = byokKeys?.huggingface || process.env.HF_TOKEN;
-      if (!apiKey) throw new Error("Hugging Face token missing. Please add it in Settings.");
-      
+      if (!apiKey) return null;
       const response = await fetch('https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({ inputs: finalPrompt })
       });
-      if (!response.ok) throw new Error("Hugging Face Generation Failed: " + await response.text());
-      
+      if (!response.ok) throw new Error("Hugging Face Generation Failed: " + (await response.text()).slice(0, 200));
       const buffer = await response.arrayBuffer();
       const base64 = Buffer.from(buffer).toString('base64');
-      const imageUrl = `data:image/jpeg;base64,${base64}`;
-      return res.json({ success: true, imageUrl, isAiGenerated: true, model: 'stable-diffusion-xl-base-1.0', provider: 'huggingface' });
-    }
+      return okJson({ imageUrl: `data:image/jpeg;base64,${base64}`, isAiGenerated: true, model: 'stable-diffusion-xl-base-1.0', provider: 'huggingface' });
+    };
 
-    // 3. Replicate (BYOK)
-    if (modelProvider === 'replicate') {
+    const tryReplicate = async (): Promise<any | null> => {
       const apiKey = byokKeys?.replicate || process.env.REPLICATE_API_TOKEN;
-      if (!apiKey) throw new Error("Replicate API token missing. Please add it in Settings.");
-      // Just returning a mock image for Replicate since it requires webhook polling or long polling in actual implementation
-      // To simulate it properly for MVP without complex polling:
-      const cleanSeed = encodeURIComponent(finalPrompt.replace(/[^a-zA-Z0-9]/g, '-').slice(0, 30));
-      return res.json({ 
-        success: true, 
-        imageUrl: `https://picsum.photos/seed/replicate-${cleanSeed}/1024/1024`, 
-        isAiGenerated: false,
-        model: 'replicate-mock',
-        provider: 'replicate',
-        message: 'Mocked Replicate response for demo.'
+      if (!apiKey) return null;
+      const start = await fetch('https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body: JSON.stringify({ input: { prompt: finalPrompt, go_fast: true } }),
       });
-    }
-
-    // Default: Gemini Image
-    const aiApiKey = process.env.GEMINI_API_KEY;
-
-    const ai = aiApiKey ? new GoogleGenAI({ apiKey: aiApiKey }) : null;
-
-    if (ai) {
-      try {
-        const response = await ai.models.generateImages({
-          model: 'imagen-3.0-generate-002',
-          prompt: finalPrompt,
-          config: { aspectRatio: aspectRatio || "1:1" }
-        });
-
-        const generatedImage = response.generatedImages?.[0];
-        if (generatedImage?.image?.imageBytes) {
-           const imageUrl = `data:image/png;base64,${generatedImage.image.imageBytes}`;
-           return res.json({ success: true, imageUrl, isAiGenerated: true, model: 'imagen-3.0-generate-002', provider: 'gemini' });
+      if (!start.ok) throw new Error('Replicate start failed: ' + (await start.text()).slice(0, 200));
+      const { id, urls } = await start.json();
+      // Poll until the prediction finishes (flux-schnell usually < 10s).
+      const deadline = Date.now() + 90000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2500));
+        const poll = await fetch(urls.get, { headers: { Authorization: `Bearer ${apiKey}` } });
+        const state = await poll.json();
+        if (state.status === 'succeeded' && state.output?.[0]) {
+          return okJson({ imageUrl: state.output[0], isAiGenerated: true, model: 'flux-schnell', provider: 'replicate' });
         }
-      } catch (imageErr: any) {
-        // Silently fall back to curated visual render if quota is exceeded or API fails
+        if (state.status === 'failed') throw new Error('Replicate prediction failed.');
       }
+      throw new Error('Replicate prediction timed out.');
+    };
+
+    const placeholder = (reason: string) =>
+      okJson({
+        imageUrl: `https://picsum.photos/seed/${encodeURIComponent(finalPrompt.replace(/[^a-zA-Z0-9]/g, '-').slice(0, 30) || 'nano-banana')}/${aspectRatio === '1:1' ? 800 : aspectRatio === '4:3' ? 1000 : 1200}/${aspectRatio === '1:1' ? 800 : aspectRatio === '4:3' ? 750 : 675}`,
+        isAiGenerated: false,
+        isPlaceholder: true,
+        model: 'picsum-placeholder',
+        provider: 'none',
+        message: `Placeholder image — no AI image model could be reached (${reason}). Add a Gemini server key, or an OpenAI / Hugging Face / Replicate key in Settings, to generate a real image that follows this prompt.`,
+      });
+
+    // --- 1. Gemini imagen (server key) — the default quality path ------------
+    const aiApiKey = process.env.GEMINI_API_KEY;
+    const ai = aiApiKey ? new GoogleGenAI({ apiKey: aiApiKey }) : null;
+    if (!modelProvider || modelProvider === 'auto' || modelProvider === 'gemini') {
+      if (ai) {
+        try {
+          const response = await ai.models.generateImages({
+            model: 'imagen-3.0-generate-002',
+            prompt: finalPrompt,
+            config: { aspectRatio: aspectRatio || "1:1" }
+          });
+          const generatedImage = response.generatedImages?.[0];
+          if (generatedImage?.image?.imageBytes) {
+            return okJson({ imageUrl: `data:image/png;base64,${generatedImage.image.imageBytes}`, isAiGenerated: true, model: 'imagen-3.0-generate-002', provider: 'gemini' });
+          }
+          throw new Error('Gemini returned no image bytes.');
+        } catch (imageErr: any) {
+          console.warn('[Image] Gemini imagen failed, trying next provider:', String(imageErr?.message || imageErr).slice(0, 140));
+        }
+      }
+      // Auto chain: Gemini -> DALL-E -> SDXL -> flagged placeholder (never a
+      // silently random photo).
+      if (modelProvider === 'auto' || !modelProvider) {
+        for (const attempt of [tryDalle, tryHuggingFace]) {
+          const r = await attempt().catch((e: any) => { console.warn('[Image] fallback failed:', String(e?.message || e).slice(0, 140)); return null; });
+          if (r) return r;
+        }
+        return placeholder('Gemini quota exhausted and no fallback image keys configured');
+      }
+      return placeholder('Gemini quota exhausted or image API unavailable');
     }
 
-    // Fallback high-quality picsum image URL generated from prompt seed
-    const cleanSeed = encodeURIComponent(finalPrompt.replace(/[^a-zA-Z0-9]/g, '-').slice(0, 30) || 'nano-banana');
-    const width = aspectRatio === '1:1' ? 800 : aspectRatio === '4:3' ? 1000 : 1200;
-    const height = aspectRatio === '1:1' ? 800 : aspectRatio === '4:3' ? 750 : 675;
-    const imageUrl = `https://picsum.photos/seed/${cleanSeed}/${width}/${height}`;
+    // --- 2. Explicit providers -----------------------------------------------
+    if (modelProvider === 'openai') {
+      const r = await tryDalle().catch(() => null);
+      if (r) return r;
+      const hf = await tryHuggingFace().catch(() => null);
+      if (hf) return hf;
+      return placeholder('OpenAI key missing or generation failed');
+    }
+    if (modelProvider === 'huggingface') {
+      const r = await tryHuggingFace().catch(() => null);
+      if (r) return r;
+      const dalle = await tryDalle().catch(() => null);
+      if (dalle) return dalle;
+      return placeholder('Hugging Face token missing or generation failed');
+    }
+    if (modelProvider === 'replicate') {
+      const r = await tryReplicate().catch((e: any) => { console.warn('[Image] Replicate failed:', String(e?.message || e).slice(0, 140)); return null; });
+      if (r) return r;
+      const dalle = await tryDalle().catch(() => null);
+      if (dalle) return dalle;
+      return placeholder('Replicate token missing or prediction failed');
+    }
 
-    return res.json({ success: true, imageUrl, isAiGenerated: false, prompt: finalPrompt, model: 'picsum-placeholder', provider: 'none' });
+    // Unknown provider: fall back to the auto chain.
+    for (const attempt of [tryDalle, tryHuggingFace, tryReplicate]) {
+      const r = await attempt().catch(() => null);
+      if (r) return r;
+    }
+    return placeholder('no image provider configured');
   } catch (err: any) {
     console.error('Error generating nano image:', err);
     return res.status(500).json({ error: err.message || 'Image generation failed.' });
@@ -1233,7 +1394,7 @@ ${bodyHtml}`,
         required: ['score', 'wordCount', 'readability', 'suggestions', 'metaTitle', 'metaDescription']
       },
       maxTokens: 2048,
-    });
+    }, { orProfessionalFirst: true });
     console.log(`[AI] SEO audit via ${genProvider}/${genModel}${fallback ? ' (fallback)' : ''}.`);
 
     const parsed = JSON.parse(resultText || '{}');
