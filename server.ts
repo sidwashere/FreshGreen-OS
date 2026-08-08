@@ -6,8 +6,12 @@ import https from 'https';
 import http from 'http';
 import { GoogleGenAI, Type } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
+import { execFile as execFileCb, spawn } from 'child_process';
+import { promisify } from 'util';
 import { analyzeContent } from '@power-seo/content-analysis';
 import { Humanizer } from './src/lib/patina-core.js';
+
+const execFile = promisify(execFileCb);
 
 dotenv.config();
 
@@ -1321,6 +1325,209 @@ app.post('/api/ai/openrouter-models', async (req, res) => {
       total: OPENROUTER_FREE_MODELS.length,
       curated: true,
     });
+  }
+});
+
+// ==========================================
+// GITHUB SYNC (source-control bridge)
+// Lets Settings > GitHub Sync test, pull, and push this app's repo using a
+// user-supplied Personal Access Token. The token is only used for git
+// fetch/push via the Authorization header (never written to repo files, never
+// embedded in the remote URL, never logged).
+// ==========================================
+
+const PROJECT_ROOT = process.cwd();
+
+function isSafeGitRef(ref: string): boolean {
+  return typeof ref === 'string' && /^[A-Za-z0-9._/-]{1,120}$/.test(ref) && !ref.includes('..');
+}
+
+async function runGit(args: string[]): Promise<{ stdout: string; stderr: string }> {
+  const { stdout, stderr } = await execFile('git', args, {
+    cwd: PROJECT_ROOT,
+    timeout: 120000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  return { stdout: stdout.trim(), stderr: stderr.trim() };
+}
+
+// git -c flags that make the PAT the ONLY credential used (disables stored
+// helpers so stale keychain creds can't interfere).
+function gitAuthFlags(token?: string): string[] {
+  if (!token) return ['-c', 'credential.helper='];
+  return ['-c', 'credential.helper=', '-c', `http.extraheader=AUTHORIZATION: Bearer ${token}`];
+}
+
+async function githubApi(path: string, token: string): Promise<any> {
+  const res = await fetch(`https://api.github.com${path}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'FreshGreen-OS',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = data?.message || `GitHub API responded ${res.status}`;
+    throw new Error(`${msg} (${res.status})`);
+  }
+  return data;
+}
+
+// Validate a token against the GitHub API and report the repo the token can see.
+app.post('/api/github/test', async (req, res) => {
+  const { token, owner, repo } = req.body || {};
+  try {
+    if (!token) return res.status(400).json({ ok: false, error: 'No GitHub token provided — generate a PAT at github.com/settings/tokens and paste it in Settings > GitHub Sync.' });
+    const user = await githubApi('/user', token);
+    const result: any = { ok: true, user: { login: user.login, name: user.name || user.login } };
+    if (owner && repo) {
+      try {
+        const r = await githubApi(`/repos/${owner}/${repo}`, token);
+        result.repo = { fullName: r.full_name, defaultBranch: r.default_branch, private: r.private, pushedAt: r.pushed_at };
+      } catch (e: any) {
+        result.repoError = e.message;
+      }
+    }
+    return res.json(result);
+  } catch (err: any) {
+    const msg = String(err?.message || err);
+    return res.json({ ok: false, error: msg.length > 300 ? msg.slice(0, 300) + '…' : msg });
+  }
+});
+
+// Report local repo state + GitHub repo info + ahead/behind vs origin.
+app.post('/api/github/status', async (req, res) => {
+  const { token, owner, repo, branch } = req.body || {};
+  const out: any = { ok: false };
+  try {
+    try {
+      const rev = await runGit(['rev-parse', '--is-inside-work-tree']);
+      out.gitRepo = rev.stdout === 'true';
+    } catch {
+      out.gitRepo = false;
+    }
+    if (out.gitRepo) {
+      out.currentBranch = (await runGit(['branch', '--show-current']).catch(() => ({ stdout: '' }))).stdout || null;
+      const remotes = (await runGit(['remote', '-v']).catch(() => ({ stdout: '' }))).stdout;
+      const fetchLine = remotes.split('\n').find((l) => l.includes('(fetch)'));
+      out.remoteUrl = fetchLine ? fetchLine.split(/\s+/)[1] || null : null;
+      const dirty = (await runGit(['status', '--porcelain'])).stdout;
+      out.dirty = dirty ? dirty.split('\n').filter(Boolean) : [];
+      out.lastLocalCommit = (await runGit(['log', '-1', '--format=%h %s']).catch(() => ({ stdout: '' }))).stdout || null;
+    }
+
+    if (token) {
+      const user = await githubApi('/user', token);
+      out.user = { login: user.login, name: user.name || user.login };
+      if (owner && repo) {
+        try {
+          const r = await githubApi(`/repos/${owner}/${repo}`, token);
+          out.repo = { fullName: r.full_name, defaultBranch: r.default_branch, private: r.private, pushedAt: r.pushed_at };
+        } catch (e: any) {
+          out.repoError = e.message;
+        }
+      }
+    }
+
+    const targetBranch = branch || out.currentBranch;
+    if (out.remoteUrl && targetBranch) {
+      try {
+        await runGit([...gitAuthFlags(token), 'fetch', 'origin']);
+        out.fetch = 'ok';
+      } catch (e: any) {
+        out.fetch = String(e.message || e).slice(0, 200);
+      }
+      const remoteRef = `origin/${targetBranch}`;
+      try {
+        const ahead = (await runGit(['rev-list', '--count', `${remoteRef}..HEAD`])).stdout;
+        const behind = (await runGit(['rev-list', '--count', `HEAD..${remoteRef}`])).stdout;
+        out.ahead = parseInt(ahead, 10) || 0;
+        out.behind = parseInt(behind, 10) || 0;
+        out.remoteBranchExists = true;
+      } catch {
+        out.ahead = null;
+        out.behind = null;
+        out.remoteBranchExists = false;
+      }
+    }
+
+    out.ok = true;
+    return res.json(out);
+  } catch (err: any) {
+    return res.status(500).json({ ok: false, error: String(err?.message || err).slice(0, 300) });
+  }
+});
+
+// Pull (fast-forward origin/<branch> into the working tree) or push
+// (commit all local changes as one chore commit, then push HEAD:<branch>).
+app.post('/api/github/sync', async (req, res) => {
+  const { token, owner, repo, branch, action, autoRestart } = req.body || {};
+  if (!['pull', 'push'].includes(action)) {
+    return res.status(400).json({ ok: false, error: `Unknown action "${action}".` });
+  }
+  if (owner && !isSafeGitRef(owner)) return res.status(400).json({ ok: false, error: 'Invalid GitHub owner.' });
+  if (repo && !isSafeGitRef(repo)) return res.status(400).json({ ok: false, error: 'Invalid GitHub repo.' });
+  if (branch && !isSafeGitRef(branch)) return res.status(400).json({ ok: false, error: 'Invalid branch name.' });
+
+  try {
+    const localBranch = branch || (await runGit(['branch', '--show-current']).catch(() => ({ stdout: '' }))).stdout || null;
+    if (!localBranch) {
+      return res.status(400).json({ ok: false, error: 'No local branch found — this directory must be a git repo with a checked-out branch.' });
+    }
+
+    if (action === 'pull') {
+      const dirty = (await runGit(['status', '--porcelain'])).stdout;
+      const files = dirty ? dirty.split('\n').filter(Boolean) : [];
+      if (files.length) {
+        return res.json({
+          ok: false,
+          blocked: 'dirty',
+          files: files.slice(0, 20),
+          error: `Working tree has ${files.length} uncommitted change(s). Commit or revert them before pulling (or use "Commit all & push" first).`,
+        });
+      }
+      const before = (await runGit(['rev-parse', 'HEAD']).catch(() => ({ stdout: 'none' }))).stdout;
+      await runGit([...gitAuthFlags(token), 'fetch', 'origin']);
+      await runGit(['merge', '--ff-only', `origin/${localBranch}`]);
+      const after = (await runGit(['rev-parse', 'HEAD'])).stdout;
+      const updated = before !== after;
+      const result: any = { ok: true, action: 'pull', updated, before: before.slice(0, 7), after: after.slice(0, 7) };
+      if (updated && autoRestart) {
+        // Detached relaunch of the dev server so the pulled code goes live.
+        // lsof kills whatever listens on :3000 (the wrapper itself does not).
+        const relaunch = `sleep 3; kill $(lsof -ti :3000) 2>/dev/null || true; sleep 1; VITE_USE_EMULATORS=true nohup ./node_modules/.bin/tsx server.ts > /tmp/fg-server.log 2>&1 &`;
+        const child = spawn('sh', ['-c', relaunch], { cwd: PROJECT_ROOT, detached: true, stdio: 'ignore' });
+        child.unref();
+        result.restarted = true;
+      }
+      return res.json(result);
+    }
+
+    if (action === 'push') {
+      const staged = (await runGit(['status', '--porcelain'])).stdout;
+      const files = staged ? staged.split('\n').filter(Boolean) : [];
+      if (files.length) {
+        await runGit(['add', '-A']);
+        await runGit(['commit', '-m', `chore: app sync update ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`]);
+      }
+      await runGit([...gitAuthFlags(token), 'push', 'origin', `HEAD:${localBranch}`]);
+      const sha = (await runGit(['rev-parse', 'HEAD'])).stdout;
+      return res.json({ ok: true, action: 'push', committed: files.length, sha: sha.slice(0, 7), branch: localBranch });
+    }
+
+    return res.status(400).json({ ok: false, error: 'Unknown action.' });
+  } catch (err: any) {
+    const msg = String(err?.message || err);
+    const hint = /Please tell me who you are|user\.email/.test(msg)
+      ? ' (Tip: configure git identity once — `git config --global user.name "…"` and `git config --global user.email "…"`.)'
+      : /fast-forward|diverged/i.test(msg)
+        ? ' (Tip: local branch diverged from origin — pull was refused to avoid overwriting local commits. Check "Push" or reset to origin.)'
+        : /403|auth/i.test(msg)
+          ? ' (Tip: the token needs repo "Contents" read/write access — or a classic PAT with the repo scope.)'
+          : '';
+    return res.status(500).json({ ok: false, action, error: msg.slice(0, 400) + hint });
   }
 });
 

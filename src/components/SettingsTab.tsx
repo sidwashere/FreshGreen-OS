@@ -1,7 +1,7 @@
 import { doc, getDoc, setDoc, collection, query, onSnapshot, deleteDoc } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import React, { useState, useEffect } from 'react';
-import { Key, Save, CheckCircle2, ShieldAlert, Globe, Server, Users, Settings, UserPlus, Trash2, ShieldCheck, UserCheck, UserX, Cpu, Zap, RefreshCcw } from 'lucide-react';
+import { Key, Save, CheckCircle2, ShieldAlert, Globe, Server, Users, Settings, UserPlus, Trash2, ShieldCheck, UserCheck, UserX, Cpu, Zap, RefreshCcw, Github, ArrowDownToLine, ArrowUpFromLine, Eye, EyeOff } from 'lucide-react';
 import { Brand, AppUser, AiModelPref } from '../types';
 import { fetchAiPref, saveAiPref, AI_MODEL_OPTIONS } from '../lib/keys';
 import { WPBridgeTester } from './WPBridgeTester';
@@ -751,14 +751,276 @@ const AiModelsTab: React.FC = () => {
   );
 };
 
+const GithubSyncTab: React.FC = () => {
+  const [config, setConfig] = useState<any>(() => {
+    try {
+      return JSON.parse(localStorage.getItem('greenops_github_config') || '{}');
+    } catch {
+      return {};
+    }
+  });
+  const [showToken, setShowToken] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState<'test' | 'status' | 'pull' | 'push' | null>(null);
+  const [result, setResult] = useState<any>(null);
+  const [autoRestart, setAutoRestart] = useState(false);
+
+  const update = (key: string, value: string) => setConfig((c: any) => ({ ...c, [key]: value }));
+
+  const saveConfig = () => {
+    localStorage.setItem('greenops_github_config', JSON.stringify(config));
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+    try {
+      setDoc(doc(db, 'settings', 'global'), { githubConfig: config }, { merge: true });
+    } catch (err) {
+      console.debug('Saved GitHub config locally but skipped cloud sync.', err);
+    }
+  };
+
+  const call = async (path: string, body: any, key: typeof busy) => {
+    setBusy(key);
+    setResult(null);
+    try {
+      const res = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      // Auto-fill owner/repo from the remote URL when the fields are empty.
+      if (data?.remoteUrl && /github\.com[/:]([^/]+)\/([^/]+?)(\.git)?$/.test(data.remoteUrl)) {
+        const m = data.remoteUrl.match(/github\.com[/:]([^/]+)\/([^/]+?)(\.git)?$/);
+        if (m) {
+          setConfig((c: any) => ({
+            ...c,
+            owner: c.owner || m[1],
+            repo: c.repo || m[2],
+          }));
+        }
+      }
+      setResult(data);
+    } catch (e: any) {
+      setResult({ ok: false, error: e?.message || 'Request failed.' });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const btn = (key: typeof busy) =>
+    `px-3 py-2 rounded-lg text-xs font-semibold border transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5 ${busy === key ? 'opacity-70' : ''}`;
+
+  return (
+    <div className="space-y-6">
+      <div className="space-y-2 mb-6">
+        <h2 className="text-xl font-bold text-slate-900 flex items-center gap-2">
+          <Github className="w-5 h-5 text-slate-700" />
+          GitHub Sync
+        </h2>
+        <p className="text-slate-600 text-sm">
+          Pull the latest code or push your local work from here — no terminal needed. The token below is used only for
+          git fetch/push on the server and is never written into the repo or logs.
+        </p>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-6">
+        <div className="flex items-start gap-2 p-3 bg-amber-50 text-amber-800 text-xs rounded-xl border border-amber-100">
+          <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>
+            Create a token at <span className="font-mono">github.com/settings/tokens</span> — a fine-grained PAT with{' '}
+            <b>Contents: Read and write</b> access to this repo (or a classic PAT with the <b>repo</b> scope). Note:
+            the remote currently fails auth (<i>“Invalid username or token”</i>), so this token is also required for any
+            fetch or push.
+          </span>
+        </div>
+
+        {/* Config fields */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="md:col-span-2">
+            <label className="block text-xs font-semibold text-slate-500 mb-1.5">GitHub token (PAT)</label>
+            <div className="flex gap-2">
+              <input
+                type={showToken ? 'text' : 'password'}
+                value={config.token || ''}
+                onChange={(e) => update('token', e.target.value)}
+                placeholder="github_pat_… or ghp_…"
+                className="flex-1 px-3 py-2 rounded-xl border border-slate-200 text-sm font-mono focus:ring-2 focus:ring-indigo-200 focus:border-indigo-300 outline-none"
+              />
+              <button
+                onClick={() => setShowToken(!showToken)}
+                className="px-3 py-2 rounded-xl border border-slate-200 text-slate-500 hover:bg-slate-50"
+                title={showToken ? 'Hide token' : 'Show token'}
+              >
+                {showToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-500 mb-1.5">Owner</label>
+            <input
+              value={config.owner || ''}
+              onChange={(e) => update('owner', e.target.value)}
+              placeholder="sidwashere"
+              className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm font-mono focus:ring-2 focus:ring-indigo-200 focus:border-indigo-300 outline-none"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-500 mb-1.5">Repo</label>
+            <input
+              value={config.repo || ''}
+              onChange={(e) => update('repo', e.target.value)}
+              placeholder="FreshGreen-OS"
+              className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm font-mono focus:ring-2 focus:ring-indigo-200 focus:border-indigo-300 outline-none"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-500 mb-1.5">Branch (optional — defaults to current)</label>
+            <input
+              value={config.branch || ''}
+              onChange={(e) => update('branch', e.target.value)}
+              placeholder="FGOS_2.0"
+              className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm font-mono focus:ring-2 focus:ring-indigo-200 focus:border-indigo-300 outline-none"
+            />
+          </div>
+          <div className="flex items-end">
+            <button
+              onClick={saveConfig}
+              className="px-4 py-2 rounded-xl text-xs font-semibold bg-slate-900 text-white hover:bg-slate-700 transition"
+            >
+              {saved ? <CheckCircle2 className="inline w-4 h-4 mr-1" /> : <Save className="inline w-4 h-4 mr-1" />}
+              {saved ? 'Saved' : 'Save config'}
+            </button>
+          </div>
+        </div>
+
+        {/* Actions */}
+        <div className="pt-4 border-t border-slate-100">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => call('/api/github/test', config, 'test')}
+              disabled={!!busy}
+              className={`${btn('test')} bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200`}
+            >
+              <Zap className="w-3.5 h-3.5" /> {busy === 'test' ? 'Testing…' : 'Test token'}
+            </button>
+            <button
+              onClick={() => call('/api/github/status', config, 'status')}
+              disabled={!!busy}
+              className={`${btn('status')} bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border-indigo-200`}
+            >
+              <RefreshCcw className="w-3.5 h-3.5" /> {busy === 'status' ? 'Checking…' : 'Sync status'}
+            </button>
+            <button
+              onClick={() => call('/api/github/sync', { ...config, action: 'pull', autoRestart }, 'pull')}
+              disabled={!!busy}
+              className={`${btn('pull')} bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-200`}
+            >
+              <ArrowDownToLine className="w-3.5 h-3.5" /> {busy === 'pull' ? 'Pulling…' : 'Pull updates'}
+            </button>
+            <button
+              onClick={() => call('/api/github/sync', { ...config, action: 'push' }, 'push')}
+              disabled={!!busy}
+              className={`${btn('push')} bg-sky-50 hover:bg-sky-100 text-sky-700 border-sky-200`}
+            >
+              <ArrowUpFromLine className="w-3.5 h-3.5" /> {busy === 'push' ? 'Pushing…' : 'Commit all & push'}
+            </button>
+            <label className="flex items-center gap-2 text-xs text-slate-500 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={autoRestart}
+                onChange={(e) => setAutoRestart(e.target.checked)}
+                className="accent-indigo-600"
+              />
+              Rebuild + relaunch app server after pull
+            </label>
+          </div>
+          <p className="text-[10px] text-slate-400 mt-2">
+            Pull fast-forwards your current branch to origin and refuses if there are uncommitted changes. Push commits
+            all local changes as one <span className="font-mono">chore: app sync update</span> commit, then pushes.
+          </p>
+        </div>
+
+        {/* Results */}
+        {result && (
+          <div className={`p-4 rounded-xl border text-xs space-y-3 ${result.ok ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-red-50 border-red-200 text-red-700'}`}>
+            <div className="flex items-center gap-2 font-bold">
+              {result.ok ? <CheckCircle2 className="w-4 h-4" /> : <ShieldAlert className="w-4 h-4" />}
+              {result.ok ? (result.action === 'pull' ? (result.updated ? 'Update pulled' : 'Already up to date') : result.action === 'push' ? 'Pushed' : result.user ? 'Token valid' : 'OK') : 'Failed'}
+            </div>
+
+            {result.user && (
+              <p className="opacity-90">
+                Authenticated as <b>{result.user.login}</b>{result.user.name ? ` (${result.user.name})` : ''}
+                {result.repo?.fullName && (
+                  <> · repo <b>{result.repo.fullName}</b>{result.repo.private ? ' (private)' : ' (public)'} · default branch <b>{result.repo.defaultBranch}</b></>
+                )}
+                {result.repoError && <span className="block text-red-600 mt-1">{result.repoError}</span>}
+              </p>
+            )}
+
+            {result.gitRepo !== undefined && (
+              <p className="opacity-90">
+                Local: {result.gitRepo ? `git repo on branch ${result.currentBranch || '?'}` : 'not a git repo'}
+                {result.remoteUrl && <span className="block font-mono truncate">{result.remoteUrl}</span>}
+                {result.lastLocalCommit && <span className="block opacity-80">HEAD {result.lastLocalCommit}</span>}
+              </p>
+            )}
+
+            {typeof result.ahead === 'number' && (
+              <p className="opacity-90">
+                {result.remoteBranchExists === false ? 'No matching branch on origin yet.' : (
+                  <>
+                    {result.behind} commit(s) behind origin, {result.ahead} ahead
+                    {result.fetch && result.fetch !== 'ok' && (
+                      <span className="block text-amber-600 mt-1">Fetch failed: {result.fetch}</span>
+                    )}
+                  </>
+                )}
+              </p>
+            )}
+
+            {Array.isArray(result.dirty) && result.dirty.length > 0 && (
+              <div className="opacity-90">
+                {result.dirty.length} uncommitted change(s):
+                <div className="mt-1 max-h-28 overflow-y-auto bg-white/60 rounded-lg p-2 font-mono text-[10px] space-y-0.5">
+                  {result.dirty.slice(0, 15).map((f: string, i: number) => (
+                    <div key={i}>{f}</div>
+                  ))}
+                  {result.dirty.length > 15 && <div>… and {result.dirty.length - 15} more</div>}
+                </div>
+              </div>
+            )}
+
+            {result.committed !== undefined && (
+              <p className="opacity-90">
+                {result.committed === 0 ? 'Nothing to commit' : `Committed ${result.committed} file(s)`} · pushed{' '}
+                <span className="font-mono">{result.sha}</span> to <b>{result.branch}</b>
+              </p>
+            )}
+
+            {result.updated !== undefined && !result.ok && (
+              <p className="opacity-90">Before {result.before} → after {result.after}</p>
+            )}
+
+            {result.restarted && <p className="opacity-90">App server relaunching (new code goes live in ~5s).</p>}
+
+            {result.error && <p className="opacity-90 break-words">{result.error}</p>}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 export const SettingsTab: React.FC<SettingsProps> = ({ brands, selectedBrandId, currentUser }) => {
-  const [activeSubTab, setActiveSubTab] = useState<'api-keys' | 'ai-models' | 'wp-bridge' | 'deployment' | 'users' | 'wizard'>('api-keys');
+  const [activeSubTab, setActiveSubTab] = useState<'api-keys' | 'ai-models' | 'wp-bridge' | 'deployment' | 'users' | 'wizard' | 'github'>('api-keys');
 
   const subTabs = [
     { id: 'api-keys', label: 'API Keys & BYOK', icon: Key },
     { id: 'ai-models', label: 'AI Models & Fallback', icon: Cpu },
     { id: 'wp-bridge', label: 'WP REST API Bridge', icon: Globe },
     { id: 'deployment', label: 'cPanel Deployment', icon: Server },
+    { id: 'github', label: 'GitHub Sync', icon: Github },
     { id: 'users', label: 'User Management', icon: Users },
     { id: 'wizard', label: 'Setup Wizard', icon: Settings }
   ] as const;
@@ -797,6 +1059,7 @@ export const SettingsTab: React.FC<SettingsProps> = ({ brands, selectedBrandId, 
           {activeSubTab === 'ai-models' && <AiModelsTab />}
           {activeSubTab === 'wp-bridge' && <WPBridgeTester brands={brands} selectedBrandId={selectedBrandId} />}
           {activeSubTab === 'deployment' && <CPanelExporter />}
+          {activeSubTab === 'github' && <GithubSyncTab />}
           {activeSubTab === 'users' && <UserManagementTab currentUser={currentUser} />}
           {activeSubTab === 'wizard' && <Wizard />}
         </div>
