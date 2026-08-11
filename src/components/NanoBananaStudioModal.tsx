@@ -163,7 +163,7 @@ export const NanoBananaStudioModal: React.FC<NanoBananaStudioModalProps> = ({
                 className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm focus:ring-2 focus:ring-amber-500"
               >
                 <option value="auto">Auto — best available (Gemini → DALL-E 3 → SDXL)</option>
-                <option value="gemini">Gemini (Imagen 3 — free server key)</option>
+                <option value="gemini">Gemini (Nano Banana — free server key)</option>
                 <option value="huggingface">Hugging Face (Stable Diffusion - Free/BYOK)</option>
                 <option value="openai">OpenAI (DALL-E 3 - BYOK)</option>
                 <option value="replicate">Replicate (Flux Schnell - BYOK)</option>

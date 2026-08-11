@@ -274,22 +274,62 @@ export default function App() {
     if (!user) return;
     try {
       const itemToSave = { ...updatedItem, userId: user.uid };
-      await setDoc(doc(db, 'content_items', updatedItem.id), itemToSave);
+      // Firestore rejects undefined field values ("invalid-argument"), and blocks
+      // routinely contain them (imageLayout/author/cards/slides are only set for
+      // their block type). Deep-strip undefined before persisting so autosaves
+      // never die silently.
+      const stripUndefined = (v: any): any => {
+        if (Array.isArray(v)) return v.map(stripUndefined);
+        if (v && typeof v === 'object') {
+          const o: Record<string, any> = {};
+          for (const [k, val] of Object.entries(v)) {
+            if (val !== undefined) o[k] = stripUndefined(val);
+          }
+          return o;
+        }
+        return v;
+      };
+      await setDoc(doc(db, 'content_items', updatedItem.id), stripUndefined(itemToSave));
     } catch (err) {
       console.error('Failed to save content item', err);
     }
   };
 
-  const handleDeleteItem = async (itemId: string) => {
-    if (!user) return;
+  // Deletes an item from Firestore and trashes its WordPress post (if any).
+  const handleDeleteItem = async (item: ContentItem): Promise<{ success: boolean; message?: string }> => {
+    if (!user) return { success: false, message: 'Not signed in.' };
     try {
-      await deleteDoc(doc(db, 'content_items', itemId));
-    } catch (err) {
+      if (item.wpPostId) {
+        const brand = brands.find((b) => b.id === item.brandId);
+        if (!brand) return { success: false, message: 'Could not find the brand connection for this item.' };
+        try {
+          const res = await fetch('/api/wp/delete-post', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ brand, wpPostId: item.wpPostId, contentType: item.contentType }),
+          });
+          const data = await res.json();
+          if (!data.success) {
+            return { success: false, message: `WordPress: ${data.message || 'could not trash the post.'}` };
+          }
+        } catch (err: any) {
+          return { success: false, message: `Could not reach WordPress: ${err.message}` };
+        }
+      }
+      await deleteDoc(doc(db, 'content_items', item.id));
+      return { success: true };
+    } catch (err: any) {
       console.error('Failed to delete content item', err);
+      return { success: false, message: err?.message || 'Failed to delete the item.' };
     }
   };
 
-  const handleCreateNewItem = async (title: string, brandId: string, contentType: 'post' | 'page') => {
+  const handleCreateNewItem = async (
+    title: string,
+    brandId: string,
+    contentType: 'post' | 'page',
+    opts?: { primaryKeyword?: string; secondaryKeywords?: string[] }
+  ) => {
     if (!user) return;
     const brand = brands.find((b) => b.id === brandId) || brands[0];
     const newItemId = `item-${Date.now()}`;
@@ -302,8 +342,8 @@ export default function App() {
       contentType,
       wpTemplate: brand?.pageTemplates?.[0] || 'default',
       status: 'Planned',
-      primaryKeyword: title.split(' ').slice(0, 4).join(' '),
-      secondaryKeywords: [],
+      primaryKeyword: opts?.primaryKeyword || title.split(' ').slice(0, 4).join(' '),
+      secondaryKeywords: opts?.secondaryKeywords || [],
       seoBrief: 'Target audience interest and organic search ranking.',
       bodyHtml: `<h2>${title}</h2><p>Article introduction content generated for ${brand?.name || 'Brand'}.</p>`,
       blocks: [],
@@ -520,6 +560,7 @@ export default function App() {
                 selectedBrandId={selectedBrandId}
                 onSelectBrand={setSelectedBrandId}
                 onEditItem={handleEditItem}
+                onDeleteItem={handleDeleteItem}
                 onCreateNewItem={handleCreateNewItem}
                 onImportWPPost={handleImportWPPost}
               />

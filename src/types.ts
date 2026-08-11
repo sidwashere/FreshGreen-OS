@@ -26,6 +26,38 @@ export interface Brand {
   pageTemplates: string[]; // e.g. ['default', 'template-full-width.php', 'landing-page.php']
   defaultStatus: 'draft' | 'publish';
   createdAt: string;
+  /** Brand "blog style kit" — drives the rich, responsive HTML the editor
+   * generates for every live post. Falls back to per-brand defaults derived
+   * from `primaryColor` when absent. */
+  blogStyle?: Partial<BlogStyleKit>;
+}
+
+/** Per-brand blog visual identity. Every field is optional at the Brand level;
+ * `resolveBlogStyle(brand)` merges stored overrides with deterministic defaults
+ * (derived from `primaryColor`), so a brand can never render unstyled. */
+export interface BlogStyleKit {
+  /** Main action colour — buttons, links, accents, hero band. */
+  primary: string;
+  /** Secondary tint — soft chips, sub-bands, card borders. */
+  secondary: string;
+  /** Highlight colour — badges, quotes, callout bars. */
+  accent: string;
+  /** Card / callout surface background. */
+  surface: string;
+  /** Band (hero / CTA) background — usually a deep brand tone. */
+  band: string;
+  /** Body copy colour. */
+  text: string;
+  /** Muted meta colour (captions, small print). */
+  muted: string;
+  /** Heading font stack (system-safe — no external font loading). */
+  headingFont: string;
+  /** Body font stack. */
+  bodyFont: string;
+  /** Corner radius in px applied to cards, buttons, callouts. */
+  radius: number;
+  /** Button rendering style for CTAs. */
+  buttonStyle: 'solid' | 'outline' | 'soft';
 }
 
 export type VisualBlockType = 
@@ -35,7 +67,31 @@ export type VisualBlockType =
   | 'product_cta'
   | 'faq'
   | 'callout'
-  | 'image_banner';
+  | 'image_banner'
+  | 'cards'
+  | 'quote'
+  | 'cta_band'
+  | 'carousel';
+
+/** One card inside a `cards` grid block. */
+export interface CardItem {
+  id: string;
+  title: string;
+  content: string;
+  imageUrl?: string;
+  buttonText?: string;
+  buttonUrl?: string;
+}
+
+/** One slide inside a `carousel` block (horizontal scroll-snap row). */
+export interface CarouselSlide {
+  id: string;
+  imageUrl: string;
+  title?: string;
+  content?: string;
+  buttonText?: string;
+  buttonUrl?: string;
+}
 
 /** Per-block fine-tuning for AI rewriting on the Write tab. */
 export interface BlockTune {
@@ -55,11 +111,23 @@ export interface VisualBlock {
   buttonUrl?: string;
   imageUrl?: string;
   imageAlt?: string;
+  /** Layout variant for image blocks: full width, left/right floated, centred. */
+  imageLayout?: 'full' | 'left' | 'right' | 'center';
+  imageCaption?: string;
   badge?: string;
   faqItems?: Array<{ question: string; answer: string }>;
   accentColor?: string;
+  /** Cards for `cards` blocks (responsive card grid). */
+  cards?: CardItem[];
+  /** Slides for `carousel` blocks (scroll-snap, swipeable). */
+  slides?: CarouselSlide[];
+  /** Attribution for `quote` blocks. */
+  author?: string;
   /** Per-block AI fine-tuning (tone / length / creativity / guidance). */
   tune?: BlockTune;
+  /** Optional keywords this block should emphasise — comma-separated. Fed to AI
+   * rewrites so each section can target its own search phrase. */
+  keywords?: string;
 }
 
 /** One recorded AI generation run (model attribution + history with timestamps). */

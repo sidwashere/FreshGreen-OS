@@ -21,7 +21,11 @@ import {
   Gauge,
   TrendingUp,
   Users,
-  Wifi
+  Wifi,
+  ChevronDown,
+  Trash2,
+  Pencil,
+  ExternalLink
 } from 'lucide-react';
 import {
   LineChart,
@@ -134,7 +138,13 @@ interface DashboardProps {
   selectedBrandId: string;
   onSelectBrand: (brandId: string) => void;
   onEditItem: (item: ContentItem) => void;
-  onCreateNewItem: (title: string, brandId: string, contentType: 'post' | 'page') => void;
+  onDeleteItem: (item: ContentItem) => Promise<{ success: boolean; message?: string }>;
+  onCreateNewItem: (
+    title: string,
+    brandId: string,
+    contentType: 'post' | 'page',
+    opts?: { primaryKeyword?: string; secondaryKeywords?: string[] }
+  ) => void;
   onImportWPPost?: (post: any) => void;
 }
 
@@ -144,15 +154,20 @@ export const Dashboard: React.FC<DashboardProps> = ({
   selectedBrandId,
   onSelectBrand,
   onEditItem,
+  onDeleteItem,
   onCreateNewItem,
   onImportWPPost,
 }) => {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newTitle, setNewTitle] = useState('');
+  const [newPrimaryKeyword, setNewPrimaryKeyword] = useState('');
+  const [newSecondaryKeywords, setNewSecondaryKeywords] = useState('');
   const [newBrandId, setNewBrandId] = useState(selectedBrandId === 'all' ? (brands[0]?.id || '') : selectedBrandId);
   const [newType, setNewType] = useState<'post' | 'page'>('post');
   const [searchQuery, setSearchQuery] = useState('');
   const [stageFilter, setStageFilter] = useState<'all' | 'planned' | 'writing' | 'review' | 'published' | 'error'>('all');
+  // Pipeline grid shows 6 cards; "View All" expands to the full filtered list.
+  const [visibleItemLimit, setVisibleItemLimit] = useState(6);
   const [expandedInsight, setExpandedInsight] = useState<number | null>(null);
   const [chartRange, setChartRange] = useState<7 | 14 | 30>(14);
 
@@ -218,6 +233,39 @@ export const Dashboard: React.FC<DashboardProps> = ({
     // Page-speed measurements refresh in the background
     setSyncingPerf(true);
     Promise.all(brands.map((b) => fetchPerfFor(b, true))).finally(() => setSyncingPerf(false));
+  };
+
+  // Delete a content item (and its WordPress post when it has one) after confirmation.
+  const confirmDelete = async (item: ContentItem) => {
+    const liveNote = item.wpLiveUrl ? `\n\nIts live WordPress post (${item.wpLiveUrl}) will be moved to the trash.` : '';
+    if (!window.confirm(`Delete "${item.title}"?${liveNote}\n\nThis cannot be undone.`)) return;
+    const res = await onDeleteItem(item);
+    if (!res.success) {
+      window.alert(res.message || 'Failed to delete the item.');
+      return;
+    }
+    // Refresh WP overviews so live post lists / stats reflect the deletion.
+    brands.forEach((b) => { void fetchOverviewFor(b, true); });
+  };
+
+  // Trash a WordPress post directly (for posts that live only on WP, not in the app).
+  const trashWpPost = async (post: any) => {
+    const brand = brands.find((b) => b.id === post.brandId);
+    if (!brand) return;
+    const label = postTitle(post);
+    if (!window.confirm(`Move "${label}" on ${brand.name} to the WordPress trash?\n\nIt stays recoverable in WordPress for 30 days.`)) return;
+    try {
+      const res = await fetch('/api/wp/delete-post', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brand, wpPostId: post.id }),
+      });
+      const data = await res.json();
+      if (!data.success) { window.alert(data.message || 'Failed to delete the post.'); return; }
+      brands.forEach((b) => { void fetchOverviewFor(b, true); });
+    } catch (e: any) {
+      window.alert(e?.message || 'Failed to delete the post.');
+    }
   };
 
   // Initial load, then live polling: overviews every 60s, perf every 10min
@@ -321,9 +369,21 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const handleCreateSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTitle.trim()) return;
-    onCreateNewItem(newTitle.trim(), newBrandId, newType);
+    onCreateNewItem(
+      newTitle.trim(),
+      newBrandId,
+      newType,
+      {
+        primaryKeyword: newPrimaryKeyword.trim() || undefined,
+        secondaryKeywords: newSecondaryKeywords
+          .split(',')
+          .map((k) => k.trim())
+          .filter(Boolean),
+      }
+    );
     setNewTitle('');
-    setShowCreateModal(false);
+    setNewPrimaryKeyword('');
+    setNewSecondaryKeywords('');
   };
 
   // Real content-activity chart: posts published vs drafts edited per day,
@@ -396,6 +456,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
           date: isPub ? p.date : p.modified || p.date,
           title: postTitle(p),
           status: p.status,
+          wpPostId: p.id,
+          wpLiveUrl: p.link || '',
         });
       });
     });
@@ -1018,16 +1080,19 @@ export const Dashboard: React.FC<DashboardProps> = ({
               </div>
               {stageFilter !== 'all' ? (
                 <button
-                  onClick={() => setStageFilter('all')}
+                  onClick={() => { setStageFilter('all'); setVisibleItemLimit(6); }}
                   className="text-sm font-semibold text-indigo-600 hover:text-indigo-700 flex items-center transition-colors"
                 >
                   Show All <ChevronRight className="w-4 h-4 ml-1" />
                 </button>
-              ) : (
-                <button className="text-sm font-semibold text-indigo-600 hover:text-indigo-700 flex items-center transition-colors">
-                  View All <ChevronRight className="w-4 h-4 ml-1" />
+              ) : filteredItems.length > 6 ? (
+                <button
+                  onClick={() => setVisibleItemLimit(visibleItemLimit > 6 ? 6 : filteredItems.length)}
+                  className="text-sm font-semibold text-indigo-600 hover:text-indigo-700 flex items-center transition-colors"
+                >
+                  {visibleItemLimit > 6 ? 'Show Fewer' : `View All (${filteredItems.length})`} <ChevronRight className="w-4 h-4 ml-1" />
                 </button>
-              )}
+              ) : null}
             </div>
             
             {filteredItems.length === 0 ? (
@@ -1050,7 +1115,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {filteredItems.slice(0, 6).map(item => {
+                {filteredItems.slice(0, visibleItemLimit).map(item => {
                   const brand = brands.find(b => b.id === item.brandId);
                   return (
                     <div key={item.id} className="p-4 rounded-[16px] border border-slate-100 hover:border-indigo-200 hover:shadow-md transition bg-slate-50/50 hover:bg-white group cursor-pointer" onClick={() => onEditItem(item)} title={`"${item.title}" — currently in the ${item.status.replace('_', ' ')} stage of the workflow${item.primaryKeyword ? `, targeting keyword "${item.primaryKeyword}"` : ''}. Click to open in the editor.`}>
@@ -1097,12 +1162,24 @@ export const Dashboard: React.FC<DashboardProps> = ({
                         <span>Plan</span><span>Write</span><span>Review</span><span>Live</span>
                       </div>
 
-                      <div className="mt-3 flex items-center text-xs text-slate-500 justify-between">
+                      <div className="mt-3 flex items-center text-xs text-slate-500 justify-between gap-2">
                         <span className="font-mono bg-white px-2 py-1 rounded border border-slate-200 truncate max-w-[150px]">
                           {item.primaryKeyword || 'No keyword'}
                         </span>
-                        <span className="flex items-center gap-1 text-indigo-500 text-[10px] font-bold opacity-0 group-hover:opacity-100 transition-opacity">
-                          Open <ChevronRight className="w-3.5 h-3.5" />
+                        <span className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); onEditItem(item); }}
+                            className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-600 text-[10px] font-bold transition"
+                          >
+                            <Pencil className="w-3 h-3" /> Edit
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); void confirmDelete(item); }}
+                            title={`Delete "${item.title}"${item.wpLiveUrl ? ' and trash its WordPress post' : ''}`}
+                            className="flex items-center gap-1 px-2 py-1 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 text-[10px] font-bold transition"
+                          >
+                            <Trash2 className="w-3 h-3" /> Delete
+                          </button>
                         </span>
                       </div>
                     </div>
@@ -1260,6 +1337,28 @@ export const Dashboard: React.FC<DashboardProps> = ({
                         <span className="text-[9px] font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded-full">{e.brandName}</span>
                         <span className="text-[10px] text-slate-400">{timeAgo(e.date)}</span>
                       </div>
+                      {e.kind === 'published' && e.wpPostId != null && (
+                        <div className="flex items-center gap-1.5 mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                          {(() => {
+                            const appItem = items.find(i => String(i.wpPostId) === String(e.wpPostId));
+                            return appItem ? (
+                              <button
+                                onClick={() => onEditItem(appItem)}
+                                className="flex items-center gap-1 px-2 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-600 text-[10px] font-bold transition"
+                              >
+                                <Pencil className="w-3 h-3" /> Edit
+                              </button>
+                            ) : null;
+                          })()}
+                          <button
+                            onClick={() => void trashWpPost({ id: e.wpPostId, brandId: e.brandId, title: e.title })}
+                            title={`Trash this WordPress post (${e.wpLiveUrl || 'no link'}) — recoverable in WP for 30 days`}
+                            className="flex items-center gap-1 px-2 py-1 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 text-[10px] font-bold transition"
+                          >
+                            <Trash2 className="w-3 h-3" /> Trash
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -1285,11 +1384,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 livePosts
                   .filter(post => selectedBrandId === 'all' || post.brandId === selectedBrandId)
                   .map((post, i) => (
-                  <button 
-                    key={`${post.brandId}-${post.id}`} 
+                  <div
+                    key={`${post.brandId}-${post.id}`}
                     onClick={() => onImportWPPost && onImportWPPost(post)}
                     title={`"${post.title?.rendered || 'Untitled Post'}" — published ${new Date(post.date).toLocaleDateString()} on ${post.brandName}. Click to pull this post into the editor.`}
-                    className="group block relative flex items-start gap-4 p-3 rounded-2xl hover:bg-slate-50 transition border border-transparent hover:border-slate-100 w-full text-left"
+                    className="group block relative flex items-start gap-4 p-3 rounded-2xl hover:bg-slate-50 transition border border-transparent hover:border-slate-100 w-full text-left cursor-pointer"
                   >
                     <div className="w-10 h-10 rounded-[12px] flex items-center justify-center font-bold text-xs text-white shadow-sm shrink-0"
                          style={{ backgroundColor: post.brandColor || '#4f46e5' }}>
@@ -1300,13 +1399,40 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       <div className="flex items-center gap-2 mt-1.5">
                         <span className="text-[10px] font-semibold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">{post.brandName}</span>
                         <span className="text-[10px] font-medium text-slate-400">{new Date(post.date).toLocaleDateString()}</span>
+                        {post.link && (
+                          <a
+                            href={post.link}
+                            target="_blank"
+                            rel="noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="flex items-center gap-0.5 text-[10px] font-semibold text-sky-600 hover:text-sky-700 hover:underline"
+                            title="Open the live post in a new tab"
+                          >
+                            <ExternalLink className="w-3 h-3" /> view live
+                          </a>
+                        )}
                       </div>
                     </div>
-                    <div className="pt-2 flex flex-col items-end gap-1">
-                       <span className="text-[10px] text-indigo-500 font-semibold opacity-0 group-hover:opacity-100 transition-opacity">Edit directly</span>
-                       <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-indigo-500 transition-colors" />
+                    <div className="pt-2 flex flex-col items-end gap-1.5">
+                      <span className="text-[10px] text-indigo-500 font-semibold opacity-0 group-hover:opacity-100 transition-opacity">Edit directly</span>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); onImportWPPost && onImportWPPost(post); }}
+                          className="flex items-center gap-1 px-2 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-600 text-[10px] font-bold transition opacity-0 group-hover:opacity-100"
+                          title="Pull this post into the editor"
+                        >
+                          <Pencil className="w-3 h-3" /> Edit
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); void trashWpPost(post); }}
+                          className="flex items-center gap-1 px-2 py-1 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 text-[10px] font-bold transition opacity-0 group-hover:opacity-100"
+                          title="Move this post to the WordPress trash (recoverable for 30 days)"
+                        >
+                          <Trash2 className="w-3 h-3" /> Trash
+                        </button>
+                      </div>
                     </div>
-                  </button>
+                  </div>
                 ))
               )}
             </div>
@@ -1388,6 +1514,38 @@ export const Dashboard: React.FC<DashboardProps> = ({
                   autoFocus
                 />
               </div>
+
+              <details className="group rounded-xl border border-slate-200 bg-slate-50/60">
+                <summary className="flex items-center justify-between px-4 py-3 cursor-pointer select-none text-sm font-semibold text-slate-600 hover:text-slate-800">
+                  <span>Optional — keyword planning for richer SEO</span>
+                  <ChevronDown className="w-4 h-4 text-slate-400 group-open:rotate-180 transition" />
+                </summary>
+                <div className="px-4 pb-4 pt-1 space-y-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-500 mb-1.5">Primary Keyword</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. natural dog treats UK (optional)"
+                      value={newPrimaryKeyword}
+                      onChange={(e) => setNewPrimaryKeyword(e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-500 mb-1.5">Secondary Keywords</label>
+                    <input
+                      type="text"
+                      placeholder="Comma-separated, e.g. grain-free treats, puppy snacks (optional)"
+                      value={newSecondaryKeywords}
+                      onChange={(e) => setNewSecondaryKeywords(e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                    />
+                  </div>
+                  <p className="text-[11px] text-slate-400">
+                    Skip this and the inbuilt SEO tool will still analyse, score and refine the post automatically.
+                  </p>
+                </div>
+              </details>
 
               <div className="pt-4 flex justify-end space-x-3">
                 <button

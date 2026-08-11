@@ -8,7 +8,7 @@ export const INITIAL_BRANDS: Brand[] = [
     wpUrl: 'https://danielstastypetfoods.co.uk',
     wpUsername: 'admin_dtp',
     wpAppPassword: 'xxxx xxxx xxxx xxxx',
-    voiceGuidelines: 'Warm, empathetic, pet-first, scientifically backed yet accessible. Emphasize natural ingredients, wholesome nutrition, and tail-wagging joy.',
+    voiceGuidelines: 'Daniel\'s Tasty Petfoods — transparent nutrition, quality ingredients and the deep emotional bond between owners and pets. Educate first, be honest and confident, never sales-driven or fear-based. British English. Trust, integrity, kindness, practical solutions, quality before quantity. Never invent statistics or exaggerate benefits; where uncertainty exists, say so. Leave readers feeling "I can trust these people."',
     bannedWords: ['cheap', 'filler', 'artificial', 'junk', 'chemical'],
     primaryColor: '#10b981', // Emerald Green
     pageTemplates: ['default', 'template-full-width.php', 'template-pet-landing.php'],
@@ -22,7 +22,7 @@ export const INITIAL_BRANDS: Brand[] = [
     wpUrl: 'https://organisedandclean.co.uk',
     wpUsername: 'editor_clean',
     wpAppPassword: 'yyyy yyyy yyyy yyyy',
-    voiceGuidelines: 'Scandi-minimalist, crisp, uplifting, practical. Focus on eco-friendly cleaning hacks, home tranquility, decluttering systems, and sparkling results.',
+    voiceGuidelines: 'Organised and Clean — calm, reassuring, encouraging, never judgmental. Organisation supports wellbeing, reduces stress and brings pride and contentment. Speak with warmth, understanding and practical expertise; advice is always respectful, achievable and free from criticism. Celebrate progress rather than perfection. A comfortable home helps people live happier, healthier, less stressful lives.',
     bannedWords: ['cluttered', 'dirty', 'messy', 'overwhelming', 'harsh bleach'],
     primaryColor: '#06b6d4', // Cyan
     pageTemplates: ['default', 'template-clean-guide.php', 'page-wide.php'],
@@ -36,7 +36,7 @@ export const INITIAL_BRANDS: Brand[] = [
     wpUrl: 'https://homeatpeace.co.uk',
     wpUsername: 'care_manager',
     wpAppPassword: 'zzzz zzzz zzzz zzzz',
-    voiceGuidelines: 'Gentle, comforting, community-focused, reassuring, respectful. Highlights local care, peace of mind, family warmth, and serene living.',
+    voiceGuidelines: 'Home at Peace — compassionate, reassuring, deeply person-centred. Every individual deserves dignity, respect and genuine kindness. Communicate with warmth, empathy and quiet confidence; provide comfort, clarity and reassurance, never fear, pressure or guilt. Empower families with honest information, thoughtful guidance and practical support. Promote independence, choice and self-esteem. Professional excellence delivered with humanity.',
     bannedWords: ['stressful', 'alone', 'neglected', 'institutional'],
     primaryColor: '#8b5cf6', // Violet
     pageTemplates: ['default', 'template-community-care.php'],
@@ -50,7 +50,7 @@ export const INITIAL_BRANDS: Brand[] = [
     wpUrl: 'https://freshgreenclassics.co.uk',
     wpUsername: 'carol_fgc',
     wpAppPassword: 'aaaa bbbb cccc dddd',
-    voiceGuidelines: 'Artisanal, sustainable, classic heritage, organic living. Celebrates seasonal produce, timeless recipes, and farm-to-table elegance.',
+    voiceGuidelines: 'Fresh Green Classics — warm, imaginative, inspiring. Invite readers into a world of wonder, curiosity and discovery. Books shape young minds, strengthen family bonds and inspire a lifelong love of learning. Write with warmth, heart and authenticity; never talk down to children. Encourage questions, imagination and fresh eyes. Celebrate hope, friendship, courage and the simple joys of everyday life. Premium, trusted, timeless — like Penguin Books.',
     bannedWords: ['processed', 'synthetic', 'mass-produced'],
     primaryColor: '#059669', // Rich Emerald
     pageTemplates: ['default', 'template-recipe.php', 'template-full-width.php'],

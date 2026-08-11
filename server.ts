@@ -18,7 +18,10 @@ const GEMINI_TEXT_FALLBACK_MODEL = 'gemini-flash-latest';
 const MODEL_CHAIN = Array.from(new Set([GEMINI_TEXT_MODEL, GEMINI_TEXT_FALLBACK_MODEL]));
 
 const app = express();
-app.use(express.json({ limit: '10mb' }));
+// 25mb so PC image uploads fit: the client sends base64 data URLs (~4/3 the
+// binary size), so a 12 MB image arrives as ~16 MB of JSON. The upload-media
+// handler still caps the DECODED image at 12 MB with a friendly JSON error.
+app.use(express.json({ limit: '25mb' }));
 
 // Helper to initialize Gemini SDK cleanly on demand
 function getGeminiClient() {
@@ -444,6 +447,8 @@ function parseHtmlIntoBlocks(html: string, title?: string, keyword?: string): an
   }
 
   // Hero block from the first h1 (or the article title if no h1 exists).
+  // Populated with title, a short subtitle (first 1-2 sentences) AND the full
+  // intro as content so the Blocks view never shows an empty hero.
   const h1 = headings.find((h) => h.level === 1);
   const heroEnd = h1 ? h1.end : headings[0].start;
   const heroSubtitle = h1
@@ -453,6 +458,7 @@ function parseHtmlIntoBlocks(html: string, title?: string, keyword?: string): an
     type: 'hero',
     title: h1?.text || title || 'Featured Story',
     subtitle: heroSubtitle ? heroSubtitle.split(/[.!?]/).slice(0, 2).join('. ') + '.' : '',
+    content: heroSubtitle ? heroSubtitle.slice(0, 700) : '',
     badge: keyword || 'Featured',
   });
 
@@ -528,8 +534,8 @@ app.post('/api/ai/generate-article', async (req, res) => {
 
   const { title, contentType, primaryKeyword, secondaryKeywords, seoBrief, brand, byokKeys, applyHumanization, targetWordCount, modelPref } = req.body;
 
-  const aiApiKey = process.env.GEMINI_API_KEY;
-  const ai = aiApiKey ? new GoogleGenAI({ apiKey: aiApiKey }) : null;
+  const aiApiKey = byokKeys?.gemini || process.env.GEMINI_API_KEY;
+  let ai = aiApiKey ? new GoogleGenAI({ apiKey: aiApiKey }) : null;
   const pref = modelPref || {};
 
   // --- Lifecycle bookkeeping ------------------------------------------------
@@ -610,7 +616,11 @@ Additional Context / Brief: "${seoBrief || 'Focus on high value, reader satisfac
     let genProvider = 'gemini';
     let genFallback = false;
     const targetForProgress = Math.max(300, safeCount(targetWordCount) || 900);
-    try {
+
+    // One full streaming attempt over the Gemini model chain with the current
+    // client. Re-runnable: if the saved key is rejected we rebuild the client
+    // with the server key and run this again.
+    const attemptStream = async () => {
       for await (const { text, model } of streamWithModelFallback(ai, {
         contents: prompt,
         config: { systemInstruction: writeInstruction, responseMimeType: 'text/plain' },
@@ -634,10 +644,33 @@ Additional Context / Brief: "${seoBrief || 'Focus on high value, reader satisfac
             : 'Wrapping up with a strong conclusion…',
         });
       }
-    } catch (streamErr: any) {
-      // Gemini streaming is unavailable (quota exhausted, no key). Fall back to
-      // a single-shot completion on a non-Gemini provider (OpenRouter free tier
-      // or the custom OpenAI-compatible endpoint) and emit it as one chunk.
+    };
+
+    // Up to two streaming attempts: the saved (BYOK) key first, then — if the
+    // key itself is rejected (invalid/revoked/expired) — the server env key.
+    // Only after both fail do we fall back to a non-Gemini provider.
+    let usedKey = aiApiKey;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let streamErr: any = null;
+      try {
+        await attemptStream();
+      } catch (err: any) {
+        streamErr = err;
+      }
+      if (!streamErr) break; // stream completed — proceed to Phase 2
+
+      const keyIssue = /(API_KEY|PERMISSION|Missing Authentication|invalid api key|api key not found|auth)/i.test(String(streamErr?.message || ''));
+      const envKey = process.env.GEMINI_API_KEY;
+      if (keyIssue && attempt === 0 && envKey && envKey !== usedKey) {
+        emit({ type: 'status', message: 'Your saved Gemini key was rejected — retrying with the server key…', percent: 12 });
+        usedKey = envKey;
+        ai = new GoogleGenAI({ apiKey: envKey });
+        continue;
+      }
+
+      // Gemini streaming is unavailable (quota exhausted, no key, or bad key
+      // with no server fallback). Fall back to a single-shot completion on a
+      // non-Gemini provider (OpenRouter free tier or custom endpoint).
       try {
         const singleShot = await completeWithProvider(byokKeys, { ...pref, provider: pref.provider === 'gemini' ? 'openrouter' : pref.provider, autoFallback: true }, {
           systemInstruction: writeInstruction,
@@ -661,6 +694,7 @@ Additional Context / Brief: "${seoBrief || 'Focus on high value, reader satisfac
         emit({ type: 'error', error: `Article writing failed: ${reason.slice(0, 300)}` });
         return cleanup();
       }
+      break; // single-shot handled the attempt — don't retry the stream
     }
 
     const articleHtml = articleText.trim();
@@ -717,34 +751,17 @@ Keep the JSON compact — no whitespace, no code fences.`;
     }
     emit({ type: 'status', message: 'Metadata ready — polishing content…', percent: 87 });
 
-    // --- Phase 3: optional humanization (87-95%) ----------------------------
-    let finalHtml = articleHtml;
-    if (applyHumanization) {
-      emit({ type: 'status', message: 'Humanising the draft so it reads naturally…', percent: 90 });
-      console.log(`[AI] Humanizing content for ${title}...`);
-      const patina = new Humanizer({
-        tone: brand?.voiceGuidelines || 'conversational',
-        bannedWords: brand?.bannedWords || [],
-        levers: { complexity: 0.4, burstiness: 0.8 },
-      });
-      // Timebox humanization (single, non-streamed call): if it exceeds 120s
-      // (quota pressure), continue with the original draft rather than hang.
-      const humanized = await Promise.race([
-        patina.rewriteHtml(articleHtml, aiApiKey, genModel),
-        new Promise<string>((resolve) => setTimeout(() => {
-          console.warn('[AI] Humanization exceeded 120s — continuing with the original draft.');
-          resolve(articleHtml);
-        }, 120000)),
-      ]);
-      if (humanized && humanized !== articleHtml && stripHtml(humanized)) {
-        finalHtml = humanized;
-        seoBriefOut += "\n\n**Note:** Content has been processed through Patina to bypass AI detection.";
-      }
-      emit({ type: 'status', message: 'Humanisation complete — finalising blocks…', percent: 95 });
-    }
+    // --- Phase 3: humanisation moved OUT of the generation stream -----------
+    // The draft is emitted as-is. Humanising is now a separate, interactive
+    // step (/api/ai/humanize-draft) so the user can compare before/after and
+    // decide which version to keep. This also removes the old failure mode
+    // where the humanizer received a non-Gemini model id and stalled/404'd,
+    // which killed the stream with a generic "connection closed" error.
+    emit({ type: 'status', message: 'Draft complete — structuring blocks…', percent: 93 });
 
-    // --- Phase 4: blocks derived from the FINAL html (95-100%) --------------
+    // --- Phase 4: blocks derived from the FINAL html (93-100%) --------------
     // The Blocks view is guaranteed to be populated whenever content exists.
+    const finalHtml = articleHtml;
     const blocks = parseHtmlIntoBlocks(finalHtml, title, primaryKeyword);
     emit({ type: 'status', message: 'Structuring blocks & finishing up…', percent: 98 });
 
@@ -774,6 +791,95 @@ Keep the JSON compact — no whitespace, no code fences.`;
     }
     emit({ type: 'error', error: errorMessage });
     cleanup();
+  }
+});
+
+// API Endpoint: Humanise a draft (interactive before/after step).
+// Separate from generation: returns the original + humanised HTML plus
+// re-derived blocks, and the client lets the user choose which version to keep.
+// Always uses a Gemini text model (never an OpenRouter id) and falls back to
+// the server key when the user's saved key is invalid.
+app.post('/api/ai/humanize-draft', async (req, res) => {
+  try {
+    const { html, brand, byokKeys } = req.body;
+    const originalHtml = String(html || '');
+    if (!originalHtml.trim() || (stripHtml(originalHtml) || '').trim().split(/\s+/).filter(Boolean).length < 50) {
+      return res.status(400).json({ error: 'Write at least 50 words of content first, then humanise it.' });
+    }
+
+    const patina = new Humanizer({
+      tone: brand?.voiceGuidelines || 'conversational',
+      bannedWords: brand?.bannedWords || [],
+      levers: { complexity: 0.4, burstiness: 0.8 },
+    });
+
+    // Try the user's saved key first, then the server key. For each key we walk
+    // the model chain (quota buckets are per-model), and we only give up on a
+    // key when the error is a hard auth failure — a quota'd (429) or model-less
+    // (404) key must fall through to the next key/model instead of failing.
+    const candidateKeys = [...new Set([byokKeys?.gemini, process.env.GEMINI_API_KEY].filter(Boolean))] as string[];
+    if (candidateKeys.length === 0) {
+      return res.json({ success: false, error: 'No Gemini API key available. Add one in Settings > AI Models.' });
+    }
+
+    const isAuthError = (msg: string) => /API_KEY_INVALID|API key not valid|PERMISSION_DENIED|UNAUTHENTICATED|invalid key/i.test(msg);
+    const isModelError = (msg: string) => /model\s+not\s+found|NOT_FOUND|no longer available|does not exist/i.test(msg);
+    const isQuotaError = (msg: string) => /RESOURCE_EXHAUSTED|quota|rate limit|429|high demand|503|UNAVAILABLE/i.test(msg);
+
+    let humanized = '';
+    let lastErr: any = null;
+    let usedModel = '';
+    let quotaBlocked = false;
+    for (const key of candidateKeys) {
+      for (const model of MODEL_CHAIN) {
+        try {
+          humanized = await Promise.race([
+            patina.rewriteHtmlOrThrow(originalHtml, key, model),
+            new Promise<string>((_, reject) =>
+              setTimeout(() => reject(new Error('Humanisation timed out after 90s — please retry.')), 90000)
+            ),
+          ]);
+          usedModel = model;
+          break;
+        } catch (err: any) {
+          lastErr = err;
+          const msg = String(err?.message || '');
+          if (isAuthError(msg)) break; // this key is dead — try the next key
+          if (isQuotaError(msg)) {
+            quotaBlocked = true;
+            // Respect the API's own "retry in Xs" hint between attempts.
+            const hint = parseRetryAfterHint(msg);
+            if (hint) await new Promise((r) => setTimeout(r, hint));
+          }
+          // Model errors (404/no longer available) and everything else fall
+          // through to the next model in the chain, then the next key.
+        }
+      }
+      if (humanized) break;
+    }
+
+    if (!humanized) {
+      const detail = String(lastErr?.message || lastErr || 'unknown error').slice(0, 220);
+      const hint = quotaBlocked
+        ? ' The Gemini quota for the current key is exhausted — add a different Gemini key in Settings > AI Models, or retry later when the daily quota resets.'
+        : '';
+      return res.json({ success: false, error: `Humanisation failed: ${detail}${hint}` });
+    }
+
+    const changed = humanized !== originalHtml && (stripHtml(humanized) || '').trim().length > 0;
+    return res.json({
+      success: true,
+      original: originalHtml,
+      humanized: changed ? humanized : originalHtml,
+      blocks: changed ? parseHtmlIntoBlocks(humanized, 'Humanised draft', '') : [],
+      provider: 'gemini',
+      model: usedModel || GEMINI_TEXT_MODEL,
+      changed,
+      note: changed ? 'Draft rewritten by Patina (Gemini).' : 'The model returned content identical to the original draft — no change was made.',
+    });
+  } catch (err: any) {
+    console.error('Error in /api/ai/humanize-draft:', err);
+    return res.status(500).json({ error: String(err?.message || err).slice(0, 300) });
   }
 });
 
@@ -886,7 +992,7 @@ app.post('/api/seo/improve', async (req, res) => {
       options = {},           // { tone, readability, densityTarget }
     } = req.body;
 
-    const aiApiKey = process.env.GEMINI_API_KEY;
+    const aiApiKey = byokKeys?.gemini || process.env.GEMINI_API_KEY;
 
     const bannedWordsText = brand?.bannedWords?.length
       ? `STRICT BANNED WORDS (DO NOT USE ANY OF THESE): ${brand.bannedWords.join(', ')}.`
@@ -978,9 +1084,9 @@ app.post('/api/ai/rewrite-block', async (req, res) => {
   try {
     const { block, direction, applyHumanization, brand, byokKeys, articleContext, tune } = req.body;
 
-    const aiApiKey = process.env.GEMINI_API_KEY;
+    const aiApiKey = byokKeys?.gemini || process.env.GEMINI_API_KEY;
 
-    const bannedWordsText = brand?.bannedWords?.length 
+    const bannedWordsText = brand?.bannedWords?.length
       ? `STRICT BANNED WORDS (DO NOT USE ANY OF THESE): ${brand.bannedWords.join(', ')}.`
       : '';
 
@@ -1049,6 +1155,9 @@ ${bannedWordsText}
 Tone for THIS block: ${tone}.
 ${lengthRule}
 Creativity level: ${creativity}.
+${block?.keywords?.trim()
+  ? `EMPHASIS KEYWORDS for this block (optional SEO directive): ${block.keywords.trim()}. Work each one in naturally where it fits — aim for a natural density around 0.5-2.5% of this block's words, never forced, never stuffed, never repeated back-to-back. If a keyword does not fit this block's meaning, leave it out rather than forcing it.`
+  : ''}
 
 Rewrite the provided visual block content so it flows seamlessly within its article: it must read as a continuous piece of writing from the previous block, through this block, into the next, and finally into the FAQ section — a reader should never feel a break in flow. Keep the block's purpose (its type: hero/paragraph/faq/product_cta/callout) and its key facts intact. Keep it formatted as JSON matching the schema.`;
 
@@ -1082,7 +1191,7 @@ Return the rewritten block as JSON.`;
     });
     console.log(`[AI] Block rewrite via ${genProvider}/${genModel}${fallback ? ' (fallback)' : ''} — tune: ${JSON.stringify(tune || {})}.`);
 
-    const parsed = JSON.parse(resultText || '{}');
+    const parsed = parseModelJson(resultText);
 
     if (applyHumanization && parsed.content) {
       console.log(`[AI] Humanizing block content...`);
@@ -1202,6 +1311,75 @@ app.post('/api/ai/generate-nano-image', async (req, res) => {
       return okJson({ imageUrl: data.data[0].url, isAiGenerated: true, model: 'dall-e-3', provider: 'openai' });
     };
 
+    // OpenRouter serves image models (Nano Banana, GPT-5 Image) over the same
+    // chat completions endpoint — the image comes back base64-encoded in
+    // message.images[].image_url.url. Uses the workspace OpenRouter key already
+    // configured for text generation. Verified live 2026-08:
+    //   google/gemini-3.1-flash-image (Nano Banana 2) ~$0.06/img
+    //   google/gemini-3.1-flash-lite-image (Nano Banana 2 Lite) ~$0.03/img
+    const tryOpenRouterImage = async (): Promise<any | null> => {
+      const apiKey = byokKeys?.openrouter || process.env.OPENROUTER_API_KEY;
+      if (!apiKey) return null;
+      const attempts: Array<{ model: string; label: string; body: any }> = [
+        {
+          model: 'google/gemini-3.1-flash-image', label: 'nano-banana-2',
+          body: {
+            model: 'google/gemini-3.1-flash-image',
+            messages: [{ role: 'user', content: finalPrompt }],
+            modalities: ['image'],
+            max_tokens: 4096,
+          },
+        },
+        {
+          model: 'google/gemini-3.1-flash-lite-image', label: 'nano-banana-2-lite',
+          body: {
+            model: 'google/gemini-3.1-flash-lite-image',
+            messages: [{ role: 'user', content: finalPrompt }],
+            modalities: ['image'],
+            max_tokens: 4096,
+          },
+        },
+      ];
+      for (const attempt of attempts) {
+        try {
+          const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+            body: JSON.stringify(attempt.body),
+          });
+          if (!response.ok) throw new Error(`OpenRouter ${attempt.label} failed: ` + (await response.text()).slice(0, 160));
+          const data = await response.json();
+          const msg = data?.choices?.[0]?.message;
+          const images = Array.isArray(msg?.images) ? msg.images : [];
+          let imgUrl = images[0]?.image_url?.url || images[0]?.url;
+          if (imgUrl?.startsWith('data:image')) {
+            // OpenRouter sometimes mislabels JPEG output as image/png — sniff
+            // the magic bytes so browsers/WordPress sideloads decode correctly.
+            const raw = imgUrl.split(',')[1];
+            const head = Buffer.from(raw || '', 'base64').subarray(0, 4);
+            const mime = head[0] === 0xff && head[1] === 0xd8 ? 'image/jpeg'
+              : head[0] === 0x89 && head[1] === 0x50 ? 'image/png'
+              : head[0] === 0x52 && head[1] === 0x49 ? 'image/webp'
+              : 'image/png';
+            imgUrl = `data:${mime};base64,${raw}`;
+          }
+          if (imgUrl) {
+            return okJson({ imageUrl: imgUrl, isAiGenerated: true, model: attempt.label, provider: 'openrouter' });
+          }
+          // Some OR image models return a markdown URL in the text content.
+          const content = String(msg?.content || '');
+          const urlMatch = content.match(/https?:\/\/[^\s)\]]+/);
+          if (urlMatch) {
+            return okJson({ imageUrl: urlMatch[0], isAiGenerated: true, model: attempt.label, provider: 'openrouter' });
+          }
+          throw new Error(`OpenRouter ${attempt.label} returned no image.`);
+        } catch (e: any) {
+          console.warn('[Image] OpenRouter ' + attempt.label + ' failed:', String(e?.message || e).slice(0, 140));
+        }
+      }
+      return null;
+    };
+
     const tryHuggingFace = async (): Promise<any | null> => {
       const apiKey = byokKeys?.huggingface || process.env.HF_TOKEN;
       if (!apiKey) return null;
@@ -1250,34 +1428,46 @@ app.post('/api/ai/generate-nano-image', async (req, res) => {
         message: `Placeholder image — no AI image model could be reached (${reason}). Add a Gemini server key, or an OpenAI / Hugging Face / Replicate key in Settings, to generate a real image that follows this prompt.`,
       });
 
-    // --- 1. Gemini imagen (server key) — the default quality path ------------
-    const aiApiKey = process.env.GEMINI_API_KEY;
-    const ai = aiApiKey ? new GoogleGenAI({ apiKey: aiApiKey }) : null;
+    // --- 1. Gemini Nano Banana — the default quality path. Imagen was shut
+    // down June 30 2026; image generation now runs through generateContent with
+    // the native image models (gemini-3.1-flash-image). Tries the saved (BYOK)
+    // key first, then the server key — a rejected saved key must not silently
+    // drop real AI images for a placeholder.
+    const tryGeminiImage = async (apiKey: string) => {
+      const ai = new GoogleGenAI({ apiKey });
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.1-flash-image',
+        contents: finalPrompt,
+        config: {
+          responseModalities: ['IMAGE'],
+          imageConfig: { aspectRatio: aspectRatio || '1:1' },
+        },
+      });
+      const parts = response?.candidates?.[0]?.content?.parts || [];
+      const imagePart = parts.find((p: any) => p?.inlineData?.data);
+      if (imagePart?.inlineData?.data) {
+        const mime = imagePart.inlineData.mimeType || 'image/png';
+        return okJson({ imageUrl: `data:${mime};base64,${imagePart.inlineData.data}`, isAiGenerated: true, model: 'gemini-3.1-flash-image', provider: 'gemini' });
+      }
+      throw new Error('Gemini returned no image parts.');
+    };
     if (!modelProvider || modelProvider === 'auto' || modelProvider === 'gemini') {
-      if (ai) {
+      const geminiKeys = [byokKeys?.gemini, process.env.GEMINI_API_KEY].filter((k, i, a): k is string => !!k && a.indexOf(k) === i);
+      for (const key of geminiKeys) {
         try {
-          const response = await ai.models.generateImages({
-            model: 'imagen-3.0-generate-002',
-            prompt: finalPrompt,
-            config: { aspectRatio: aspectRatio || "1:1" }
-          });
-          const generatedImage = response.generatedImages?.[0];
-          if (generatedImage?.image?.imageBytes) {
-            return okJson({ imageUrl: `data:image/png;base64,${generatedImage.image.imageBytes}`, isAiGenerated: true, model: 'imagen-3.0-generate-002', provider: 'gemini' });
-          }
-          throw new Error('Gemini returned no image bytes.');
+          return await tryGeminiImage(key);
         } catch (imageErr: any) {
-          console.warn('[Image] Gemini imagen failed, trying next provider:', String(imageErr?.message || imageErr).slice(0, 140));
+          console.warn(`[Image] Gemini failed with ${key === byokKeys?.gemini ? 'saved' : 'server'} key, trying next provider:`, String(imageErr?.message || imageErr).slice(0, 140));
         }
       }
-      // Auto chain: Gemini -> DALL-E -> SDXL -> flagged placeholder (never a
-      // silently random photo).
+      // Auto chain: Gemini -> OpenRouter (DALL-E/Flux via workspace key) ->
+      // DALL-E -> SDXL -> flagged placeholder (never a silently random photo).
       if (modelProvider === 'auto' || !modelProvider) {
-        for (const attempt of [tryDalle, tryHuggingFace]) {
+        for (const attempt of [tryOpenRouterImage, tryDalle, tryHuggingFace]) {
           const r = await attempt().catch((e: any) => { console.warn('[Image] fallback failed:', String(e?.message || e).slice(0, 140)); return null; });
           if (r) return r;
         }
-        return placeholder('Gemini quota exhausted and no fallback image keys configured');
+        return placeholder('Gemini quota exhausted and no fallback image provider succeeded');
       }
       return placeholder('Gemini quota exhausted or image API unavailable');
     }
@@ -1351,7 +1541,7 @@ Return JSON: {"prompt": "the refined prompt"}. No markdown, no extra fields.`;
 
     let parsed: any;
     try {
-      parsed = JSON.parse(resultText || '{}');
+      parsed = parseModelJson(resultText);
     } catch (e) {
       parsed = { prompt: (resultText || '').replace(/^```[a-z]*\s*/i, '').replace(/```\s*$/, '').trim() };
     }
@@ -1397,7 +1587,7 @@ ${bodyHtml}`,
     }, { orProfessionalFirst: true });
     console.log(`[AI] SEO audit via ${genProvider}/${genModel}${fallback ? ' (fallback)' : ''}.`);
 
-    const parsed = JSON.parse(resultText || '{}');
+    const parsed = parseModelJson(resultText);
     return res.json({ success: true, data: { ...parsed, model: genModel, provider: genProvider, fallback } });
   } catch (err: any) {
     console.error('Error in SEO Audit:', err);
@@ -1579,10 +1769,16 @@ app.post('/api/wp/sync-content', async (req, res) => {
     const endpoint = contentItem.contentType === 'page' ? '/wp-json/wp/v2/pages' : '/wp-json/wp/v2/posts';
     const authHeader = 'Basic ' + Buffer.from(`${brand.wpUsername}:${brand.wpAppPassword || ''}`).toString('base64');
 
+    // Publish LIVE by default: the "Publish to WordPress" button must go live.
+    // (An explicit { status: 'draft' } in the body still allows a draft sync.)
+    // brand.defaultStatus is deliberately NOT used — it was defaulting every
+    // publish to a draft even though the UI promises live publishing.
+    const wpStatus = req.body.status === 'draft' ? 'draft' : 'publish';
+
     const payload: any = {
       title: contentItem.title,
       content: contentItem.bodyHtml,
-      status: brand.defaultStatus || 'draft',
+      status: wpStatus,
       slug: contentItem.slug || undefined,
     };
 
@@ -1595,12 +1791,51 @@ app.post('/api/wp/sync-content', async (req, res) => {
     }
 
     try {
-      const wpRes = await fetch(`${cleanUrl}${endpoint}`, {
-        method: 'POST',
+      // Resolve the WordPress target post:
+      //  1. explicit wpPostId (item synced before) -> update in place;
+      //  2. no wpPostId but a slug -> look up an existing post by slug and
+      //     UPDATE it instead of creating a duplicate. This happens when the
+      //     item's wpPostId was never persisted (e.g. older items whose save
+      //     failed), and re-publishing must refresh the live post, not fork it;
+      //  3. nothing matched -> create a fresh post.
+      const existingId = contentItem.wpPostId;
+      let targetId = existingId;
+      let wpUrl = targetId ? `${cleanUrl}${endpoint}/${targetId}` : `${cleanUrl}${endpoint}`;
+
+      if (!targetId && contentItem.slug) {
+        const searchUrl = `${cleanUrl}${endpoint}?slug=${encodeURIComponent(contentItem.slug)}&status=any`;
+        const searchRes = await fetch(searchUrl, {
+          headers: { "Authorization": authHeader, "User-Agent": "GreenOpsContentStudio/1.0" }
+        });
+        if (searchRes.ok) {
+          const matches = await searchRes.json();
+          const match = Array.isArray(matches) && matches.length ? matches[0] : null;
+          if (match && match.id) {
+            targetId = match.id;
+            wpUrl = `${cleanUrl}${endpoint}/${targetId}`;
+          }
+        }
+      }
+
+      if (targetId) {
+        // The stored id may point at a post that was force-deleted on WordPress
+        // (or belongs to another site). Probe first so publish never dies on a
+        // dead id — fall back to creating a fresh post instead.
+        const probe = await fetch(`${cleanUrl}${endpoint}/${targetId}?context=edit`, {
+          headers: { "Authorization": authHeader, "User-Agent": "GreenOpsContentStudio/1.0" }
+        });
+        if (probe.status === 404) {
+          targetId = undefined;
+          wpUrl = `${cleanUrl}${endpoint}`;
+        }
+      }
+
+      const wpRes = await fetch(wpUrl, {
+        method: "POST",
         headers: {
-          'Authorization': authHeader,
-          'Content-Type': 'application/json',
-          'User-Agent': 'GreenOpsContentStudio/1.0'
+          "Authorization": authHeader,
+          "Content-Type": "application/json",
+          "User-Agent": "GreenOpsContentStudio/1.0"
         },
         body: JSON.stringify(payload)
       });
@@ -1610,14 +1845,18 @@ app.post('/api/wp/sync-content', async (req, res) => {
         const wpPostId = data.id;
         const link = data.link;
         const previewUrl = `${link}${link.includes('?') ? '&' : '?'}preview=true`;
+        const appStatus = wpStatus === 'draft' ? 'Draft_Ready' : 'Published';
 
         return res.json({
           success: true,
-          message: `Successfully published ${contentItem.contentType} to WordPress as ${payload.status.toUpperCase()}!`,
+          message: targetId
+            ? `Updated ${contentItem.contentType} on WordPress (${wpStatus === 'draft' ? 'DRAFT' : 'LIVE'})`
+            : `Successfully published ${contentItem.contentType} to WordPress (${wpStatus === 'draft' ? 'DRAFT' : 'LIVE'})`,
           wpPostId,
           link,
           previewUrl,
-          status: payload.status
+          wpStatus,
+          status: appStatus
         });
       } else {
         const errorData = await wpRes.text();
@@ -1638,20 +1877,133 @@ app.post('/api/wp/sync-content', async (req, res) => {
   }
 });
 
-// Endpoint: Upload Media to WordPress Media Library
-app.post('/api/wp/upload-media', async (req, res) => {
+// Endpoint: Fetch one WordPress Post or Page (with rendered content) — used
+// for previews/verification; auth matches sync-content (client brand object).
+app.post('/api/wp/get-post', async (req, res) => {
   try {
-    const { brand, imageUrl, filename } = req.body;
-    if (!brand || !imageUrl) {
-      return res.status(400).json({ success: false, message: 'Brand and Image URL required.' });
+    const { brand, wpPostId, contentType } = req.body;
+    if (!brand || !wpPostId) {
+      return res.status(400).json({ success: false, message: 'Brand and wpPostId required.' });
+    }
+    const cleanUrl = brand.wpUrl.replace(/\/+$/, '');
+    const endpoint = contentType === 'page' ? '/wp-json/wp/v2/pages' : '/wp-json/wp/v2/posts';
+    const authHeader = 'Basic ' + Buffer.from(`${brand.wpUsername}:${brand.wpAppPassword || ''}`).toString('base64');
+    // context=edit is REQUIRED: without it the REST API returns only rendered
+    // content/title/excerpt (post_content_raw etc. omitted), which made every
+    // verification read back as an "empty post".
+    const wpRes = await fetch(`${cleanUrl}${endpoint}/${wpPostId}?context=edit`, {
+      method: 'GET',
+      headers: {
+        'Authorization': authHeader,
+        'Content-Type': 'application/json',
+        'User-Agent': 'GreenOpsContentStudio/1.0'
+      }
+    });
+    if (!wpRes.ok) {
+      return res.status(wpRes.status).json({ success: false, message: `WordPress API Error (${wpRes.status})` });
+    }
+    const data = await wpRes.json();
+    return res.json({ success: true, post: data });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Fetch failed' });
+  }
+});
+
+// Endpoint: Delete a WordPress Post or Page (moves to WP trash, recoverable)
+app.post('/api/wp/delete-post', async (req, res) => {
+  try {
+    const { brand, wpPostId, contentType } = req.body;
+
+    if (!brand || !wpPostId) {
+      return res.status(400).json({ success: false, message: 'Brand and wpPostId required.' });
     }
 
-    // Real integration requires fetching the image and posting it as multipart/form-data or binary
+    const cleanUrl = brand.wpUrl.replace(/\/+$/, '');
+    const type = contentType === 'page' ? 'pages' : 'posts';
+    const authHeader = 'Basic ' + Buffer.from(`${brand.wpUsername}:${brand.wpAppPassword || ''}`).toString('base64');
+
     try {
-      const imgRes = await fetch(imageUrl);
-      if (!imgRes.ok) throw new Error('Failed to fetch source image for upload.');
-      
-      const imageBuffer = await imgRes.arrayBuffer();
+      const wpRes = await fetch(`${cleanUrl}/wp-json/wp/v2/${type}/${wpPostId}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': authHeader,
+          'Content-Type': 'application/json',
+          'User-Agent': 'GreenOpsContentStudio/1.0'
+        }
+      });
+
+      if (wpRes.ok) {
+        const data = await wpRes.json();
+        return res.json({
+          success: true,
+          deleted: data.deleted,
+          message: data.deleted
+            ? `Deleted ${type.slice(0, -1)} #${wpPostId} from WordPress (moved to trash).`
+            : `WordPress reported the ${type.slice(0, -1)} as already deleted.`
+        });
+      }
+
+      // 404/410 = the post is already gone from WP — treat as a successful delete.
+      if (wpRes.status === 404 || wpRes.status === 410) {
+        return res.json({
+          success: true,
+          deleted: false,
+          message: `The WordPress ${type.slice(0, -1)} #${wpPostId} was not found — it may already be deleted.`
+        });
+      }
+
+      const errorData = await wpRes.text();
+      return res.status(wpRes.status).json({
+        success: false,
+        message: `WordPress API Error (${wpRes.status}): ${errorData}`
+      });
+    } catch (e: any) {
+      return res.status(502).json({
+        success: false,
+        message: `Failed to connect to WordPress REST API. Error: ${e.message}`
+      });
+    }
+
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'WordPress Delete Failed' });
+  }
+});
+
+// Endpoint: Upload Media to WordPress Media Library
+// Supports two sources:
+//   a) { brand, imageUrl, filename }  — remote URL (server fetches it)
+//   b) { brand, dataBase64, filename, mime } — direct PC upload (data URL or raw base64)
+app.post('/api/wp/upload-media', async (req, res) => {
+  try {
+    const { brand, imageUrl, dataBase64, filename, mime } = req.body;
+    if (!brand) {
+      return res.status(400).json({ success: false, message: 'Brand required.' });
+    }
+    if (!imageUrl && !dataBase64) {
+      return res.status(400).json({ success: false, message: 'Provide either imageUrl (remote) or dataBase64 (PC upload).' });
+    }
+
+    try {
+      let imageBuffer: Buffer;
+      let fileMime = mime || 'image/jpeg';
+      let fileExt = (filename || 'image').replace(/[^\w.-]/g, '').replace(/\.(jpe?g|png|webp|gif|avif)$/i, '') || 'image';
+
+      if (dataBase64) {
+        // PC upload: strip any data URL prefix, decode the base64 payload.
+        const raw = String(dataBase64).trim();
+        const b64 = raw.includes(',') ? raw.slice(raw.indexOf(',') + 1) : raw;
+        const mimeMatch = raw.match(/^data:([^;]+);/);
+        if (mimeMatch) fileMime = mimeMatch[1];
+        if (!fileMime || fileMime.startsWith('text/')) fileMime = 'image/jpeg';
+        imageBuffer = Buffer.from(b64, 'base64');
+        if (!imageBuffer.length) throw new Error('Empty image payload.');
+        if (imageBuffer.length > 12 * 1024 * 1024) throw new Error('Image too large (max 12 MB).');
+      } else {
+        const imgRes = await fetch(imageUrl);
+        if (!imgRes.ok) throw new Error('Failed to fetch source image for upload.');
+        imageBuffer = Buffer.from(await imgRes.arrayBuffer());
+      }
+
       const cleanUrl = brand.wpUrl.replace(/\/+$/, '');
       const authHeader = 'Basic ' + Buffer.from(`${brand.wpUsername}:${brand.wpAppPassword || ''}`).toString('base64');
 
@@ -1659,8 +2011,8 @@ app.post('/api/wp/upload-media', async (req, res) => {
         method: 'POST',
         headers: {
           'Authorization': authHeader,
-          'Content-Disposition': `attachment; filename="${filename}.jpg"`,
-          'Content-Type': 'image/jpeg',
+          'Content-Disposition': `attachment; filename="${fileExt}.${(fileMime.split('/')[1] || 'jpg').replace('jpeg', 'jpg')}"`,
+          'Content-Type': fileMime,
           'User-Agent': 'GreenOpsContentStudio/1.0'
         },
         body: imageBuffer
@@ -1672,7 +2024,7 @@ app.post('/api/wp/upload-media', async (req, res) => {
       }
 
       const wpData = await wpRes.json();
-      
+
       return res.json({
         success: true,
         wpMediaId: wpData.id,
@@ -2571,6 +2923,19 @@ class WordPressConnector
 // ==========================================
 // 4. SERVER BOOTSTRAP & VITE MIDDLEWARE
 // ==========================================
+
+// JSON error responses for body-parser failures (413/400 etc.) — Express's
+// default error handler sends an HTML page, which makes every client that
+// expects JSON blow up with "Unexpected token '<'".
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (err && err.type === 'entity.too.large') {
+    return res.status(413).json({ success: false, message: 'Request body too large (max 25 MB).' });
+  }
+  if (err && err.type === 'entity.parse.failed') {
+    return res.status(400).json({ success: false, message: 'Invalid JSON in request body.' });
+  }
+  next(err);
+});
 
 async function startServer() {
   const PORT = 3000;

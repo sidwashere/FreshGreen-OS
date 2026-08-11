@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { Brand } from '../types';
-import { Building2, Plus, Key, Globe, Palette, ShieldAlert, Sparkles, Check, Trash2, Edit3, Save } from 'lucide-react';
+import { Brand, BlogStyleKit } from '../types';
+import { Building2, Plus, Key, Globe, Palette, ShieldAlert, Sparkles, Check, Trash2, Edit3, Save, RotateCcw, LayoutTemplate } from 'lucide-react';
+import { resolveBlogStyle, FONT_STACKS, FONT_STACK_LABELS, shade, DEFAULT_BUTTON_STYLES } from '../lib/blogHtml';
 
 interface BrandManagerProps {
   brands: Brand[];
@@ -24,6 +25,11 @@ export const BrandManager: React.FC<BrandManagerProps> = ({
   const [newBannedWord, setNewBannedWord] = useState('');
   const [newTemplateSlug, setNewTemplateSlug] = useState('');
   const [brandToDelete, setBrandToDelete] = useState<string | null>(null);
+
+  // Resolved style kit for the brand being edited (defaults merged in).
+  const kit = resolveBlogStyle(editingBrand);
+  const patchKit = (patch: Partial<BlogStyleKit>) =>
+    setEditingBrand({ ...editingBrand, blogStyle: { ...(editingBrand?.blogStyle || {}), ...patch } });
 
   // Switch form when selected brand changes
   React.useEffect(() => {
@@ -269,6 +275,145 @@ export const BrandManager: React.FC<BrandManagerProps> = ({
                     onChange={(e) => setEditingBrand({ ...editingBrand, primaryColor: e.target.value })}
                     className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm font-mono focus:ring-2 focus:ring-emerald-500 focus:outline-none"
                   />
+                </div>
+              </div>
+            </div>
+
+            {/* Section 1.5: Blog Style Kit — brand identity for every published post */}
+            <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-2 text-slate-900 font-semibold text-sm">
+                  <LayoutTemplate className="w-4 h-4 text-emerald-600" />
+                  <span>Blog Style Kit — rich, responsive article styling</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEditingBrand({ ...editingBrand, blogStyle: undefined })}
+                  title="Clear stored overrides — the kit falls back to defaults derived from the brand accent colour."
+                  className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-500 hover:text-slate-800 bg-white border border-slate-200 hover:border-slate-300 rounded-lg px-2.5 py-1.5 transition"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  Reset to defaults
+                </button>
+              </div>
+              <p className="text-[11px] text-slate-500 leading-relaxed -mt-2">
+                These colours and fonts drive every styled component the editor generates — hero bands, FAQ accordions, card grids, quotes, CTA bands and carousels. Everything is inline-styled and responsive (fluid type, auto-stacking grids, scroll-snap carousels), so posts look sharp on phones and desktop alike. Save Brand DNA to apply.
+              </p>
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                {([
+                  ['primary', 'Primary action'],
+                  ['accent', 'Accent / highlights'],
+                  ['band', 'Hero & CTA band'],
+                  ['surface', 'Card surface'],
+                  ['text', 'Body text'],
+                  ['muted', 'Muted text'],
+                ] as Array<[keyof BlogStyleKit, string]>).map(([key, label]) => (
+                  <div key={key}>
+                    <label className="block text-[10px] font-semibold text-slate-600 mb-1">{label}</label>
+                    <div className="flex items-center space-x-1.5">
+                      <input
+                        type="color"
+                        value={String(kit[key] || '#000000')}
+                        onChange={(e) => patchKit({ [key]: e.target.value } as Partial<BlogStyleKit>)}
+                        className="w-9 h-9 rounded-lg border border-slate-300 cursor-pointer p-0.5 shrink-0"
+                      />
+                      <input
+                        type="text"
+                        value={String(kit[key] || '')}
+                        onChange={(e) => patchKit({ [key]: e.target.value } as Partial<BlogStyleKit>)}
+                        className="w-full px-2 py-1.5 rounded-lg border border-slate-300 text-xs font-mono focus:ring-2 focus:ring-emerald-500 focus:outline-none bg-white"
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-[10px] font-semibold text-slate-600 mb-1">Heading font</label>
+                  <select
+                    value={Object.keys(FONT_STACKS).find((k) => FONT_STACKS[k] === kit.headingFont) || 'georgia'}
+                    onChange={(e) => patchKit({ headingFont: e.target.value })}
+                    className="w-full px-2 py-1.5 rounded-lg border border-slate-300 text-xs bg-white focus:outline-none"
+                  >
+                    {Object.entries(FONT_STACK_LABELS).map(([key, label]) => (
+                      <option key={key} value={key}>{label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[10px] font-semibold text-slate-600 mb-1">Body font</label>
+                  <select
+                    value={Object.keys(FONT_STACKS).find((k) => FONT_STACKS[k] === kit.bodyFont) || 'system'}
+                    onChange={(e) => patchKit({ bodyFont: e.target.value })}
+                    className="w-full px-2 py-1.5 rounded-lg border border-slate-300 text-xs bg-white focus:outline-none"
+                  >
+                    {Object.entries(FONT_STACK_LABELS).map(([key, label]) => (
+                      <option key={key} value={key}>{label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[10px] font-semibold text-slate-600 mb-1">
+                    Corner radius: <span className="font-mono text-emerald-700">{kit.radius}px</span>
+                  </label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={32}
+                    value={kit.radius}
+                    onChange={(e) => patchKit({ radius: Number(e.target.value) })}
+                    className="w-full accent-emerald-600"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-600 mb-1">Button style</label>
+                <div className="flex items-center gap-1.5">
+                  {DEFAULT_BUTTON_STYLES.map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      onClick={() => patchKit({ buttonStyle: s })}
+                      className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold border transition ${kit.buttonStyle === s ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
+                    >
+                      {s === 'solid' ? 'Solid' : s === 'outline' ? 'Outline' : 'Soft'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Live mini-preview of the kit */}
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-600 mb-1">Preview</label>
+                <div className="rounded-xl border border-slate-200 overflow-hidden">
+                  <div style={{ background: `linear-gradient(120deg, ${kit.band}, ${shade(kit.band, 0.8)})`, padding: '18px 20px' }}>
+                    <span style={{ display: 'inline-block', background: kit.accent, color: shade(kit.accent, 0.3), fontSize: 10, fontWeight: 800, letterSpacing: '.08em', textTransform: 'uppercase', padding: '3px 10px', borderRadius: 999, marginBottom: 8 }}>Featured guide</span>
+                    <p style={{ margin: 0, color: '#fff', fontFamily: kit.headingFont, fontSize: 18, fontWeight: 700 }}>A branded hero band</p>
+                  </div>
+                  <div className="p-4 space-y-3">
+                    <div style={{ background: kit.surface, border: `1px solid ${kit.secondary}`, borderRadius: kit.radius, padding: 12 }}>
+                      <p style={{ margin: '0 0 8px', fontFamily: kit.headingFont, fontWeight: 700, color: kit.text, fontSize: 13 }}>Card component</p>
+                      <p style={{ margin: '0 0 10px', color: kit.muted, fontSize: 12, lineHeight: 1.5 }}>Cards, accordions and callouts all follow this kit.</p>
+                      <a
+                        href="#"
+                        onClick={(e) => e.preventDefault()}
+                        style={{
+                          display: 'inline-block', padding: '8px 16px', borderRadius: kit.radius, fontWeight: 700, fontSize: 12,
+                          ...(kit.buttonStyle === 'outline' ? { background: 'transparent', color: kit.primary, border: `2px solid ${kit.primary}` }
+                            : kit.buttonStyle === 'soft' ? { background: `${kit.primary}1f`, color: kit.primary }
+                            : { background: kit.primary, color: '#fff' }),
+                        }}
+                      >
+                        Learn more
+                      </a>
+                    </div>
+                    <div style={{ background: kit.secondary, borderRadius: kit.radius, padding: '8px 12px' }}>
+                      <p style={{ margin: 0, color: kit.text, fontSize: 11, fontWeight: 600 }}>Secondary tint — FAQ borders, chips and soft fills</p>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>

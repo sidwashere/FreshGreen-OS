@@ -2,12 +2,14 @@ import { fetchGlobalKeys, fetchAiPref, saveAiPref, AI_MODEL_OPTIONS } from "../l
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import ReactQuill from 'react-quill-new';
 import 'react-quill-new/dist/quill.snow.css';
-import { ContentItem, Brand, VisualBlock, VisualBlockType, PipelineStatus, GenerationLogEntry, AiModelPref, BlockTune } from '../types';
+import { ContentItem, Brand, VisualBlock, VisualBlockType, PipelineStatus, GenerationLogEntry, AiModelPref, BlockTune, CardItem, CarouselSlide } from '../types';
+import { figureHtmlFor as figureHtmlForLib, rebuildArticleHtml, blocksToHtml } from '../lib/blogHtml';
 import { SeoPanel } from './SeoPanel';
 import { 
   Sparkles, 
   Image as ImageIcon, 
   Eye, 
+  EyeOff,
   Save, 
   Send, 
   Trash2, 
@@ -37,6 +39,7 @@ import {
   Pencil,
   Wand2,
   Target,
+  Upload,
   GripVertical,
   SlidersHorizontal
 } from 'lucide-react';
@@ -72,12 +75,26 @@ const countWords = (text: string = '') =>
     .split(' ')
     .filter(Boolean).length;
 
+// Article length presets. "SEO Recommended" (900) is the default — it maps to
+// the minimum SEO-recommended body text volume (~800–1200 words per post).
+const LENGTH_PRESETS = [
+  { label: 'Snappy · 500', w: 500 },
+  { label: 'SEO Recommended · 900', w: 900 },
+  { label: 'Long · 1500', w: 1500 },
+  { label: 'Deep Dive · 2500', w: 2500 },
+];
+
 interface ZenEditorProps {
   item?: ContentItem | null;
   brand: Brand;
   onSaveItem: (updatedItem: ContentItem) => Promise<void> | void;
   onSyncToWP: (contentItem: ContentItem) => Promise<void>;
-  onCreateNewItem?: (title: string, brandId: string, contentType: 'post' | 'page') => void;
+  onCreateNewItem?: (
+    title: string,
+    brandId: string,
+    contentType: 'post' | 'page',
+    opts?: { primaryKeyword?: string; secondaryKeywords?: string[] }
+  ) => void;
 }
 
 export const ZenEditor: React.FC<ZenEditorProps> = ({
@@ -107,6 +124,16 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
     stalled: boolean;
   } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Interactive humanisation: original vs humanised draft, user picks a version.
+  const [humanizeDraft, setHumanizeDraft] = useState<{
+    original: string;
+    humanized: string;
+    blocks: any[];
+    changed: boolean;
+    note?: string;
+  } | null>(null);
+  const [isHumanizing, setIsHumanizing] = useState(false);
+  const [humanizeError, setHumanizeError] = useState<string | null>(null);
   const lastUpdateRef = useRef<number>(Date.now());
   // Watchdog: warns when no progress arrived for a while, auto-aborts if truly stuck.
   useEffect(() => {
@@ -245,6 +272,23 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
     { label: 'WordPress credentials', ok: !!(brand?.wpUrl && brand?.wpAppPassword), optional: false },
   ];
   const publishReady = publishChecks.filter((c) => !c.optional).every((c) => c.ok);
+  // Saving a WP draft is a WIP action — only content + credentials required
+  // (no SEO score gate), so drafts can be parked at any point in the flow.
+  const draftReady = !!editingItem?.title?.trim() && wordCount >= 50 && !!(brand?.wpUrl && brand?.wpAppPassword);
+
+  // Current state of the post ON WORDPRESS, derived from the last sync:
+  //  - 'live':  synced and published — visitors can see it
+  //  - 'draft': synced as a draft — hidden on the site
+  //  - 'none':  never synced to WordPress yet
+  const wpState: 'live' | 'draft' | 'none' = !editingItem?.wpPostId
+    ? 'none'
+    : editingItem.status === 'Published'
+      ? 'live'
+      : 'draft';
+  const wpBase = brand?.wpUrl ? brand.wpUrl.replace(/\/+$/, '') : '';
+  const wpSlug = editingItem?.slug || '';
+  const wpLiveUrl = editingItem?.wpLiveUrl || (wpState === 'live' && wpBase && editingItem?.wpPostId ? `${wpBase}/?p=${editingItem.wpPostId}` : '');
+  const wpPreviewUrl = editingItem?.wpPreviewUrl || (wpBase && editingItem?.wpPostId ? `${wpBase}/?p=${editingItem.wpPostId}&preview=true` : '');
 
   const visualCats = ['All', 'Product Focused', 'Lifestyle Focused', 'Abstract Minimalist'];
   const filteredNanoPrompts = (nanoPrompts || []).filter(
@@ -271,7 +315,9 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
           seoBrief: editingItem.seoBrief,
           brand,
           byokKeys,
-          applyHumanization,
+          // Humanisation is a separate step now: generation always returns the
+          // raw draft, then the user compares before/after and picks a version.
+          applyHumanization: false,
           targetWordCount: editingItem.targetWordCount,
           modelPref: aiPref,
         }),
@@ -289,6 +335,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
       let buf = '';
       let streamedText = '';
       let completed = false;
+      let streamError: string | null = null;
 
       const handleEvent = (evt: any) => {
         if (evt.type === 'status') {
@@ -302,7 +349,10 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
           lastUpdateRef.current = Date.now();
           setGenState((prev) => (prev ? { ...prev, elapsed: evt.elapsed ?? prev.elapsed, stalled: false } : prev));
         } else if (evt.type === 'error') {
-          throw new Error(evt.error || 'Generation failed.');
+          // Record the REAL error instead of throwing here — the caller wraps
+          // handleEvent in a catch that would swallow the exception and surface
+          // a generic "connection closed" message.
+          streamError = evt.error || 'Generation failed.';
         } else if (evt.type === 'done') {
           completed = true;
           applyGeneratedArticle(evt.data || {});
@@ -335,8 +385,12 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
             if (e?.message && e.message !== 'Generation failed.') console.warn('Bad stream event:', line.slice(0, 120));
           }
         }
+        if (streamError) break;
       }
 
+      if (streamError) {
+        throw new Error(streamError);
+      }
       if (!completed && !abort.signal.aborted) {
         throw new Error('Connection closed before generation finished. Please retry.');
       }
@@ -375,6 +429,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
       buttonText: b.buttonText || '',
       buttonUrl: b.buttonUrl || '#',
       badge: b.badge || '',
+      keywords: b.keywords || '',
     }));
     if (updatedBlocks.length === 0 && aiData.bodyHtml) {
       const plain = aiData.bodyHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
@@ -408,6 +463,60 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
     setIsGeneratingAi(false);
     setGenState(null);
     setAiError(null);
+  };
+
+  // Humanise the current draft (separate, interactive step): shows the original
+  // and the humanised version side by side so the user chooses which to keep.
+  const handleHumanizeDraft = async () => {
+    const html = editingItem?.bodyHtml || '';
+    if (countWords(html) < 50) {
+      setHumanizeError('Write at least 50 words of content first (use Auto-Write or paste your draft), then humanise it.');
+      return;
+    }
+    setIsHumanizing(true);
+    setHumanizeError(null);
+    const byokKeys = await fetchGlobalKeys();
+    try {
+      const res = await fetch('/api/ai/humanize-draft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ html, brand, byokKeys }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      if (!data.success) throw new Error(data.error || 'Humanisation failed.');
+      setHumanizeDraft({
+        original: data.original || html,
+        humanized: data.humanized || html,
+        blocks: data.blocks || [],
+        changed: !!data.changed,
+        note: data.note,
+      });
+      logGeneration({
+        at: new Date().toISOString(),
+        action: 'Humanise Draft',
+        provider: data.provider || 'gemini',
+        model: data.model || 'gemini-3.5-flash',
+        ok: true,
+      });
+    } catch (e: any) {
+      console.error('Humanise failed:', e);
+      setHumanizeError(e?.message || 'Humanisation failed. Please try again.');
+    } finally {
+      setIsHumanizing(false);
+    }
+  };
+
+  const applyHumanisedDraft = () => {
+    if (!humanizeDraft) return;
+    applyGeneratedArticle({ bodyHtml: humanizeDraft.humanized, blocks: humanizeDraft.blocks });
+    setHumanizeDraft(null);
+    setAiError(null);
+  };
+
+  const discardHumanisedDraft = () => {
+    setHumanizeDraft(null);
+    setHumanizeError(null);
   };
 
   const handleOpenPreview = async () => {
@@ -596,16 +705,38 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
     }
   };
 
-  const handleSyncToWordPress = async () => {
+  // statusTarget: 'publish' (default, LIVE on WordPress) or 'draft' (WP draft only)
+  const handleSyncToWordPress = async (statusTarget: 'publish' | 'draft' = 'publish') => {
     setIsSyncingWp(true);
-    setSyncStatusMsg('Syncing to WP...');
+    setSyncStatusMsg(statusTarget === 'draft' ? 'Saving draft to WP...' : 'Syncing to WP...');
     try {
+      // Re-serialise the article body right before the sync so WordPress always
+      // receives the current blocks, brand-styled and intact — regardless of
+      // what the HTML-tab Quill sanitizer did to the working copy:
+      //  - items with any structured component (hero/faq/cards/quote/CTA/
+      //    carousel/image) or an fg-art region are REGENERATED from blocks
+      //    (rich, responsive, professional — every time);
+      //  - plain-paragraph or free-form HTML items keep their HTML untouched
+      //    (marker region re-rendered only when present).
+      const blocks = editingItem.blocks || [];
+      const hasStyledRegion = /<!--fg-art:start-->[\s\S]*<!--fg-art:end-->/.test(editingItem.bodyHtml || '');
+      const hasStructuredBlocks = blocks.some((b) => b.type !== 'paragraph');
+      const rebuilt = hasStyledRegion || hasStructuredBlocks
+        ? blocksToHtml(blocks, brand)
+        : rebuildArticleHtml(editingItem.bodyHtml || '', blocks, brand);
+      // Then re-serialise image-block figures (Quill strips <figure>/markers,
+      // so without this images would silently drop off the published post).
+      // The image markers themselves are stripped from the WP payload: WordPress
+      // wpautop wraps bare HTML comments in <p> tags, which renders as empty
+      // vertical gaps around every image on the live page.
+      const bodyHtmlToSend = syncImageMarkers(blocks, rebuilt).replace(/<!--\/?image:[^>]*-->/g, '');
       const res = await fetch('/api/wp/sync-content', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           brand,
-          contentItem: editingItem,
+          contentItem: { ...editingItem, bodyHtml: bodyHtmlToSend },
+          ...(statusTarget === 'draft' ? { status: 'draft' } : {}),
         }),
       });
       const data = await res.json();
@@ -620,7 +751,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
         };
         setEditingItem(updated);
         onSaveItem(updated);
-        setSyncStatusMsg('Synced successfully!');
+        setSyncStatusMsg(data.message || (statusTarget === 'draft' ? 'Draft saved to WordPress.' : 'Synced successfully!'));
       } else {
         setSyncStatusMsg(`Sync error: ${data.message}`);
       }
@@ -630,9 +761,64 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
       setIsSyncingWp(false);
       // Keep error messages visible; only auto-clear successes.
       setTimeout(() => {
-        setSyncStatusMsg((msg) => (msg && msg.includes('Synced') ? null : msg));
+        setSyncStatusMsg((msg) => (msg && /error|Error|Network/i.test(msg) ? msg : null));
       }, 3000);
     }
+  };
+
+  // Re-check the ACTUAL post state on WordPress. The stored item status can go
+  // stale (post trashed/re-published from wp-admin, or the item's wpPostId was
+  // never persisted) — this corrects the item so the banner tells the truth.
+  const handleRefreshWpState = async () => {
+    const id = editingItem?.wpPostId;
+    if (!id || !brand) return;
+    setSyncStatusMsg(`Checking post #${id} on WordPress…`);
+    try {
+      const res = await fetch('/api/wp/get-post', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brand, wpPostId: id, contentType: editingItem.contentType }),
+      });
+      const data = await res.json();
+      if (!data.success || !data.post) {
+        setSyncStatusMsg(`Refresh failed: ${data.message || 'post not found on WordPress'}`);
+        return;
+      }
+      const p = data.post;
+      const updated = { ...editingItem, wpLiveUrl: p.link || editingItem.wpLiveUrl, lastSyncedAt: new Date().toISOString() };
+      if (p.status === 'publish') {
+        updated.status = 'Published';
+        setSyncStatusMsg(`Post #${id} is LIVE on WordPress — ${p.link}`);
+      } else if (p.status === 'trash') {
+        updated.status = 'Draft_Ready';
+        setSyncStatusMsg(`Post #${id} is in the WordPress TRASH — publish from here to restore it and bring it live.`);
+      } else {
+        updated.status = 'Draft_Ready';
+        setSyncStatusMsg(`Post #${id} is a hidden DRAFT on WordPress (status: ${p.status}).`);
+      }
+      setEditingItem(updated);
+      onSaveItem(updated);
+    } catch (err: any) {
+      setSyncStatusMsg(`Refresh error: ${err.message}`);
+    } finally {
+      setTimeout(() => setSyncStatusMsg((m) => (m && /error|Error|Network/i.test(m) ? m : null)), 4000);
+    }
+  };
+
+  // Regenerate the article body from the block list, wrapped in the fg-art
+  // region markers so every later sync re-renders it from the current blocks.
+  const handleRebuildStyledArticle = () => {
+    const blocks = editingItem.blocks || [];
+    if (!blocks.length) {
+      setSyncStatusMsg('Add at least one content block first (use Auto-Write or the + buttons below), then rebuild.');
+      setTimeout(() => setSyncStatusMsg((m) => (m && /error|Error|Network/i.test(m) ? m : null)), 4000);
+      return;
+    }
+    if (!window.confirm('Rebuild the article HTML from your blocks using the brand style kit? This replaces the article body you see in the HTML tab.')) return;
+    const html = rebuildArticleHtml(editingItem.bodyHtml || '', blocks, brand, true);
+    setEditingItem({ ...editingItem, bodyHtml: html });
+    setSyncStatusMsg('Styled article rebuilt — preview in the HTML tab, then sync to WordPress.');
+    setTimeout(() => setSyncStatusMsg((m) => (m && /error|Error|Network/i.test(m) ? m : null)), 5000);
   };
 
   // Flow context for rewriting block `idx`: the article title/keyword, the
@@ -708,25 +894,241 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
   };
 
   const handleAddBlock = (type: VisualBlockType) => {
+    // Unique per-click id: Date.now() alone collides when buttons are clicked
+    // rapidly (same millisecond), producing duplicate React keys and lost blocks.
+    const uid = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const now = Date.now();
     const newBlock: VisualBlock = {
-      id: `block-${Date.now()}`,
+      id: `block-${uid()}`,
       type,
-      title: type === 'hero' ? 'New Hero Heading' : type === 'faq' ? 'FAQ Section' : 'Section Title',
-      subtitle: 'Section Subtitle',
-      content: 'Write content here...',
+      title: type === 'hero' ? 'New Hero Heading' : type === 'faq' ? 'FAQ Section' : type === 'image_banner' ? '' : type === 'cta_band' ? 'Ready to make a change?' : type === 'quote' ? '' : type === 'cards' ? 'Why choose us' : type === 'carousel' ? 'Explore the range' : type === 'paragraph' ? '' : 'Section Title',
+      subtitle: type === 'cta_band' ? 'No-pressure, expert-led guidance' : 'Section Subtitle',
+      content: type === 'image_banner' ? '' : type === 'quote' ? 'A powerful sentence worth quoting…' : type === 'cta_band' ? 'A short, warm call to action that invites the reader to take the next step.' : 'Write content here...',
       buttonText: 'Learn More',
       buttonUrl: '#',
+      keywords: '',
+      imageLayout: type === 'image_banner' ? 'full' : undefined,
+      cards: type === 'cards' ? [
+        { id: `card-${uid()}`, title: 'Benefit one', content: 'One sentence on the first benefit.', buttonText: '', buttonUrl: '#' },
+        { id: `card-${uid()}`, title: 'Benefit two', content: 'One sentence on the second benefit.', buttonText: '', buttonUrl: '#' },
+      ] : undefined,
+      slides: type === 'carousel' ? [
+        { id: `slide-${uid()}`, imageUrl: '', title: 'Option one', content: 'Short description of this option.', buttonText: '', buttonUrl: '#' },
+        { id: `slide-${uid()}`, imageUrl: '', title: 'Option two', content: 'Short description of this option.', buttonText: '', buttonUrl: '#' },
+        { id: `slide-${uid()}`, imageUrl: '', title: 'Option three', content: 'Short description of this option.', buttonText: '', buttonUrl: '#' },
+      ] : undefined,
+      author: type === 'quote' ? 'Author name' : undefined,
     };
-    setEditingItem({
-      ...editingItem,
-      blocks: [...(editingItem.blocks || []), newBlock],
+    // Functional update so rapid successive "+" clicks (same render tick)
+    // never collapse earlier blocks onto a stale snapshot.
+    setEditingItem((prev) => {
+      const blocks = [...(prev.blocks || []), newBlock];
+      return { ...prev, blocks, bodyHtml: syncImageMarkers(blocks, prev.bodyHtml || '') };
     });
   };
 
+  // ------------------------------------------------------------------
+  // Image blocks: figure HTML with layout styles, embedded in the
+  // article body via self-delimiting markers so re-edits/removals never
+  // corrupt the surrounding HTML. The <figure> is written with inline
+  // styles so it renders correctly in any WordPress theme.
+  // ------------------------------------------------------------------
+  // Image figures live in ../lib/blogHtml (shared with the branded article
+  // engine + HTML editor insert) — delegate here so marker logic stays identical.
+  const figureHtmlFor = (block: VisualBlock): string => figureHtmlForLib(block, 12);
+
+  // Rebuild the image markers inside bodyHtml for the given block list.
+  // Existing markers are replaced/removed in place; new ones are appended
+  // at the end of the article so nothing else in the HTML is touched.
+  const syncImageMarkers = (blocks: VisualBlock[], html: string): string => {
+    const imageBlocks = blocks.filter((b) => b.type === 'image_banner' && (b.imageUrl || '').trim());
+    let out = html || '';
+
+    imageBlocks.forEach((b) => {
+      const src = (b.imageUrl || '').trim();
+      const markerRe = new RegExp(`<!--image:${b.id}-->[\\s\\S]*?<!--\\/image:${b.id}-->`);
+      if (markerRe.test(out)) {
+        out = out.replace(markerRe, figureHtmlFor(b));
+      } else {
+        // Strip any bare <img> paragraph the HTML editor's Quill sanitizer left
+        // behind for this image (it drops <figure>/markers), then append fresh.
+        const escaped = src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        out = out.replace(new RegExp(`<p[^>]*>\\s*<img[^>]*src\\s*=\\s*["']${escaped}["'][^>]*>\\s*<\\/p>`, 'g'), '');
+        out = `${out.replace(/\s*$/, '')}\n${figureHtmlFor(b)}`;
+      }
+    });
+
+    // Drop markers whose image blocks no longer exist (or lost their image).
+    const keepIds = new Set(imageBlocks.map((b) => b.id));
+    const orphanRe = /<!--image:[\s\S]*?-->\s*<figure[\s\S]*?<\/figure>\s*<!--\/image:[\s\S]*?-->/g;
+    out = out.replace(orphanRe, (match) => {
+      const idMatch = match.match(/<!--image:([\s\S]*?)-->/);
+      return idMatch && !keepIds.has(idMatch[1]) ? '' : match;
+    });
+
+    return out;
+  };
+
+  // Shared PC upload: file -> base64 -> WordPress media library -> URL.
+  const [uploadingImgFor, setUploadingImgFor] = useState<string | null>(null);
+  const [uploadErr, setUploadErr] = useState<string | null>(null);
+  const uploadImageToWp = async (file: File): Promise<string> => {
+    const dataUrl: string = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('Could not read the selected file.'));
+      reader.readAsDataURL(file);
+    });
+    const res = await fetch('/api/wp/upload-media', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        brand,
+        dataBase64: dataUrl,
+        filename: file.name.replace(/\.[^.]+$/, '').slice(0, 60),
+      }),
+    });
+    // Guard against non-JSON responses (e.g. a proxy/error HTML page) so the
+    // failure surfaces as a readable message instead of a JSON parse crash.
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      throw new Error(
+        `Upload failed — the server returned ${res.status} (${contentType || 'no content-type'}). The image may be too large; try a file under 12 MB or a .jpg/.png under ~8 MB.`
+      );
+    }
+    const data = await res.json();
+    if (!data.success) throw new Error(data.message || 'Upload to WordPress failed.');
+    return data.wpMediaUrl;
+  };
+
+  const patchBlock = (idx: number, patch: Partial<VisualBlock>) => mutateBlock(idx, (b) => ({ ...b, ...patch }));
+
+  // Single functional primitive for all block mutations — safe against rapid
+  // successive clicks in the same render tick (stale-closure collapse).
+  const mutateBlock = (idx: number, fn: (b: VisualBlock) => VisualBlock) => {
+    setEditingItem((prev) => {
+      const newBlocks = [...(prev.blocks || [])];
+      if (!newBlocks[idx]) return prev;
+      newBlocks[idx] = fn(newBlocks[idx]);
+      return { ...prev, blocks: newBlocks, bodyHtml: syncImageMarkers(newBlocks, prev.bodyHtml || '') };
+    });
+  };
+
+  // Card grid + carousel slide editors (rich component blocks).
+  const patchCard = (idx: number, ci: number, patch: Partial<CardItem>) =>
+    mutateBlock(idx, (b) => {
+      const cards = [...(b.cards || [])];
+      if (ci < 0 || ci >= cards.length) return b;
+      cards[ci] = { ...cards[ci], ...patch };
+      return { ...b, cards };
+    });
+  const addCard = (idx: number) =>
+    mutateBlock(idx, (b) => ({
+      ...b,
+      cards: [...(b.cards || []), { id: `card-${Date.now()}`, title: 'New card', content: '', buttonText: '', buttonUrl: '#' }],
+    }));
+  const removeCard = (idx: number, ci: number) =>
+    mutateBlock(idx, (b) => ({ ...b, cards: (b.cards || []).filter((_, i) => i !== ci) }));
+  const patchSlide = (idx: number, si: number, patch: Partial<CarouselSlide>) =>
+    mutateBlock(idx, (b) => {
+      const slides = [...(b.slides || [])];
+      if (si < 0 || si >= slides.length) return b;
+      slides[si] = { ...slides[si], ...patch };
+      return { ...b, slides };
+    });
+  const addSlide = (idx: number) =>
+    mutateBlock(idx, (b) => ({
+      ...b,
+      slides: [...(b.slides || []), { id: `slide-${Date.now()}`, imageUrl: '', title: 'New slide', content: '', buttonText: '', buttonUrl: '#' }],
+    }));
+  const removeSlide = (idx: number, si: number) =>
+    mutateBlock(idx, (b) => ({ ...b, slides: (b.slides || []).filter((_, i) => i !== si) }));
+  const patchFaqItem = (idx: number, fi: number, patch: { question?: string; answer?: string }) =>
+    mutateBlock(idx, (b) => {
+      const faqItems = [...(b.faqItems || [])];
+      if (fi < 0 || fi >= faqItems.length) return b;
+      faqItems[fi] = { ...faqItems[fi], ...patch };
+      return { ...b, faqItems };
+    });
+  const addFaqItem = (idx: number) =>
+    mutateBlock(idx, (b) => ({
+      ...b,
+      faqItems: [...(b.faqItems || []), { question: 'New question?', answer: '' }],
+    }));
+  const removeFaqItem = (idx: number, fi: number) =>
+    mutateBlock(idx, (b) => ({ ...b, faqItems: (b.faqItems || []).filter((_, i) => i !== fi) }));
+
+  const handleUploadForBlock = async (idx: number) => {
+    const blockId = editingItem.blocks[idx]?.id;
+    const fallbackAlt = (editingItem.title || '').trim() || 'Article image';
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      setUploadingImgFor(`block-${blockId}`);
+      setUploadErr(null);
+      try {
+        const url = await uploadImageToWp(file);
+        const cur = editingItem.blocks.findIndex((b) => b.id === blockId);
+        if (cur >= 0) patchBlock(cur, { imageUrl: url, imageAlt: (editingItem.blocks[cur].imageAlt || '').trim() || fallbackAlt });
+      } catch (e: any) {
+        setUploadErr(e?.message || 'Upload failed.');
+      } finally {
+        setUploadingImgFor(null);
+      }
+    };
+    input.click();
+  };
+
+  // HTML editor: insert a <figure> (same markup the blocks editor produces) at the end of the article.
+  const [htmlImageLayout, setHtmlImageLayout] = useState<'full' | 'left' | 'right' | 'center'>('full');
+  const htmlInsertFigure = (src: string, alt: string) => {
+    const fig = figureHtmlFor({ id: `html-img-${Date.now()}`, type: 'image_banner', imageUrl: src, imageAlt: alt.trim() || (editingItem.title || '').trim() || 'Article image', imageLayout: htmlImageLayout } as VisualBlock);
+    setEditingItem({ ...editingItem, bodyHtml: `${(editingItem.bodyHtml || '').replace(/\s*$/, '')}\n${fig}` });
+  };
+  const handleHtmlInsertImage = async () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      setUploadingImgFor('html-editor');
+      setUploadErr(null);
+      try {
+        const url = await uploadImageToWp(file);
+        htmlInsertFigure(url, file.name.replace(/\.[^.]+$/, ''));
+      } catch (e: any) {
+        setUploadErr(e?.message || 'Upload failed.');
+      } finally {
+        setUploadingImgFor(null);
+      }
+    };
+    input.click();
+  };
+  const handleHtmlInsertImageUrl = () => {
+    const url = window.prompt('Paste the image URL to insert:');
+    if (!url || !url.trim()) return;
+    htmlInsertFigure(url.trim(), '');
+  };
+
   const handleRemoveBlock = (id: string) => {
+    const removed = (editingItem.blocks || []).find((b) => b.id === id);
+    const nextBlocks = (editingItem.blocks || []).filter((b) => b.id !== id);
+    let nextHtml = editingItem.bodyHtml || '';
+    // If the HTML editor's Quill sanitizer already stripped this block's
+    // <figure>/markers (leaving a bare <img> paragraph), remove that too so
+    // deleting the block actually removes the image from the article.
+    if (removed?.imageUrl) {
+      const escaped = removed.imageUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      nextHtml = nextHtml.replace(new RegExp(`<p[^>]*>\\s*<img[^>]*src\\s*=\\s*["']${escaped}["'][^>]*>\\s*<\\/p>`, 'g'), '');
+    }
     setEditingItem({
       ...editingItem,
-      blocks: (editingItem.blocks || []).filter((b) => b.id !== id),
+      blocks: nextBlocks,
+      bodyHtml: syncImageMarkers(nextBlocks, nextHtml),
     });
   };
 
@@ -958,7 +1360,11 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
 
             {/* Next action hint */}
             <div className="mt-2 flex items-center justify-between gap-3">
-              {nextStage ? (
+              {currentStageIdx === WORKFLOW_STAGES.length - 1 ? (
+                <span className="text-[11px] font-bold text-emerald-600 flex items-center gap-1.5">
+                  <Check className="w-3.5 h-3.5" /> This post is live — use Publish to WP to re-sync changes
+                </span>
+              ) : nextStage ? (
                 <button
                   onClick={() => handleSetStage(nextStage.status as PipelineStatus)}
                   className="text-[11px] font-bold hover:opacity-80 flex items-center gap-1.5 transition group"
@@ -967,11 +1373,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                   Next: <span className="underline underline-offset-2">{nextStage.label}</span>
                   <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
                 </button>
-              ) : (
-                <span className="text-[11px] font-bold text-emerald-600 flex items-center gap-1.5">
-                  <Check className="w-3.5 h-3.5" /> This post is live — use Publish to WP to re-sync changes
-                </span>
-              )}
+              ) : null}
               <span className="text-[11px] text-slate-400 hidden sm:block">
                 {currentStageIdx >= 0 ? WORKFLOW_STAGES[currentStageIdx].hint : 'Workflow stage'}
               </span>
@@ -1256,18 +1658,53 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                   </option>
                 ))}
               </select>
-              <label
-                title="Rewrites generated content to read as naturally human-written"
-                className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-slate-600 text-xs font-semibold cursor-pointer select-none hover:bg-slate-50 transition shadow-sm"
+
+              <select
+                value={LENGTH_PRESETS.some((p) => p.w === (editingItem.targetWordCount || 900)) ? String(editingItem.targetWordCount || 900) : 'custom'}
+                onChange={(e) => {
+                  const w = e.target.value === 'custom' ? undefined : Number(e.target.value);
+                  setEditingItem({ ...editingItem, targetWordCount: w });
+                }}
+                title="How long the generated article should be. Defaults to the SEO-recommended minimum (~900 words)."
+                className="px-2.5 py-2.5 rounded-xl bg-white border border-slate-200 text-slate-600 text-xs font-semibold shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 cursor-pointer"
               >
+                <option value="500">Length: Snappy · 500</option>
+                <option value="900">Length: SEO Recommended · 900</option>
+                <option value="1500">Length: Long · 1500</option>
+                <option value="2500">Length: Deep Dive · 2500</option>
+                <option value="custom">Length: Custom…</option>
+              </select>
+              {editingItem.targetWordCount && !LENGTH_PRESETS.some((p) => p.w === editingItem.targetWordCount) && (
                 <input
-                  type="checkbox"
-                  checked={applyHumanization}
-                  onChange={(e) => setApplyHumanization(e.target.checked)}
-                  className="w-4 h-4 accent-emerald-600"
+                  type="number"
+                  min={300}
+                  max={3000}
+                  step={50}
+                  value={editingItem.targetWordCount || ''}
+                  onChange={(e) => setEditingItem({ ...editingItem, targetWordCount: e.target.value ? Number(e.target.value) : undefined })}
+                  title="Custom target word count"
+                  className="w-20 px-2.5 py-2.5 rounded-xl border border-slate-200 text-slate-600 text-xs font-semibold bg-slate-50 focus:outline-none"
                 />
-                Humanise
-              </label>
+              )}
+
+              <button
+                onClick={handleHumanizeDraft}
+                disabled={isGeneratingAi || isHumanizing || countWords(editingItem?.bodyHtml || '') < 50}
+                title="Rewrite the current draft to sound more naturally human, then compare before/after and choose which version to keep."
+                className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-slate-600 text-xs font-semibold hover:bg-slate-50 transition shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Wand2 className="w-3.5 h-3.5" />
+                {isHumanizing ? 'Humanising…' : 'Humanise draft'}
+              </button>
+              <button
+                onClick={handleRebuildStyledArticle}
+                title="Regenerate the article body from your blocks using this brand's style kit — rich, responsive, brand-coloured components (accordions, cards, carousels, CTA bands…). Run this after adding or editing blocks, then sync. (Sync also re-renders structured content from blocks automatically, so live posts always ship styled.)"
+                className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-slate-600 text-xs font-semibold hover:bg-slate-50 transition shadow-sm"
+                style={{ borderColor: `${brandColor(brand)}55`, color: brandColor(brand) }}
+              >
+                <Layout className="w-3.5 h-3.5" />
+                Rebuild styled article
+              </button>
               <button
                 onClick={handleGenerateWithGemini}
                 disabled={isGeneratingAi}
@@ -1285,6 +1722,66 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
               </button>
             </div>
           </div>
+
+          {/* Interactive humanisation: before/after compare + choice */}
+          {isHumanizing && (
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 flex items-center gap-3">
+              <RefreshCw className="w-4 h-4 animate-spin text-slate-400" />
+              <span className="text-sm font-semibold text-slate-700">Humanising the draft — comparing before and after…</span>
+            </div>
+          )}
+          {humanizeError && !isHumanizing && (
+            <div className="bg-rose-50 border border-rose-200 text-rose-700 text-xs font-medium rounded-2xl p-3 flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>{humanizeError}</span>
+            </div>
+          )}
+          {humanizeDraft && !isHumanizing && (
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+              <div className="px-4 py-3 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+                <Wand2 className="w-4 h-4" style={{ color: brandColor(brand) }} />
+                <span className="text-sm font-bold text-slate-800">Humanise draft — compare and choose</span>
+                <span className="text-[11px] text-slate-400 font-medium">{humanizeDraft.note || 'Generated by Patina (Gemini).'}</span>
+                {!humanizeDraft.changed && (
+                  <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">No meaningful change</span>
+                )}
+                <div className="ml-auto flex items-center gap-2">
+                  <button
+                    onClick={discardHumanisedDraft}
+                    className="px-3 py-1.5 rounded-xl bg-white border border-slate-200 text-slate-600 text-xs font-semibold hover:bg-slate-50 transition"
+                  >
+                    Keep original
+                  </button>
+                  <button
+                    onClick={applyHumanisedDraft}
+                    disabled={!humanizeDraft.changed}
+                    className="px-3 py-1.5 rounded-xl text-white text-xs font-semibold hover:brightness-110 transition disabled:opacity-50"
+                    style={{ backgroundColor: brandColor(brand) }}
+                  >
+                    Use humanised version
+                  </button>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-slate-100">
+                <div>
+                  <div className="px-4 py-2 bg-slate-50 text-[11px] font-bold text-slate-500 uppercase tracking-wide flex items-center justify-between">
+                    <span>Before — original draft</span>
+                    <span className="tabular-nums">{countWords(humanizeDraft.original).toLocaleString()} words</span>
+                  </div>
+                  <div className="p-4 max-h-72 overflow-y-auto prose prose-sm text-sm text-slate-700"
+                    dangerouslySetInnerHTML={{ __html: humanizeDraft.original }} />
+                </div>
+                <div>
+                  <div className="px-4 py-2 bg-emerald-50/60 text-[11px] font-bold text-emerald-700 uppercase tracking-wide flex items-center justify-between">
+                    <span>After — humanised</span>
+                    <span className="tabular-nums">{countWords(humanizeDraft.humanized).toLocaleString()} words</span>
+                  </div>
+                  <div className="p-4 max-h-72 overflow-y-auto prose prose-sm text-sm text-slate-700"
+                    dangerouslySetInnerHTML={{ __html: humanizeDraft.humanized }} />
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Live generation progress: percent, phase, heartbeat, live draft */}
           {isGeneratingAi && genState && (
@@ -1482,6 +1979,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                         </button>
                       </div>
                     </div>
+                    {block.type !== 'image_banner' && (
                     <input
                       type="text"
                       value={block.title || ''}
@@ -1493,6 +1991,103 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                       placeholder="Section Title"
                       className="w-full text-lg font-serif font-bold text-slate-900 border-b border-transparent hover:border-slate-200 focus:border-slate-300 focus:outline-none transition"
                     />
+                    )}
+                    {block.type === 'hero' && (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                        <input
+                          type="text"
+                          value={block.subtitle || ''}
+                          onChange={(e) => {
+                            const newBlocks = [...editingItem.blocks];
+                            newBlocks[idx].subtitle = e.target.value;
+                            setEditingItem({ ...editingItem, blocks: newBlocks });
+                          }}
+                          placeholder="Hero subtitle (1–2 sentences)"
+                          className="w-full text-sm text-slate-600 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-900/5"
+                        />
+                        <input
+                          type="text"
+                          value={block.badge || ''}
+                          onChange={(e) => {
+                            const newBlocks = [...editingItem.blocks];
+                            newBlocks[idx].badge = e.target.value;
+                            setEditingItem({ ...editingItem, blocks: newBlocks });
+                          }}
+                          placeholder="Badge (e.g. Featured Guide)"
+                          className="w-full text-sm text-slate-600 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-900/5"
+                        />
+                      </div>
+                    )}
+                    {block.type === 'image_banner' ? (
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Image — uploads to your WordPress media library</span>
+                          <button
+                            onClick={() => handleUploadForBlock(idx)}
+                            disabled={uploadingImgFor === `block-${block.id}`}
+                            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-lg transition disabled:opacity-50"
+                          >
+                            {uploadingImgFor === `block-${block.id}` ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
+                            {uploadingImgFor === `block-${block.id}` ? 'Uploading…' : 'Upload from PC'}
+                          </button>
+                        </div>
+                        {block.imageUrl ? (
+                          <div className="rounded-xl overflow-hidden border border-slate-200 bg-slate-50">
+                            <img src={block.imageUrl} alt={block.imageAlt || ''} className="w-full max-h-64 object-contain" />
+                          </div>
+                        ) : (
+                          <p className="text-xs text-slate-400 italic bg-slate-50 border border-dashed border-slate-300 rounded-xl px-3 py-6 text-center">
+                            No image yet — upload one from your PC (added to your WordPress media library), or paste an image URL below.
+                          </p>
+                        )}
+                        {uploadErr && <p className="text-xs font-semibold text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{uploadErr}</p>}
+                        <div className="grid grid-cols-2 gap-2">
+                          <div className="col-span-2">
+                            <label className="block text-[10px] font-semibold text-slate-500 mb-1">Image URL</label>
+                            <input
+                              type="text"
+                              value={block.imageUrl || ''}
+                              onChange={(e) => patchBlock(idx, { imageUrl: e.target.value })}
+                              placeholder="https://… — or upload from PC above"
+                              className="w-full text-xs bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 focus:outline-none"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-semibold text-slate-500 mb-1">Alt text (SEO)</label>
+                            <input
+                              type="text"
+                              value={block.imageAlt || ''}
+                              onChange={(e) => patchBlock(idx, { imageAlt: e.target.value })}
+                              placeholder="Describe the image"
+                              className="w-full text-xs bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 focus:outline-none"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-semibold text-slate-500 mb-1">Caption (optional)</label>
+                            <input
+                              type="text"
+                              value={block.imageCaption || ''}
+                              onChange={(e) => patchBlock(idx, { imageCaption: e.target.value })}
+                              placeholder="Shown under the image"
+                              className="w-full text-xs bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 focus:outline-none"
+                            />
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-[10px] font-semibold text-slate-500 mr-1">Layout</span>
+                          {(['full', 'left', 'right', 'center'] as const).map((l) => (
+                            <button
+                              key={l}
+                              onClick={() => patchBlock(idx, { imageLayout: l })}
+                              className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition ${(block.imageLayout || 'full') === l ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
+                            >
+                              {l === 'full' ? 'Full width' : l === 'left' ? 'Float left' : l === 'right' ? 'Float right' : 'Centered'}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                    <>
                     <textarea
                       value={block.content || ''}
                       onChange={(e) => {
@@ -1503,6 +2098,17 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                       rows={5}
                       placeholder="Block content..."
                       className="w-full text-base text-slate-700 bg-slate-50 p-4 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-slate-900/5 transition leading-relaxed"
+                    />
+                    <input
+                      type="text"
+                      value={block.keywords || ''}
+                      onChange={(e) => {
+                        const newBlocks = [...editingItem.blocks];
+                        newBlocks[idx].keywords = e.target.value;
+                        setEditingItem({ ...editingItem, blocks: newBlocks });
+                      }}
+                      placeholder="Keywords to emphasise in this block (optional, comma-separated) — used by Rewrite for per-section SEO"
+                      className="w-full text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-900/5"
                     />
                     <div className="flex items-center gap-2 pt-2">
                       <input 
@@ -1521,6 +2127,183 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                         Rewrite
                       </button>
                     </div>
+
+                    {/* Rich component editors (cards / quote / CTA band / carousel / product CTA / FAQ items) */}
+                    {(block.type === 'cards' || block.type === 'cta_band' || block.type === 'quote' || block.type === 'carousel' || block.type === 'product_cta' || block.type === 'faq') && (
+                      <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-3 space-y-3">
+                        {block.type === 'quote' && (
+                          <div>
+                            <label className="block text-[10px] font-semibold text-slate-500 mb-1">Author / attribution</label>
+                            <input
+                              type="text"
+                              value={block.author || ''}
+                              onChange={(e) => patchBlock(idx, { author: e.target.value })}
+                              placeholder="e.g. Daniel — Founder, Daniel's Tasty Petfoods"
+                              className="w-full text-xs bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 focus:outline-none"
+                            />
+                          </div>
+                        )}
+                        {(block.type === 'cta_band' || block.type === 'product_cta') && (
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="block text-[10px] font-semibold text-slate-500 mb-1">Button text</label>
+                              <input
+                                type="text"
+                                value={block.buttonText || ''}
+                                onChange={(e) => patchBlock(idx, { buttonText: e.target.value })}
+                                placeholder="e.g. Shop the range"
+                                className="w-full text-xs bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 focus:outline-none"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10px] font-semibold text-slate-500 mb-1">Button URL</label>
+                              <input
+                                type="text"
+                                value={block.buttonUrl || ''}
+                                onChange={(e) => patchBlock(idx, { buttonUrl: e.target.value })}
+                                placeholder="https://… or #"
+                                className="w-full text-xs bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 focus:outline-none"
+                              />
+                            </div>
+                          </div>
+                        )}
+                        {block.type === 'cards' && (
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Cards in this grid ({block.cards?.length || 0})</span>
+                              <button onClick={() => addCard(idx)} className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg px-2 py-1 transition">+ Add card</button>
+                            </div>
+                            {(block.cards || []).map((c, ci) => (
+                              <div key={c.id} className="rounded-lg border border-slate-200 bg-white p-2.5 space-y-2">
+                                <div className="flex items-center gap-2">
+                                  <input
+                                    type="text"
+                                    value={c.title || ''}
+                                    onChange={(e) => patchCard(idx, ci, { title: e.target.value })}
+                                    placeholder="Card title"
+                                    className="flex-1 text-xs font-semibold bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 focus:outline-none"
+                                  />
+                                  <button onClick={() => removeCard(idx, ci)} title="Remove card" className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded">
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                                <textarea
+                                  value={c.content || ''}
+                                  onChange={(e) => patchCard(idx, ci, { content: e.target.value })}
+                                  rows={2}
+                                  placeholder="Card text (1–2 sentences)"
+                                  className="w-full text-xs bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 focus:outline-none"
+                                />
+                                <div className="grid grid-cols-3 gap-2">
+                                  <input
+                                    type="text"
+                                    value={c.imageUrl || ''}
+                                    onChange={(e) => patchCard(idx, ci, { imageUrl: e.target.value })}
+                                    placeholder="Image URL (optional)"
+                                    className="col-span-2 text-xs bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 focus:outline-none"
+                                  />
+                                  <input
+                                    type="text"
+                                    value={c.buttonText || ''}
+                                    onChange={(e) => patchCard(idx, ci, { buttonText: e.target.value })}
+                                    placeholder="Button (optional)"
+                                    className="text-xs bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 focus:outline-none"
+                                  />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {block.type === 'carousel' && (
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Slides ({block.slides?.length || 0}) — swipeable on mobile</span>
+                              <button onClick={() => addSlide(idx)} className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg px-2 py-1 transition">+ Add slide</button>
+                            </div>
+                            {(block.slides || []).map((s, si) => (
+                              <div key={s.id} className="rounded-lg border border-slate-200 bg-white p-2.5 space-y-2">
+                                <div className="flex items-center gap-2">
+                                  <input
+                                    type="text"
+                                    value={s.title || ''}
+                                    onChange={(e) => patchSlide(idx, si, { title: e.target.value })}
+                                    placeholder="Slide title"
+                                    className="flex-1 text-xs font-semibold bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 focus:outline-none"
+                                  />
+                                  <button onClick={() => removeSlide(idx, si)} title="Remove slide" className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded">
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                                <input
+                                  type="text"
+                                  value={s.imageUrl || ''}
+                                  onChange={(e) => patchSlide(idx, si, { imageUrl: e.target.value })}
+                                  placeholder="Image URL (optional — brand-coloured panel shown without one)"
+                                  className="w-full text-xs bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 focus:outline-none"
+                                />
+                                <textarea
+                                  value={s.content || ''}
+                                  onChange={(e) => patchSlide(idx, si, { content: e.target.value })}
+                                  rows={2}
+                                  placeholder="Slide text"
+                                  className="w-full text-xs bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 focus:outline-none"
+                                />
+                                <div className="grid grid-cols-3 gap-2">
+                                  <input
+                                    type="text"
+                                    value={s.buttonText || ''}
+                                    onChange={(e) => patchSlide(idx, si, { buttonText: e.target.value })}
+                                    placeholder="Button (optional)"
+                                    className="col-span-2 text-xs bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 focus:outline-none"
+                                  />
+                                  <input
+                                    type="text"
+                                    value={s.buttonUrl || ''}
+                                    onChange={(e) => patchSlide(idx, si, { buttonUrl: e.target.value })}
+                                    placeholder="URL"
+                                    className="text-xs bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 focus:outline-none"
+                                  />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {block.type === 'faq' && (
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Accordion questions ({block.faqItems?.length || 0}) — tap to expand on the live post</span>
+                              <button onClick={() => addFaqItem(idx)} className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg px-2 py-1 transition">+ Add question</button>
+                            </div>
+                            {(block.faqItems || []).map((it, fi) => (
+                              <div key={fi} className="rounded-lg border border-slate-200 bg-white p-2.5 space-y-2">
+                                <div className="flex items-center gap-2">
+                                  <input
+                                    type="text"
+                                    value={it.question || ''}
+                                    onChange={(e) => patchFaqItem(idx, fi, { question: e.target.value })}
+                                    placeholder="Question (e.g. How long do your treats stay fresh?)"
+                                    className="flex-1 text-xs font-semibold bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 focus:outline-none"
+                                  />
+                                  <button onClick={() => removeFaqItem(idx, fi)} title="Remove question" className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded">
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                                <textarea
+                                  value={it.answer || ''}
+                                  onChange={(e) => patchFaqItem(idx, fi, { answer: e.target.value })}
+                                  rows={2}
+                                  placeholder="Answer (2–3 sentences)"
+                                  className="w-full text-xs bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 focus:outline-none"
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        <p className="text-[10px] text-slate-400 leading-relaxed">
+                          Renders as a fully responsive, brand-styled component in the final post — stacks on phones, fluid on desktop.
+                        </p>
+                      </div>
+                    )}
 
                     {/* Per-block AI fine-tuning */}
                     <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-3 space-y-2.5">
@@ -1607,6 +2390,8 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                         })()} — continuity is preserved no matter which model is used.
                       </p>
                     </div>
+                    </>
+                    )}
                   </div>
                 ))
               )}
@@ -1615,6 +2400,11 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                 <button onClick={() => handleAddBlock('hero')} className="px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-xl text-sm font-semibold transition shadow-sm">+ Hero</button>
                 <button onClick={() => handleAddBlock('paragraph')} className="px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-xl text-sm font-semibold transition shadow-sm">+ Paragraph</button>
                 <button onClick={() => handleAddBlock('faq')} className="px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-xl text-sm font-semibold transition shadow-sm">+ FAQ</button>
+                <button onClick={() => handleAddBlock('image_banner')} className="px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-xl text-sm font-semibold transition shadow-sm">+ Image</button>
+                <button onClick={() => handleAddBlock('cards')} className="px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-xl text-sm font-semibold transition shadow-sm">+ Cards</button>
+                <button onClick={() => handleAddBlock('quote')} className="px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-xl text-sm font-semibold transition shadow-sm">+ Quote</button>
+                <button onClick={() => handleAddBlock('cta_band')} className="px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-xl text-sm font-semibold transition shadow-sm">+ CTA Band</button>
+                <button onClick={() => handleAddBlock('carousel')} className="px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-xl text-sm font-semibold transition shadow-sm">+ Carousel</button>
               </div>
             </div>
           )}
@@ -1626,6 +2416,33 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                 <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${editingItem.targetWordCount && wordCount > 0 && Math.abs(wordCount - editingItem.targetWordCount) / editingItem.targetWordCount > 0.2 ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}`}>
                   {wordCount.toLocaleString()} words{editingItem.targetWordCount ? ` · target ${editingItem.targetWordCount.toLocaleString()}` : ''}
                 </span>
+              </div>
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-slate-100 bg-white flex-wrap">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+                  <ImageIcon className="w-3.5 h-3.5" /> Insert image
+                </span>
+                <button
+                  onClick={handleHtmlInsertImage}
+                  disabled={uploadingImgFor === 'html-editor'}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-lg transition disabled:opacity-50"
+                >
+                  {uploadingImgFor === 'html-editor' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
+                  {uploadingImgFor === 'html-editor' ? 'Uploading…' : 'Upload from PC'}
+                </button>
+                <button onClick={handleHtmlInsertImageUrl} className="px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 text-xs font-semibold rounded-lg transition">
+                  Paste image URL
+                </button>
+                <select
+                  value={htmlImageLayout}
+                  onChange={(e) => setHtmlImageLayout(e.target.value as any)}
+                  className="text-xs bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-slate-600 focus:outline-none"
+                >
+                  <option value="full">Full width</option>
+                  <option value="left">Float left</option>
+                  <option value="right">Float right</option>
+                  <option value="center">Centered</option>
+                </select>
+                {uploadErr && <span className="text-xs font-semibold text-red-600">{uploadErr}</span>}
               </div>
               <ReactQuill 
                 theme="snow"
@@ -1838,10 +2655,52 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                     </h3>
                     <p className="text-xs text-slate-500 mt-0.5">Confirm the pre-flight checklist, then sync to the live site.</p>
                   </div>
-                  {editingItem.status === 'Published' && (
-                    <span className="text-xs font-bold px-3 py-1.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1.5">
-                      <CheckCircle2 className="w-3.5 h-3.5" /> Live on {brand?.wpUrl ? brand.wpUrl.replace(/^https?:\/\//, '') : 'WordPress'}
-                    </span>
+                  {wpState !== 'none' && (
+                    <div className={`w-full rounded-xl border px-4 py-3 flex items-start gap-3 ${
+                      wpState === 'live'
+                        ? 'bg-emerald-50 border-emerald-200'
+                        : 'bg-sky-50 border-sky-200'
+                    }`}>
+                      <span className={`mt-1.5 w-2.5 h-2.5 rounded-full shrink-0 ${
+                        wpState === 'live' ? 'bg-emerald-500 animate-pulse' : 'bg-sky-400'
+                      }`} />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-bold text-slate-900 flex items-center gap-2 flex-wrap">
+                          {wpState === 'live' ? (
+                            <><CheckCircle2 className="w-4 h-4 text-emerald-600" /> LIVE on the site — visitors can see this post</>
+                          ) : (
+                            <><EyeOff className="w-4 h-4 text-sky-600" /> DRAFT — saved to WordPress, hidden from visitors</>
+                          )}
+                        </p>
+                        <p className="text-xs text-slate-500 mt-1 truncate">
+                          Post #{editingItem.wpPostId}{wpSlug ? ` · ${wpSlug}` : ''}
+                          {wpState === 'live' && wpLiveUrl && (
+                            <> · <a href={wpLiveUrl} target="_blank" rel="noreferrer" className="text-emerald-700 font-semibold hover:underline">view live post ↗</a></>
+                          )}
+                          {wpState === 'draft' && wpPreviewUrl && (
+                            <> · <a href={wpPreviewUrl} target="_blank" rel="noreferrer" className="text-sky-700 font-semibold hover:underline">open WP preview ↗</a></>
+                          )}
+                          {editingItem.lastSyncedAt && <> · synced {new Date(editingItem.lastSyncedAt).toLocaleString()}</>}
+                        </p>
+                      </div>
+                      <button
+                        onClick={handleRefreshWpState}
+                        disabled={isSyncingWp}
+                        className="shrink-0 text-[11px] font-bold px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-slate-600 hover:border-indigo-300 hover:text-indigo-600 transition flex items-center gap-1"
+                        title="Re-check the real status of this post on WordPress"
+                      >
+                        <RefreshCw className="w-3 h-3" /> Refresh status
+                      </button>
+                    </div>
+                  )}
+                  {wpState === 'none' && (
+                    <div className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 flex items-center gap-3">
+                      <Rocket className="w-4 h-4 text-slate-400 shrink-0" />
+                      <div>
+                        <p className="text-sm font-bold text-slate-700">Not on WordPress yet</p>
+                        <p className="text-xs text-slate-500 mt-0.5">Save as a draft to park it hidden, or publish live when ready — syncing always updates the same post.</p>
+                      </div>
+                    </div>
                   )}
                 </div>
 
@@ -1868,16 +2727,44 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                   ))}
                 </div>
 
-                <button
-                  onClick={handleSyncToWordPress}
-                  disabled={isSyncingWp || !publishReady}
-                  className="w-full flex items-center justify-center gap-2 px-5 py-3 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white rounded-xl text-sm font-bold transition shadow-sm hover:brightness-110"
-                  style={publishReady && !isSyncingWp ? { backgroundColor: brandColor(brand) } : undefined}
-                  title={publishReady ? 'Sync article to WordPress' : 'Complete the required checklist items first'}
-                >
-                  <Send className="w-4 h-4" />
-                  {isSyncingWp ? 'Syncing to WordPress…' : editingItem.status === 'Published' ? 'Update on WordPress' : 'Publish to WordPress'}
-                </button>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    onClick={() => handleSyncToWordPress('draft')}
+                    disabled={isSyncingWp || !(draftReady || wpState === 'live')}
+                    className={`w-full flex items-center justify-center gap-2 px-5 py-3 rounded-xl text-sm font-bold transition shadow-sm ${
+                      wpState === 'live'
+                        ? 'bg-sky-50 border border-sky-300 text-sky-700 hover:bg-sky-100'
+                        : 'disabled:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed bg-white border border-slate-300 hover:bg-slate-50 text-slate-700'
+                    }`}
+                    title={wpState === 'live'
+                      ? 'Move this post back to a hidden draft on WordPress — one click, same post'
+                      : draftReady ? 'Save to WordPress as a draft (not visible on the site)' : 'Set a title, write 50+ words and add WordPress credentials first'}
+                  >
+                    <Save className="w-4 h-4" />
+                    {isSyncingWp ? 'Saving…' : wpState === 'live' ? 'Switch to draft (hide)' : 'Save as draft'}
+                  </button>
+                  <button
+                    onClick={() => handleSyncToWordPress('publish')}
+                    disabled={isSyncingWp || !(publishReady || wpState === 'live')}
+                    className={`w-full flex items-center justify-center gap-2 px-5 py-3 rounded-xl text-sm font-bold transition shadow-sm ${
+                      wpState === 'live'
+                        ? 'text-white hover:brightness-110'
+                        : 'disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white hover:brightness-110'
+                    }`}
+                    style={(publishReady || wpState === 'live') && !isSyncingWp ? { backgroundColor: brandColor(brand) } : undefined}
+                    title={wpState === 'live'
+                      ? 'Re-publish the latest content to the existing live post — one click, same post'
+                      : publishReady ? 'Publish live on the site (or update the existing live post)' : 'Complete the required checklist items first'}
+                  >
+                    <Send className="w-4 h-4" />
+                    {isSyncingWp ? 'Publishing…' : wpState === 'live' ? 'Update live post' : 'Publish live'}
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-400 -mt-1">
+                  <strong className="text-slate-500">Live</strong> makes the post public with a clean permalink.
+                  <strong className="text-slate-500"> Draft</strong> keeps it hidden until you're ready.
+                  Both switch in one click and always update the same WordPress post — never a duplicate.
+                </p>
 
                 {syncStatusMsg && (
                   <div className={`px-4 py-3 rounded-xl text-sm font-medium flex items-center gap-3 ${
@@ -1903,9 +2790,9 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                   <p className="font-bold text-slate-900 text-sm">Preview Post</p>
                   <p className="text-xs text-slate-500 mt-1">See the post exactly as it renders on the site.</p>
                 </button>
-                {editingItem.wpPreviewUrl && (
+                {wpState !== 'live' && wpPreviewUrl && (
                   <a
-                    href={editingItem.wpPreviewUrl}
+                    href={wpPreviewUrl}
                     target="_blank"
                     rel="noreferrer"
                     className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm block hover:border-sky-200 hover:shadow-md transition group"
@@ -1915,16 +2802,16 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                     <p className="text-xs text-slate-500 mt-1">Native WP draft preview in a new tab.</p>
                   </a>
                 )}
-                {editingItem.wpLiveUrl && (
+                {wpState === 'live' && wpLiveUrl && (
                   <a
-                    href={editingItem.wpLiveUrl}
+                    href={wpLiveUrl}
                     target="_blank"
                     rel="noreferrer"
                     className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm block hover:border-emerald-200 hover:shadow-md transition group"
                   >
                     <ExternalLink className="w-5 h-5 text-slate-400 mb-3 group-hover:text-emerald-500 transition" />
                     <p className="font-bold text-slate-900 text-sm">View Live Post</p>
-                    <p className="text-xs text-emerald-600 mt-1 truncate">{editingItem.wpLiveUrl}</p>
+                    <p className="text-xs text-emerald-600 mt-1 truncate">{wpLiveUrl}</p>
                   </a>
                 )}
               </div>
