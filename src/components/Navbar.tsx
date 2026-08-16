@@ -1,7 +1,6 @@
 import React from 'react';
 import { Brand, AppUser } from '../types';
-import { Globe, ChevronDown, Plus, LogOut, Settings, Menu, PanelLeftClose, PanelLeftOpen, ShieldCheck } from 'lucide-react';
-import { logout } from '../lib/firebase';
+import { Globe, ChevronDown, Plus, Settings, Menu, PanelLeftClose, PanelLeftOpen, ShieldCheck } from 'lucide-react';
 
 interface NavbarProps {
   brands: Brand[];
@@ -120,15 +119,6 @@ export const Navbar: React.FC<NavbarProps> = ({
             <span className="truncate max-w-[120px]">{currentUser.username}</span>
           </button>
         )}
-
-        {/* Logout Button */}
-        <button
-          onClick={logout}
-          className="flex items-center justify-center w-9 h-9 rounded-full bg-white hover:bg-slate-50 text-slate-400 border border-slate-200/60 shadow-sm transition"
-          title="Sign Out"
-        >
-          <LogOut className="w-4 h-4" />
-        </button>
       </div>
     </header>
   );

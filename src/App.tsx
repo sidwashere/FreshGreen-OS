@@ -10,8 +10,7 @@ import { WorkspaceHub } from './components/WorkspaceHub';
 import { SettingsTab } from './components/SettingsTab';
 import { INITIAL_BRANDS, INITIAL_CONTENT } from './data/initialData';
 import { Brand, ContentItem, PipelineStatus, AppUser } from './types';
-import { initAuth, usernameSignIn, createUsernameUser, logout, db } from './lib/firebase';
-import { LoginScreen, LoginMode } from './components/LoginScreen';
+import { initAuth, db } from './lib/firebase';
 import { User } from 'firebase/auth';
 import { collection, query, where, onSnapshot, doc, setDoc, deleteDoc, getDoc } from 'firebase/firestore';
 
@@ -56,29 +55,9 @@ export default function App() {
     }
   }, [brands, selectedBrandId]);
 
-  const [needsAuth, setNeedsAuth] = useState(true);
   const [user, setUser] = useState<User | null>(null);
   const [appUser, setAppUser] = useState<AppUser | null>(null);
-  const [pendingApproval, setPendingApproval] = useState(false);
-  const [isLoggingIn, setIsLoggingIn] = useState(false);
-  const [loginError, setLoginError] = useState<string | null>(null);
-  const [authMode, setAuthMode] = useState<LoginMode>('signin');
-  const [isFirstRun, setIsFirstRun] = useState<boolean | null>(null);
-
-  // First-run detection: no admin exists yet → the first registration becomes admin
-  useEffect(() => {
-    let cancelled = false;
-    const checkBootstrap = async () => {
-      try {
-        const snap = await getDoc(doc(db, 'app_meta', 'bootstrap'));
-        if (!cancelled) setIsFirstRun(!snap.exists());
-      } catch {
-        if (!cancelled) setIsFirstRun(false); // can't check — assume initialized
-      }
-    };
-    checkBootstrap();
-    return () => { cancelled = true; };
-  }, [needsAuth]);
+  const [authError, setAuthError] = useState<string | null>(null);
 
   // Read the user's app_users profile and decide approved / pending / legacy
   const checkApproval = async (u: User): Promise<AppUser | null> => {
@@ -89,35 +68,37 @@ export default function App() {
       setAppUser(profile);
       return profile;
     }
-    // Legacy account (e.g. previously signed in with Google): no profile yet.
-    // Auto-create an approved member profile so existing users aren't locked out.
-    const isLegacy = !(u.email || '').endsWith('@greenops.local');
-    if (isLegacy) {
-      const profile: AppUser = {
-        id: u.uid,
-        username: (u.email || 'user').split('@')[0].replace(/[^a-zA-Z0-9._-]/g, '') || 'user',
-        role: 'member',
-        approved: true,
-        createdAt: new Date().toISOString(),
-        userId: u.uid,
-      };
+    // Auto-authenticated account with no profile yet (fresh emulator first
+    // run): provision it as the workspace ADMIN so the app is never locked
+    // behind an approval screen. The owner auto-signs in as this account.
+    const profile: AppUser = {
+      id: u.uid,
+      username: (u.email || 'user').split('@')[0].replace(/[^a-zA-Z0-9._-]/g, '') || 'user',
+      role: 'admin',
+      approved: true,
+      createdAt: new Date().toISOString(),
+      userId: u.uid,
+    };
+    try {
       await setDoc(ref, profile as any);
-      setAppUser(profile);
-      return profile;
+      await setDoc(doc(db, 'app_meta', 'bootstrap'), {
+        initialized: true,
+        adminUid: u.uid,
+        at: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.warn('Could not provision the owner profile:', err);
     }
-    setAppUser(null);
-    return null;
+    setAppUser(profile);
+    return profile;
   };
 
   const handleAuthUser = async (authUser: User) => {
     setUser(authUser);
-    setLoginError(null);
-    setPendingApproval(true);
-    setNeedsAuth(true);
+    setAuthError(null);
     const profile = await checkApproval(authUser);
-    if (profile && profile.approved) {
-      setPendingApproval(false);
-      setNeedsAuth(false);
+    if (!profile || !profile.approved) {
+      setAuthError('Your account is not approved. Ask an administrator to approve it in Settings → User Management.');
     }
   };
 
@@ -125,64 +106,13 @@ export default function App() {
     const unsubscribe = initAuth(
       (authUser) => { handleAuthUser(authUser); },
       () => {
-        setUser(null);
-        setAppUser(null);
-        setPendingApproval(false);
-        setNeedsAuth(true);
-        setBrands([]);
-        setItems([]);
+        setAuthError(
+          'Automatic sign-in failed. Make sure the Firebase emulators are running (firestore :8080, auth :9099) and that the owner credentials in src/lib/firebase.ts match the seeded emulator.'
+        );
       }
     );
     return () => unsubscribe();
   }, []);
-
-  const handleAuthSubmit = async (username: string, password: string) => {
-    setLoginError(null);
-    setIsLoggingIn(true);
-    try {
-      if (authMode === 'signin') {
-        // Triggers onAuthStateChanged → handleAuthUser → approval check
-        await usernameSignIn(username, password);
-      } else {
-        const { user: newUser } = await createUsernameUser(username, password);
-        const isAdmin = isFirstRun === true;
-        await setDoc(doc(db, 'app_users', newUser.uid), {
-          username: username.trim(),
-          role: isAdmin ? 'admin' : 'member',
-          approved: isAdmin,
-          createdAt: new Date().toISOString(),
-          userId: newUser.uid,
-        });
-        if (isAdmin) {
-          await setDoc(doc(db, 'app_meta', 'bootstrap'), {
-            initialized: true,
-            adminUid: newUser.uid,
-            at: new Date().toISOString(),
-          });
-        }
-        await handleAuthUser(newUser);
-      }
-    } catch (err: any) {
-      const code = err?.code || '';
-      if (code === 'auth/invalid-credential' || code === 'auth/user-not-found' || code === 'auth/wrong-password') {
-        setLoginError('Incorrect username or password.');
-      } else if (code === 'auth/email-already-in-use') {
-        setLoginError('That username is already taken — try signing in instead.');
-      } else if (code === 'auth/weak-password') {
-        setLoginError('Password too weak — use at least 6 characters.');
-      } else if (code === 'auth/too-many-requests') {
-        setLoginError('Too many attempts — wait a moment and try again.');
-      } else {
-        setLoginError(err?.message || 'Something went wrong. Please try again.');
-      }
-    } finally {
-      setIsLoggingIn(false);
-    }
-  };
-
-  const handleSignOut = async () => {
-    await logout();
-  };
 
   useEffect(() => {
     if (!user) return;
@@ -489,48 +419,39 @@ export default function App() {
   const plannedCount = items.filter((i) => i.status === 'Planned' || i.status === 'Researching').length;
   const draftCount = items.filter((i) => i.status === 'Draft_Ready' || i.status === 'Generating').length;
 
-  if (needsAuth) {
-    if (pendingApproval && appUser === null) {
-      // Signed in but no approved profile yet (fresh request or legacy name conflict)
-      return (
-        <div className="min-h-screen bg-slate-50 flex items-center justify-center font-sans p-4">
-          <div className="bg-white p-8 rounded-2xl shadow-sm border border-slate-200 max-w-sm w-full text-center space-y-5">
-            <div className="w-14 h-14 bg-amber-100 rounded-2xl mx-auto flex items-center justify-center">
-              <span className="text-amber-600 font-bold text-xl">⏳</span>
-            </div>
-            <div>
-              <h1 className="text-xl font-bold text-slate-900">Awaiting approval</h1>
-              <p className="text-sm text-slate-500 mt-2">
-                Your account is registered but hasn't been approved by an administrator yet.
-                Ask your admin to approve it in <strong>Settings → User Management</strong>, then reload.
-              </p>
-            </div>
-            <button
-              onClick={() => window.location.reload()}
-              className="w-full px-4 py-2.5 rounded-xl bg-slate-800 text-white font-semibold text-sm transition hover:bg-slate-700"
-            >
-              Check again
-            </button>
-            <button
-              onClick={handleSignOut}
-              className="w-full px-4 py-2.5 rounded-xl border border-slate-300 text-slate-600 font-semibold text-sm transition hover:bg-slate-50"
-            >
-              Sign out
-            </button>
-          </div>
-        </div>
-      );
-    }
-
+  // No login screen: the app auto-authenticates as the workspace owner. While
+  // that resolves, show a brief splash; if it ever fails (emulator down or
+  // credentials changed), surface a clear error instead of a login form.
+  if (authError) {
     return (
-      <LoginScreen
-        mode={authMode}
-        onModeChange={setAuthMode}
-        onSubmit={handleAuthSubmit}
-        error={loginError}
-        busy={isLoggingIn}
-        isFirstRun={isFirstRun === true}
-      />
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center font-sans p-4">
+        <div className="bg-white p-8 rounded-2xl shadow-sm border border-slate-200 max-w-sm w-full text-center space-y-5">
+          <div className="w-14 h-14 bg-red-100 rounded-2xl mx-auto flex items-center justify-center">
+            <span className="text-red-600 font-bold text-xl">!</span>
+          </div>
+          <div>
+            <h1 className="text-xl font-bold text-slate-900">Could not sign in</h1>
+            <p className="text-sm text-slate-500 mt-2">{authError}</p>
+          </div>
+          <button
+            onClick={() => window.location.reload()}
+            className="w-full px-4 py-2.5 rounded-xl bg-slate-800 text-white font-semibold text-sm transition hover:bg-slate-700"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="h-[100dvh] bg-[#e9ecef] flex items-center justify-center font-sans">
+        <div className="bg-white px-8 py-6 rounded-2xl shadow-sm border border-slate-200 flex items-center space-x-3">
+          <span className="w-5 h-5 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+          <span className="text-sm font-semibold text-slate-600">Signing you in automatically…</span>
+        </div>
+      </div>
     );
   }
 

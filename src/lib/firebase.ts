@@ -3,10 +3,8 @@ import {
   getAuth,
   initializeAuth,
   inMemoryPersistence,
-  signInWithPopup,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
-  GoogleAuthProvider,
   onAuthStateChanged,
   User,
 } from 'firebase/auth';
@@ -17,7 +15,6 @@ import firebaseConfig from '../../firebase-applet-config.json';
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app);
-export const googleAuthProvider = new GoogleAuthProvider();
 
 // Local Firebase emulator mode (dev/testing): VITE_USE_EMULATORS=true
 // routes Auth and Firestore to the local emulators on 127.0.0.1.
@@ -36,7 +33,17 @@ export const usernameToEmail = (username: string): string =>
 export const isValidUsername = (username: string): boolean =>
   /^[a-zA-Z0-9._-]{3,24}$/.test(username.trim());
 
-let isSigningIn = false;
+// --- Auto-authentication (no login screen) --------------------------------
+// This app is a private, single-operator tool backed by the local Firebase
+// emulator. Instead of a login screen, every load silently signs in as the
+// workspace owner (whose UID owns all the seeded brands/content). If the
+// account does not exist yet (fresh emulator), it is created on first run —
+// the app then promotes it to admin via the bootstrap flow in App.tsx.
+// NOTE: this only works against the emulator / the account created below.
+// If the emulator is reseeded with a different password, update AUTO_AUTH.
+const AUTO_AUTH_USERNAME = 'owner';
+const AUTO_AUTH_PASSWORD = 'Owner-Petfoods-2026';
+
 let cachedAccessToken: string | null = null;
 
 export const initAuth = (
@@ -57,71 +64,30 @@ export const initAuth = (
         if (onAuthFailure) onAuthFailure();
       }
     } else {
-      // No active session yet. If we just returned from a sign-in via redirect
-      // (storage-partitioned browsers like sandboxed previews can't use popups),
-      // resolve the pending credential before declaring the user signed out.
+      // No active session — auto-authenticate instead of showing a login form.
+      // signInWithEmailAndPassword flips the auth state, which fires this
+      // listener again with the signed-in user (so onAuthSuccess runs then).
       cachedAccessToken = null;
-      if (onAuthFailure) onAuthFailure();
+      try {
+        const email = usernameToEmail(AUTO_AUTH_USERNAME);
+        try {
+          await signInWithEmailAndPassword(auth, email, AUTO_AUTH_PASSWORD);
+        } catch (err: any) {
+          if (err?.code === 'auth/user-not-found') {
+            // First run on a fresh emulator: create the owner account. The
+            // missing app_users profile is auto-provisioned as admin by the
+            // approval check in App.tsx.
+            await createUserWithEmailAndPassword(auth, email, AUTO_AUTH_PASSWORD);
+          } else {
+            throw err;
+          }
+        }
+      } catch (err: any) {
+        console.error('[AutoAuth] automatic sign-in failed:', err?.message || err);
+        if (onAuthFailure) onAuthFailure();
+      }
     }
   });
-};
-
-export const googleSignIn = async (): Promise<{ user: User; accessToken: string } | null> => {
-  try {
-    isSigningIn = true;
-    const result = await signInWithPopup(auth, googleAuthProvider);
-    const credential = GoogleAuthProvider.credentialFromResult(result);
-    if (!credential?.accessToken) {
-      throw new Error('Failed to get access token from Firebase Auth');
-    }
-
-    cachedAccessToken = credential.accessToken;
-    return { user: result.user, accessToken: cachedAccessToken };
-  } catch (error: any) {
-    console.error('Sign in error:', error);
-    throw error;
-  } finally {
-    isSigningIn = false;
-  }
-};
-
-/**
- * Username + password sign-in (bypasses Google entirely).
- * Emails are derived from the username via usernameToEmail().
- */
-export const usernameSignIn = async (username: string, password: string) => {
-  try {
-    isSigningIn = true;
-    const result = await signInWithEmailAndPassword(auth, usernameToEmail(username), password);
-    const idToken = await result.user.getIdToken(true);
-    cachedAccessToken = idToken;
-    return { user: result.user, accessToken: idToken };
-  } catch (error: any) {
-    console.error('Username sign-in error:', error);
-    throw error;
-  } finally {
-    isSigningIn = false;
-  }
-};
-
-/**
- * Create a new username/password account. The account exists in Firebase
- * Auth immediately but stays "pending approval" until an admin approves it
- * via the app_users/{uid}.approved flag.
- */
-export const createUsernameUser = async (username: string, password: string) => {
-  try {
-    isSigningIn = true;
-    const result = await createUserWithEmailAndPassword(auth, usernameToEmail(username), password);
-    const idToken = await result.user.getIdToken(true);
-    cachedAccessToken = idToken;
-    return { user: result.user, accessToken: idToken };
-  } catch (error: any) {
-    console.error('Create username account error:', error);
-    throw error;
-  } finally {
-    isSigningIn = false;
-  }
 };
 
 /**
@@ -144,9 +110,4 @@ export const adminCreateAccount = async (username: string, password: string) => 
 
 export const getAccessToken = async (): Promise<string | null> => {
   return cachedAccessToken;
-};
-
-export const logout = async () => {
-  await auth.signOut();
-  cachedAccessToken = null;
 };
