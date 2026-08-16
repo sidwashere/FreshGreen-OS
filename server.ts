@@ -433,6 +433,14 @@ function parseHtmlIntoBlocks(html: string, title?: string, keyword?: string): an
 
   const textBetween = (start: number, end: number) => stripHtml(html.slice(start, end));
 
+  // Section text variant that keeps <li> boundaries as "• " bullets so block
+  // rendering can rebuild real <ul> lists in the pushed article instead of
+  // flattening every list into one wall of text.
+  const sectionText = (start: number, end: number) =>
+    stripHtml(html.slice(start, end).replace(/<li\b[^>]*>/gi, '\n• ').replace(/<\/li>/gi, '\n'))
+      .replace(/[ \t]*\n[ \t]*/g, '\n')
+      .split('\n').map((l) => l.trim()).filter(Boolean).join('\n');
+
   // FAQ / CTA detection helpers
   const isFaq = (t: string) => /(^|\s)(faq|frequently asked|questions?\b|common questions)/i.test(t);
   const isCta = (t: string) => /(product|shop|cta|get started|try |order|bundle|purchase|call to action)/i.test(t);
@@ -452,7 +460,7 @@ function parseHtmlIntoBlocks(html: string, title?: string, keyword?: string): an
   const h1 = headings.find((h) => h.level === 1);
   const heroEnd = h1 ? h1.end : headings[0].start;
   const heroSubtitle = h1
-    ? textBetween(h1.end, headings.find((h) => h.start > h1.end)?.start ?? html.length)
+    ? sectionText(h1.end, headings.find((h) => h.start > h1.end)?.start ?? html.length)
     : '';
   blocks.push({
     type: 'hero',
@@ -484,14 +492,14 @@ function parseHtmlIntoBlocks(html: string, title?: string, keyword?: string): an
         if (q) pairs.push(`Q: ${q}\nA: ${a}`);
       }
       i = j - 1; // skip the absorbed h3 headings
-      const content = pairs.length ? pairs.join('\n\n') : textBetween(h.end, Math.min(headings[i + 1]?.start ?? html.length, sectionEnd)).slice(0, 3000);
+      const content = pairs.length ? pairs.join('\n\n') : sectionText(h.end, Math.min(headings[i + 1]?.start ?? html.length, sectionEnd)).slice(0, 3000);
       blocks.push({ type: 'faq', title: h.text, content });
       continue;
     }
 
     const sectionStart = h.end;
     const sectionEnd = headings[i + 1]?.start ?? html.length;
-    let content = textBetween(sectionStart, sectionEnd);
+    let content = sectionText(sectionStart, sectionEnd);
 
     if (isCta(h.text) || /class="[^"]*cta[^"]*"/i.test(html.slice(sectionStart, sectionEnd))) {
       const btnMatch = html.slice(sectionStart, sectionEnd).match(/<a[^>]*>([\s\S]*?)<\/a>|<button[^>]*>([\s\S]*?)<\/button>/i);
@@ -514,12 +522,165 @@ function parseHtmlIntoBlocks(html: string, title?: string, keyword?: string): an
     blocks.push({ type: 'paragraph', title: '', content: textBetween(headings[0].end, html.length).slice(0, 4000) });
   }
 
-  return blocks.slice(0, 8);
+  // Capture <img> tags into image_banner blocks so generated article images
+  // survive into the editor preview AND the WordPress push. The previous code
+  // walked headings only, silently dropping every <img> the model wrote.
+  // data: URIs are skipped — they are base64 blobs that bloat Firestore and get
+  // stripped by WordPress's allowed-protocol filter; real https URLs are kept.
+  const imgRe = /<img\b[^>]*>/gi;
+  const imgBlocks: any[] = [];
+  let heroImg: { src: string; alt: string } | null = null;
+  let imgMatch: RegExpExecArray | null;
+  while ((imgMatch = imgRe.exec(html)) !== null) {
+    const tag = imgMatch[0];
+    const src = tag.match(/src\s*=\s*["']([^"']+)["']/i)?.[1] || '';
+    if (!src || src.startsWith('data:')) continue;
+    const alt = tag.match(/alt\s*=\s*["']([^"']*)["']/i)?.[1] || '';
+    if (!heroImg) heroImg = { src, alt };
+    imgBlocks.push({
+      id: `block-${Date.now()}-img${imgBlocks.length}`,
+      type: 'image_banner',
+      title: '',
+      subtitle: '',
+      content: '',
+      buttonText: '',
+      buttonUrl: '',
+      keywords: '',
+      imageLayout: 'full',
+      imageUrl: src,
+      imageAlt: alt,
+    });
+  }
+
+  // Give the hero band a media image when the model supplied one.
+  if (heroImg && blocks[0]?.type === 'hero' && !(blocks[0].imageUrl || '').trim()) {
+    blocks[0].imageUrl = heroImg.src;
+    blocks[0].imageAlt = heroImg.alt || blocks[0].title || 'Article image';
+  }
+
+  blocks.push(...imgBlocks.slice(0, 2));
+
+  return blocks.slice(0, 10);
 }
 
 // ==========================================
 // 1. AI API ENDPOINTS (Gemini Server-Side)
 // ==========================================
+
+// ---------- Completeness check & fix (final accuracy gate) ----------
+// Streamed generation can end mid-sentence (provider cutoffs, token limits),
+// leaving the article TRUNCATED and shorter than its target. These helpers
+// verify the assembled draft and repair it before it is marked done:
+//   1. structuralCleanup    — deterministic: fences, artifacts, unclosed tags;
+//   2. top-up               — append an on-topic section when under the target;
+//   3. truncatedEnding      — complete (or drop) a cut-off final sentence;
+//   4. image presence       — inject the generated hero/secondary when the
+//                             model wrote no <img> at all.
+// The same signals are re-checked (log-only) at publish/sync time so a draft
+// that was edited by hand can still be caught before it goes live.
+
+// Sentence-final punctuation: the visible text of a paragraph or list item is
+// only "finished" when it ends with . ! ? … (allowing closing quotes/brackets).
+const ENDS_WITH_FINAL_PUNCT = /[.!?…]["'”’»)\]]*$/;
+
+// Visible paragraph/list text nodes in document order, with exact inner-text
+// offsets so a repair can rewrite just the text (keeping surrounding tags).
+function visibleTextNodes(html: string): Array<{ tag: string; text: string; innerHtml: string; innerStart: number; innerEnd: number }> {
+  const nodes: Array<{ tag: string; text: string; innerHtml: string; innerStart: number; innerEnd: number }> = [];
+  const re = /<(p|li|blockquote|figcaption)\b[^>]*>([\s\S]*?)<\/\1>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    const innerHtml = m[2];
+    const text = stripHtml(innerHtml);
+    if (!text) continue;
+    const openEnd = m[0].indexOf('>') + 1;            // past the opening tag
+    const closeStart = m[0].lastIndexOf('</');        // start of the closing tag
+    if (openEnd <= 0 || closeStart < openEnd) continue;
+    nodes.push({
+      tag: m[1].toLowerCase(),
+      text,
+      innerHtml,
+      innerStart: m.index + openEnd,
+      innerEnd: m.index + closeStart,
+    });
+  }
+  return nodes;
+}
+
+// The LAST visible text node, if it does not end with sentence-final
+// punctuation — i.e. the article was cut off mid-sentence. Only the document
+// tail is checked: mid-document "incomplete" lists (bullet points without
+// periods) are legitimate, but a streamed article can only truncate at its end.
+function truncatedEnding(html: string): { text: string; innerHtml: string; innerStart: number; innerEnd: number } | null {
+  const nodes = visibleTextNodes(html);
+  if (!nodes.length) return null;
+  const last = nodes[nodes.length - 1];
+  return ENDS_WITH_FINAL_PUNCT.test(last.text.trim()) ? null : last;
+}
+
+// Deterministic structural cleanup — no AI, always safe.
+function structuralCleanup(html: string): { html: string; fixed: string[] } {
+  let out = String(html || '').trim();
+  const fixed: string[] = [];
+  const fenceCount = (out.match(/```/g) || []).length;
+  if (fenceCount) {
+    out = out.replace(/```(?:html|xml)?\s*/gi, '').trim();
+    fixed.push(`removed ${fenceCount} markdown fence marker(s)`);
+  }
+  if (/^\{"[^}]+"\}/.test(out)) {
+    fixed.push('removed a JSON wrapper left around the body');
+  }
+  const artifactRe = /\b(undefined|null|NaN|\[object Object\]|TODO|FIXME|lorem ipsum|placeholder\s*text)\b/gi;
+  if (artifactRe.test(out)) {
+    out = out.replace(artifactRe, '').replace(/\s{2,}/g, ' ');
+    fixed.push('stripped inline artifacts (undefined / null / TODO / lorem ipsum…)');
+  }
+  if (/\n{3,}|^\s*[-–—]{3,}\s*$/m.test(out)) {
+    out = out.replace(/\n{3,}/g, '\n\n').replace(/^\s*[-–—]{3,}\s*$/gm, '');
+    fixed.push('collapsed excess blank lines / markdown separators');
+  }
+  // Close any block-level tags the model left open at the end of the document
+  // (a cutoff can drop </p>, </li>, </ul>, </strong>, </a>, </h2> …).
+  const stack: string[] = [];
+  const CLOSABLE = new Set(['p', 'li', 'ul', 'ol', 'strong', 'em', 'b', 'i', 'a', 'h2', 'h3', 'h4', 'blockquote']);
+  const VOID = new Set(['img', 'br', 'hr', 'input', 'meta', 'link']);
+  const tagRe = /<\/?([a-z][a-z0-9]*)\b[^>]*>/gi;
+  let tm: RegExpExecArray | null;
+  while ((tm = tagRe.exec(out)) !== null) {
+    const tag = tm[1].toLowerCase();
+    if (VOID.has(tag) || /\/>/.test(tm[0])) continue;
+    if (tm[0].startsWith('</')) {
+      const idx = stack.lastIndexOf(tag);
+      if (idx >= 0) stack.splice(idx, 1);
+    } else if (CLOSABLE.has(tag)) {
+      stack.push(tag);
+    }
+  }
+  if (stack.length) {
+    out = out.trimEnd() + stack.slice().reverse().map((t) => `</${t}>`).join('');
+    fixed.push(`closed ${stack.length} unclosed tag(s) (${stack.join(', ')})`);
+  }
+  return { html: out.trim(), fixed };
+}
+
+// Generate ONE additional on-topic section (fresh <h2> + 2-3 paragraphs) to top
+// the article up to its target length. Returns the raw section HTML, or '' if
+// the provider failed or returned unusable output.
+async function generateAdditionalSection(opts: {
+  byokKeys: any; pref: any; brand: any; title: string; primaryKeyword: string;
+  contentType: string; existingHeadings: string[]; existingTail: string; shortfall: number;
+}): Promise<string> {
+  const { byokKeys, pref, brand, title, primaryKeyword, contentType, existingHeadings, existingTail, shortfall } = opts;
+  const result = await completeWithProvider(byokKeys, pref, {
+    systemInstruction: `You are the senior editor for "${brand?.name || 'the site'}". The article below is ${shortfall} words short of its target length. Write ONE additional on-topic section to extend it: a fresh <h2> that is NOT any of these existing headings (${existingHeadings.join('; ') || 'none'}), followed by 2-3 substantial paragraphs (200-450 words total) that continue the article's argument naturally and stay on the exact same topic. Use the keyword "${primaryKeyword}" naturally, keep the brand voice (${brand?.voiceGuidelines || 'professional, clear, engaging'}), and end with a complete sentence. Return ONLY the raw HTML of the new section (h2, p, ul/li allowed) — no markdown fences, no JSON, no commentary.`,
+    prompt: `Article topic: "${title}" (${contentType === 'page' ? 'landing page' : 'blog post'}).\n\nCurrent article tail (for continuity):\n${existingTail.slice(0, 1200)}`,
+    maxTokens: 1024,
+    temperature: 0.7,
+  });
+  let section = String(result.text || '').trim().replace(/^```(?:html)?\s*/i, '').replace(/```\s*$/, '').trim();
+  if (!/<\/?h2\b/i.test(section) || !stripHtml(section)) return '';
+  return section;
+}
 
 // API Endpoint: Generate Article Content with Gemini (streamed)
 // Emits NDJSON events so the client can show live progress, the model's output
@@ -583,7 +744,9 @@ app.post('/api/ai/generate-article', async (req, res) => {
 Brand Voice & Tone Guidelines: ${brand.voiceGuidelines || 'Professional, clear, engaging, authoritative'}.
 ${bannedWordsText}
 
-THE ARTICLE TITLE IS THE SINGLE SOURCE OF TRUTH: "${title}". Every heading, sentence and FAQ entry must serve exactly that title — never drift to a side topic, never change the subject. The reader must feel one continuous, seamless narrative from the first sentence to the final FAQ answer.
+WORKING TITLE / TOPIC (THE BRIEF): "${title}". Every heading, sentence and FAQ entry must serve exactly this topic — never drift to a side topic, never change the subject. The reader must feel one continuous, seamless narrative from the first sentence to the final FAQ answer.
+
+HEADLINE RULE: Do NOT copy the working title verbatim. Craft a fresh, compelling, click-worthy article headline as your single <h1> — a real editor would never repeat the internal working title on the page. The <h1> must still contain the primary keyword naturally.
 
 Output Format: Return ONLY the raw HTML article body. Use h1, h2, h3, p, ul, li, img, a tags. No markdown code fences, no JSON wrapper, no commentary before or after — just the HTML.
 
@@ -593,6 +756,7 @@ SEO requirements (scored by an automated SEO analyzer, follow precisely):
 - Work the topic/title angle into at least one h2 or h3 subheading.
 - Keep paragraphs short (under 150 words each) and sentences readable (average under 20 words). Use transition words so every paragraph hands off to the next.
 - Use one <img> with a descriptive alt attribute containing the primary keyword (featured placeholder, e.g. <img src="https://placehold.co/1200x800?text=Alt" alt="...keyword...">).
+- STRICT IMAGE RULE: never embed base64 / data:image URLs (huge, broken on WordPress). Use ONLY plain https:// image URLs — the placehold.co placeholder is ideal.
 - Include 1-2 internal links as <a href="/blog/related-article"> with descriptive anchor text (never the bare keyword).
 - If suitable, include an FAQ section using an <h2> with <h3> questions, to target question-based (AEO) search results. The FAQ must grow naturally out of the preceding sections — reuse the article's own terms, examples and claims so the end of the piece reads as one flowing conversation, not a bolted-on list.
 - Write for humans first: natural, expert, specific. Never stuff keywords or repeat the same phrase back-to-back.
@@ -603,10 +767,12 @@ SEO requirements (scored by an automated SEO analyzer, follow precisely):
     emit({ type: 'status', message: 'Analysing brief, keywords & brand voice…', percent: 8 });
 
     const prompt = `Write a comprehensive, highly engaging, human-sounding ${contentType === 'page' ? 'Landing Page' : 'Blog Article'}.
-Topic / Title: "${title}"
+Topic (the brief): "${title}"
 Target Primary Keyword: "${primaryKeyword || title}"
 Secondary Keywords: ${Array.isArray(secondaryKeywords) ? secondaryKeywords.join(', ') : secondaryKeywords || 'None'}
-Additional Context / Brief: "${seoBrief || 'Focus on high value, reader satisfaction, and conversion.'}"`;
+Additional Context / Brief: "${seoBrief || 'Focus on high value, reader satisfaction, and conversion.'}"
+
+Headline: craft your own fresh article title as the single <h1> — do not repeat the topic text above verbatim as the headline.`;
 
     // --- Phase 1: stream the article body (10-80%) --------------------------
     emit({ type: 'status', message: 'Drafting the article — watch it being written live below…', percent: 12 });
@@ -709,13 +875,15 @@ Additional Context / Brief: "${seoBrief || 'Focus on high value, reader satisfac
     let metaDescription = '';
     let seoBriefOut = '';
     let suggestedNanoPrompt = '';
+    let suggestedSecondaryPrompt = '';
     try {
       const metaInstruction = `You are an SEO metadata specialist for "${brand.name}". Brand voice: ${brand.voiceGuidelines || 'professional'}.
 Return ONLY JSON matching the schema, no markdown:
 1. "metaTitle": 50-60 characters, primary keyword near the front, no brand unless it fits in 60 chars.
 2. "metaDescription": 120-160 characters, keyword used naturally, a value promise, and a call to action.
 3. "seoBrief": a 2-3 sentence SEO strategy summary for this article.
-4. "suggestedNanoPrompt": a 5-8 word photorealistic image prompt for the featured image.
+4. "suggestedNanoPrompt": a 5-8 word photorealistic image prompt for the featured (hero) image.
+5. "suggestedSecondaryPrompt": a 5-8 word photorealistic prompt for ONE in-body/lifestyle image that matches the article's mid-section context (a scene, object or detail the article actually discusses).
 Keep the JSON compact — no whitespace, no code fences.`;
       const metaResult = await completeWithProvider(byokKeys, pref, {
         systemInstruction: metaInstruction,
@@ -731,8 +899,9 @@ Keep the JSON compact — no whitespace, no code fences.`;
             metaDescription: { type: Type.STRING },
             seoBrief: { type: Type.STRING },
             suggestedNanoPrompt: { type: Type.STRING },
+            suggestedSecondaryPrompt: { type: Type.STRING },
           },
-          required: ['metaTitle', 'metaDescription', 'seoBrief', 'suggestedNanoPrompt'],
+          required: ['metaTitle', 'metaDescription', 'seoBrief', 'suggestedNanoPrompt', 'suggestedSecondaryPrompt'],
         },
         maxTokens: 1024,
       });
@@ -741,6 +910,7 @@ Keep the JSON compact — no whitespace, no code fences.`;
       metaDescription = parsedMeta.metaDescription || '';
       seoBriefOut = parsedMeta.seoBrief || '';
       suggestedNanoPrompt = parsedMeta.suggestedNanoPrompt || '';
+      suggestedSecondaryPrompt = parsedMeta.suggestedSecondaryPrompt || '';
       console.log(`[AI] Metadata via ${metaResult.provider}/${metaResult.model}${metaResult.fallback ? ' (fallback)' : ''}.`);
     } catch (metaErr: any) {
       console.warn('[AI] Meta call failed, deriving metadata locally:', metaErr?.message?.slice(0, 120));
@@ -748,8 +918,220 @@ Keep the JSON compact — no whitespace, no code fences.`;
       metaDescription = stripHtml(articleHtml).slice(0, 155);
       seoBriefOut = `Optimise for "${primaryKeyword || title}" — natural keyword usage, clear headings, and a persuasive meta description to lift click-through rate.`;
       suggestedNanoPrompt = `${primaryKeyword || title} ${contentType === 'page' ? 'brand' : 'lifestyle'} hero photo`;
+      suggestedSecondaryPrompt = `${primaryKeyword || title} lifestyle detail photo`;
     }
     emit({ type: 'status', message: 'Metadata ready — polishing content…', percent: 87 });
+
+    // --- Phase 2.5: auto-generate 2 Nano Banana images (87-92%) -----------
+    // At least TWO brand-consistent images are ALWAYS generated for every
+    // article, driven by the blog topic + body context, using the PAID Nano
+    // Banana chain (Gemini gemini-3.1-flash-image, then OpenRouter's paid
+    // google/gemini-3.1-flash-image). Both are uploaded to the brand's WP
+    // media library right away so the item only stores small hosted URLs —
+    // full-res base64 blobs would blow the Firestore 1 MiB doc limit. Each
+    // render streams an "image" event; the done payload also carries both.
+    // Image hiccups NEVER fail the article — a warning event is emitted and
+    // the draft still completes (same philosophy as sync).
+    const generatedImages: Array<{
+      role: 'hero' | 'secondary';
+      url: string;
+      mediaId?: number;
+      model: string;
+      provider: string;
+      isAiGenerated: boolean;
+      isPlaceholder?: boolean;
+      isDataUri?: boolean;
+      prompt?: string;
+    }> = [];
+    emit({ type: 'status', message: 'Generating 2 branded images with the paid Nano Banana model…', percent: 88 });
+    const imageTopicCtx = `Images for a blog article${title ? ` titled "${title}"` : ''}${primaryKeyword ? ` about "${primaryKeyword}"` : ''}. Brand: ${brand?.name || 'the site'}. Editorial, photorealistic, warm and authentic — no text, captions, logos or watermarks.`;
+    for (const img of [
+      { role: 'hero' as const, prompt: suggestedNanoPrompt || `${primaryKeyword || title} hero photo`, aspectRatio: '16:9', filename: 'featured-image' },
+      { role: 'secondary' as const, prompt: suggestedSecondaryPrompt || `${primaryKeyword || title} lifestyle detail photo`, aspectRatio: '4:3', filename: 'article-image-2' },
+    ]) {
+      lastChunkAt = Date.now();
+      emit({ type: 'status', message: `Rendering ${img.role === 'hero' ? 'hero' : 'in-body'} image with Nano Banana…`, percent: img.role === 'hero' ? 89 : 91 });
+      try {
+        const r = await generateAiImage({
+          prompt: `${imageTopicCtx}\n\nImage prompt: ${img.prompt}`,
+          aspectRatio: img.aspectRatio,
+          byokKeys,
+        });
+        let url = r.imageUrl;
+        let mediaId: number | undefined;
+        const isDataUri = /^data:image/i.test(url);
+        // Host on the brand's WP media library so the item stores URLs only.
+        if (!r.isPlaceholder && brand?.wpUrl && brand?.wpUsername && brand?.wpAppPassword) {
+          try {
+            const up = await uploadImageToWp(
+              brand,
+              isDataUri ? { dataBase64: url, filename: img.filename } : { imageUrl: url, filename: img.filename },
+            );
+            url = up.wpMediaUrl;
+            mediaId = up.wpMediaId;
+          } catch (upErr: any) {
+            console.warn(`[Images] ${img.role} upload skipped (keeping ${isDataUri ? 'data URI' : 'remote URL'}):`, String(upErr?.message || upErr).slice(0, 140));
+          }
+        }
+        const entry = {
+          role: img.role,
+          url,
+          mediaId,
+          model: r.model,
+          provider: r.provider,
+          isAiGenerated: r.isAiGenerated,
+          isPlaceholder: r.isPlaceholder,
+          isDataUri,
+          prompt: img.prompt,
+        };
+        generatedImages.push(entry);
+        lastChunkAt = Date.now();
+        emit({ type: 'image', ...entry });
+      } catch (imgErr: any) {
+        console.warn(`[Images] ${img.role} generation failed:`, String(imgErr?.message || imgErr).slice(0, 160));
+        lastChunkAt = Date.now();
+        emit({ type: 'imageWarning', role: img.role, message: String(imgErr?.message || imgErr).slice(0, 160) });
+      }
+    }
+    const heroImg = generatedImages.find((g) => g.role === 'hero');
+    const secondaryImg = generatedImages.find((g) => g.role === 'secondary');
+    emit({ type: 'status', message: heroImg && secondaryImg ? 'Both AI images ready.' : 'Image step finished — the draft still completes.', percent: 92 });
+
+    // --- Phase 3.5: Completeness check & fix (the final accuracy gate, 92-96%) ---
+    // NO draft is marked done without passing this: structural cleanup, word-
+    // count top-up to the target, truncated-ending repair, and an in-body image
+    // guarantee. Any AI fix here is bounded (2 passes each) and never fatals —
+    // a best-effort fix is still reported through the completeness audit.
+    emit({ type: 'status', message: 'Running the completeness check — verifying every word is written and nothing is truncated…', percent: 93 });
+
+    const checks: string[] = [];
+    const fixes: string[] = [];
+    const warnings: string[] = [];
+    let completeHtml = articleHtml;
+
+    const targetWords = Math.max(300, safeCount(targetWordCount) || (contentType === 'page' ? 600 : 900));
+    const minAcceptable = Math.max(250, Math.round(targetWords * 0.85));
+    checks.push(`visible word count ${countWords(completeHtml)} (target ${targetWords})`);
+
+    // 1) Deterministic structural cleanup.
+    {
+      const { html, fixed } = structuralCleanup(completeHtml);
+      if (fixed.length) {
+        completeHtml = html;
+        fixes.push(...fixed);
+      }
+    }
+
+    // 2) Word-count top-up (up to 2 AI passes): append one on-topic section
+    //    when the article is materially short of its target.
+    let topUpPasses = 0;
+    while (countWords(completeHtml) < minAcceptable && topUpPasses < 2) {
+      topUpPasses++;
+      const shortfall = targetWords - countWords(completeHtml);
+      lastChunkAt = Date.now();
+      emit({ type: 'status', message: `Article is ${shortfall} words short — adding an extra on-topic section…`, percent: 94 });
+      const headings = [...completeHtml.matchAll(/<h2\b[^>]*>([\s\S]*?)<\/h2>/gi)]
+        .map((hm) => stripHtml(hm[1]).trim()).filter(Boolean);
+      try {
+        const section = await generateAdditionalSection({
+          byokKeys, pref, brand, title, primaryKeyword, contentType,
+          existingHeadings: headings,
+          existingTail: stripHtml(completeHtml).slice(-1200),
+          shortfall: Math.max(shortfall, 50),
+        });
+        if (!section) {
+          warnings.push('could not generate a longer draft (provider returned no usable section)');
+          break;
+        }
+        // Insert before the FAQ heading if one exists, otherwise append at the end.
+        const faqMatch = [...completeHtml.matchAll(/<h2\b[^>]*>([\s\S]*?)<\/h2>/gi)]
+          .find((hm) => /(^|\s)(faq|frequently asked|questions?\b|common questions)/i.test(stripHtml(hm[1])));
+        const insertAt = faqMatch ? faqMatch.index! : completeHtml.length;
+        completeHtml = completeHtml.slice(0, insertAt) + section + '\n' + completeHtml.slice(insertAt);
+        fixes.push(`added an extra section (${countWords(section)} words) to reach the ${targetWords}-word target`);
+      } catch (topUpErr: any) {
+        console.warn('[Complete] top-up failed:', String(topUpErr?.message || topUpErr).slice(0, 140));
+        warnings.push('word-count top-up failed (provider error)');
+        break;
+      }
+    }
+
+    // 3) Truncated-ending repair: the LAST visible paragraph must end with
+    //    sentence-final punctuation. Short cut-off fragments are dropped; a
+    //    substantial cut-off ending is completed with a targeted AI call.
+    let aiCompletes = 0;
+    for (let guard = 0; guard < 5; guard++) {
+      const tail = truncatedEnding(completeHtml);
+      if (!tail) break;
+      const isPureText = !/<[a-z][^>]*>/i.test(tail.innerHtml);
+      const dangling = tail.text.trim().length <= 32;
+      if (!isPureText) {
+        if (!dangling) warnings.push('the article ending contains inline markup and could not be auto-completed');
+        break;
+      }
+      if (dangling) {
+        completeHtml = completeHtml.slice(0, tail.innerStart) + completeHtml.slice(tail.innerEnd);
+        fixes.push(`removed a cut-off ending fragment ("${tail.text.trim().slice(0, 40)}…")`);
+        continue; // no AI cost; re-check the new tail
+      }
+      if (aiCompletes >= 2) {
+        warnings.push('the ending still looked truncated after 2 completion attempts');
+        break;
+      }
+      aiCompletes++;
+      lastChunkAt = Date.now();
+      emit({ type: 'status', message: 'Completing the article ending so it finishes cleanly…', percent: 95 });
+      try {
+        const fix = await completeWithProvider(byokKeys, pref, {
+          systemInstruction: `You are a senior editor finishing the FINAL passage of an article. Complete it from where it cuts off into a natural, complete closing sentence (or 1-2 closing sentences) that gives the piece a proper conclusion. Keep the same voice, topic and keyword usage. Return ONLY the completed text — no HTML tags, no markdown, no surrounding quotes.`,
+          prompt: `Truncated final passage (finish it from where it cuts off):\n"${tail.text}"`,
+          maxTokens: 300,
+          temperature: 0.6,
+        });
+        const completed = String(fix.text || '').trim().replace(/^["'“”]+|["'””]+$/g, '');
+        if (completed && completed.length > tail.text.trim().length) {
+          completeHtml = completeHtml.slice(0, tail.innerStart) + completed + completeHtml.slice(tail.innerEnd);
+          fixes.push(`completed the truncated ending ("${tail.text.trim().slice(0, 40)}…" → "${completed.slice(0, 60)}…")`);
+        } else {
+          warnings.push('could not complete the article ending');
+          break;
+        }
+      } catch (fixErr: any) {
+        console.warn('[Complete] ending repair failed:', String(fixErr?.message || fixErr).slice(0, 140));
+        warnings.push('ending completion failed (provider error)');
+        break;
+      }
+    }
+
+    // 4) In-body image guarantee: if the model wrote NO <img> at all, inject
+    //    the generated, already-hosted secondary (or hero) image as an
+    //    idempotent figure so the draft always carries imagery.
+    if (!/<img\b/i.test(completeHtml)) {
+      const injectUrl = [secondaryImg?.url, heroImg?.url].find((u) => /^https?:\/\//i.test(String(u || '')));
+      if (injectUrl) {
+        const alt = String(primaryKeyword || title || 'Article image').replace(/"/g, '&quot;');
+        const figure = `<figure class="fg-art-figure fg-art-secondary"><img src="${injectUrl}" alt="${alt}" loading="lazy" /></figure>`;
+        const firstCloseP = completeHtml.search(/<\/p>/i);
+        completeHtml = firstCloseP >= 0
+          ? completeHtml.slice(0, firstCloseP + 4) + figure + completeHtml.slice(firstCloseP + 4)
+          : figure + completeHtml;
+        fixes.push('injected the generated image into the body (the model wrote no <img>)');
+      } else {
+        warnings.push('article body has no <img> and no hosted image was available to inject');
+      }
+    }
+
+    const finalWords = countWords(completeHtml);
+    const endingOk = !truncatedEnding(completeHtml);
+    const lengthOk = finalWords >= minAcceptable;
+    const complete = endingOk && lengthOk;
+    checks.push(`final visible word count ${finalWords} (target ${targetWords})`);
+    checks.push(`ending ${endingOk ? 'ends with sentence-final punctuation' : 'may still end mid-sentence'}`);
+    const completeness = { targetWords, actualWords: finalWords, complete, checks, fixes, warnings };
+    emit({ type: 'status', message: complete
+      ? `Completeness check passed — ${finalWords} words, clean ending, ${fixes.length ? fixes.length + ' fix(es) applied' : 'no fixes needed'}.`
+      : `Completeness check finished with ${warnings.length} warning(s) — ${finalWords}/${targetWords} words.`, percent: 96 });
+    emit({ type: 'completeness', ...completeness });
 
     // --- Phase 3: humanisation moved OUT of the generation stream -----------
     // The draft is emitted as-is. Humanising is now a separate, interactive
@@ -759,22 +1141,35 @@ Keep the JSON compact — no whitespace, no code fences.`;
     // which killed the stream with a generic "connection closed" error.
     emit({ type: 'status', message: 'Draft complete — structuring blocks…', percent: 93 });
 
-    // --- Phase 4: blocks derived from the FINAL html (93-100%) --------------
+    // --- Phase 4: blocks derived from the FINAL (completeness-checked) html ---
     // The Blocks view is guaranteed to be populated whenever content exists.
-    const finalHtml = articleHtml;
+    const finalHtml = completeHtml;
     const blocks = parseHtmlIntoBlocks(finalHtml, title, primaryKeyword);
     emit({ type: 'status', message: 'Structuring blocks & finishing up…', percent: 98 });
+
+    // The AI crafts its own headline (single <h1>) — that is the article's
+    // REAL title and gets promoted to the post title, while the seed stays as
+    // the initial prompt. Extract it so the client can apply it.
+    const h1Match = /<h1\b[^>]*>([\s\S]*?)<\/h1>/i.exec(finalHtml);
+    const articleTitle = h1Match ? stripHtml(h1Match[1]).trim() : '';
 
     emit({
       type: 'done',
       data: {
         bodyHtml: finalHtml,
+        articleTitle,
         seoBrief: seoBriefOut,
         metaTitle,
         metaDescription,
         suggestedNanoPrompt,
+        suggestedSecondaryPrompt,
         blocks,
+        images: generatedImages,
+        featuredImageUrl: heroImg?.url,
+        secondaryImageUrl: secondaryImg?.url,
+        featuredMediaId: typeof heroImg?.mediaId === 'number' ? heroImg.mediaId : undefined,
         wordCount: countWords(finalHtml),
+        completeness,
         model: genModel,
         provider: genProvider,
         fallback: genFallback,
@@ -794,6 +1189,74 @@ Keep the JSON compact — no whitespace, no code fences.`;
   }
 });
 
+// Humanise HTML via Patina (Gemini), walking the user's saved Gemini key then
+// the server key, and each model in the chain. Auth failures drop the key,
+// quota/model errors fall through to the next model — so a dead key or
+// exhausted bucket never silently skips the humanisation pass.
+// Shared by humanize-draft and the SEO improve humanisation step.
+async function humanizeHtmlWithFallback(
+  html: string,
+  byokKeys: any,
+  opts: { tone?: string; bannedWords?: string[] },
+  label: string,
+): Promise<{ text: string; model: string; quotaBlocked: boolean; error?: string }> {
+  const candidateKeys = [...new Set([byokKeys?.gemini, process.env.GEMINI_API_KEY].filter(Boolean))] as string[];
+  if (candidateKeys.length === 0) {
+    return { text: '', model: '', quotaBlocked: false, error: 'No Gemini API key available. Add one in Settings > AI Models.' };
+  }
+
+  const patina = new Humanizer({
+    tone: opts?.tone || 'conversational',
+    bannedWords: opts?.bannedWords || [],
+    levers: { complexity: 0.4, burstiness: 0.8 },
+  });
+
+  const isAuthError = (msg: string) => /API_KEY_INVALID|API key not valid|PERMISSION_DENIED|UNAUTHENTICATED|invalid key/i.test(msg);
+  const isModelError = (msg: string) => /model\s+not\s+found|NOT_FOUND|no longer available|does not exist/i.test(msg);
+  const isQuotaError = (msg: string) => /RESOURCE_EXHAUSTED|quota|rate limit|429|high demand|503|UNAVAILABLE/i.test(msg);
+
+  let text = '';
+  let lastErr: any = null;
+  let quotaBlocked = false;
+  let usedModel = '';
+  for (const key of candidateKeys) {
+    for (const model of MODEL_CHAIN) {
+      try {
+        text = await Promise.race([
+          patina.rewriteHtmlOrThrow(html, key, model),
+          new Promise<string>((_, reject) =>
+            setTimeout(() => reject(new Error('Humanisation timed out after 90s — please retry.')), 90000)
+          ),
+        ]);
+        usedModel = model;
+        break;
+      } catch (err: any) {
+        lastErr = err;
+        const msg = String(err?.message || '');
+        if (isAuthError(msg)) break; // this key is dead — try the next key
+        if (isQuotaError(msg)) {
+          quotaBlocked = true;
+          // Respect the API's own "retry in Xs" hint between attempts.
+          const hint = parseRetryAfterHint(msg);
+          if (hint) await new Promise((r) => setTimeout(r, hint));
+        }
+        // Model errors (404/no longer available) and everything else fall
+        // through to the next model in the chain, then the next key.
+      }
+    }
+    if (text) break;
+  }
+
+  if (!text) {
+    const detail = String(lastErr?.message || lastErr || 'unknown error').slice(0, 220);
+    const hint = quotaBlocked
+      ? ' The Gemini quota for the current key is exhausted — add a different Gemini key in Settings > AI Models, or retry later when the daily quota resets.'
+      : '';
+    return { text: '', model: usedModel, quotaBlocked, error: `${detail}${hint}` };
+  }
+  return { text, model: usedModel, quotaBlocked };
+}
+
 // API Endpoint: Humanise a draft (interactive before/after step).
 // Separate from generation: returns the original + humanised HTML plus
 // re-derived blocks, and the client lets the user choose which version to keep.
@@ -807,65 +1270,12 @@ app.post('/api/ai/humanize-draft', async (req, res) => {
       return res.status(400).json({ error: 'Write at least 50 words of content first, then humanise it.' });
     }
 
-    const patina = new Humanizer({
-      tone: brand?.voiceGuidelines || 'conversational',
-      bannedWords: brand?.bannedWords || [],
-      levers: { complexity: 0.4, burstiness: 0.8 },
-    });
-
-    // Try the user's saved key first, then the server key. For each key we walk
-    // the model chain (quota buckets are per-model), and we only give up on a
-    // key when the error is a hard auth failure — a quota'd (429) or model-less
-    // (404) key must fall through to the next key/model instead of failing.
-    const candidateKeys = [...new Set([byokKeys?.gemini, process.env.GEMINI_API_KEY].filter(Boolean))] as string[];
-    if (candidateKeys.length === 0) {
-      return res.json({ success: false, error: 'No Gemini API key available. Add one in Settings > AI Models.' });
+    const h = await humanizeHtmlWithFallback(originalHtml, byokKeys, { tone: brand?.voiceGuidelines, bannedWords: brand?.bannedWords }, 'draft');
+    if (!h.text) {
+      return res.json({ success: false, error: `Humanisation failed: ${h.error}` });
     }
 
-    const isAuthError = (msg: string) => /API_KEY_INVALID|API key not valid|PERMISSION_DENIED|UNAUTHENTICATED|invalid key/i.test(msg);
-    const isModelError = (msg: string) => /model\s+not\s+found|NOT_FOUND|no longer available|does not exist/i.test(msg);
-    const isQuotaError = (msg: string) => /RESOURCE_EXHAUSTED|quota|rate limit|429|high demand|503|UNAVAILABLE/i.test(msg);
-
-    let humanized = '';
-    let lastErr: any = null;
-    let usedModel = '';
-    let quotaBlocked = false;
-    for (const key of candidateKeys) {
-      for (const model of MODEL_CHAIN) {
-        try {
-          humanized = await Promise.race([
-            patina.rewriteHtmlOrThrow(originalHtml, key, model),
-            new Promise<string>((_, reject) =>
-              setTimeout(() => reject(new Error('Humanisation timed out after 90s — please retry.')), 90000)
-            ),
-          ]);
-          usedModel = model;
-          break;
-        } catch (err: any) {
-          lastErr = err;
-          const msg = String(err?.message || '');
-          if (isAuthError(msg)) break; // this key is dead — try the next key
-          if (isQuotaError(msg)) {
-            quotaBlocked = true;
-            // Respect the API's own "retry in Xs" hint between attempts.
-            const hint = parseRetryAfterHint(msg);
-            if (hint) await new Promise((r) => setTimeout(r, hint));
-          }
-          // Model errors (404/no longer available) and everything else fall
-          // through to the next model in the chain, then the next key.
-        }
-      }
-      if (humanized) break;
-    }
-
-    if (!humanized) {
-      const detail = String(lastErr?.message || lastErr || 'unknown error').slice(0, 220);
-      const hint = quotaBlocked
-        ? ' The Gemini quota for the current key is exhausted — add a different Gemini key in Settings > AI Models, or retry later when the daily quota resets.'
-        : '';
-      return res.json({ success: false, error: `Humanisation failed: ${detail}${hint}` });
-    }
-
+    const humanized = h.text;
     const changed = humanized !== originalHtml && (stripHtml(humanized) || '').trim().length > 0;
     return res.json({
       success: true,
@@ -873,7 +1283,7 @@ app.post('/api/ai/humanize-draft', async (req, res) => {
       humanized: changed ? humanized : originalHtml,
       blocks: changed ? parseHtmlIntoBlocks(humanized, 'Humanised draft', '') : [],
       provider: 'gemini',
-      model: usedModel || GEMINI_TEXT_MODEL,
+      model: h.model || GEMINI_TEXT_MODEL,
       changed,
       note: changed ? 'Draft rewritten by Patina (Gemini).' : 'The model returned content identical to the original draft — no change was made.',
     });
@@ -992,8 +1402,6 @@ app.post('/api/seo/improve', async (req, res) => {
       options = {},           // { tone, readability, densityTarget }
     } = req.body;
 
-    const aiApiKey = byokKeys?.gemini || process.env.GEMINI_API_KEY;
-
     const bannedWordsText = brand?.bannedWords?.length
       ? `STRICT BANNED WORDS (DO NOT USE ANY OF THESE): ${brand.bannedWords.join(', ')}.`
       : '';
@@ -1060,15 +1468,26 @@ ${bodyHtml}`;
 
     if (applyHumanization && improvedHtml) {
       console.log(`[AI] Humanizing refined content for ${title}...`);
-      const patina = new Humanizer({
+      const h = await humanizeHtmlWithFallback(improvedHtml, byokKeys, {
         tone: brand?.voiceGuidelines || 'conversational',
         bannedWords: brand?.bannedWords || [],
-        levers: { complexity: 0.4, burstiness: 0.8 },
-      });
-      improvedHtml = await patina.rewriteHtml(improvedHtml, aiApiKey, genModel);
+      }, title);
+      if (h.text) {
+        improvedHtml = h.text;
+      } else {
+        console.warn(`[AI] Humanisation pass skipped for "${title}": ${h.error}`);
+      }
     }
 
-    return res.json({ success: true, data: { bodyHtml: improvedHtml, model: genModel, provider: genProvider, fallback, mode } });
+    // Derive blocks from the final HTML so callers (SEO panel, Content Hub fix
+    // flow) can apply the improved article in one patch — bodyHtml + blocks
+    // always stay in sync, same as the humanise-draft endpoint.
+    const blocks = improvedHtml ? parseHtmlIntoBlocks(improvedHtml, title || 'Refined article', primaryKeyword || '') : [];
+
+    return res.json({
+      success: true,
+      data: { bodyHtml: improvedHtml, blocks, model: genModel, provider: genProvider, fallback, mode },
+    });
   } catch (err: any) {
     console.error('Error in /api/seo/improve:', err);
     return res.status(400).json({ error: err?.message || 'Failed to refine content.' });
@@ -1278,229 +1697,262 @@ Return JSON with an array of "prompts" containing object items with "prompt", "c
 // API Endpoint: Generate AI Image via Gemini or Fallback
 // `topicContext` (article title / keyword / brand) is prepended to every prompt
 // so generated images always match the blog topic, even for short prompts.
+// =========================================================================
+// AI IMAGE GENERATION — shared PAID Nano Banana chain
+// =========================================================================
+
+export interface AiImageResult {
+  imageUrl: string;
+  isAiGenerated: boolean;
+  isPlaceholder?: boolean;
+  model: string;
+  provider: string;
+  message?: string;
+}
+
+/**
+ * Generate ONE image with the PAID Nano Banana chain, in priority order:
+ *   1. Gemini native `gemini-3.1-flash-image` (Nano Banana 2, billed) with the
+ *      saved BYOK key, then the server GEMINI_API_KEY;
+ *   2. OpenRouter `google/gemini-3.1-flash-image` (paid ~$0.06/img) then the
+ *      Lite variant (~$0.03/img) via the workspace OpenRouter key;
+ *   3. DALL-E 3, then SDXL (Hugging Face) as last-resort AI providers;
+ *   4. A FLAGGED placeholder (never a silently random stock photo).
+ * One code path shared by /api/ai/generate-nano-image, the Auto-Write image
+ * step and the sync-time image guarantee — same quality everywhere.
+ */
+async function generateAiImage(opts: {
+  prompt: string;
+  aspectRatio?: string;
+  modelProvider?: string;
+  byokKeys?: any;
+}): Promise<AiImageResult> {
+  const { prompt, aspectRatio, modelProvider, byokKeys } = opts;
+  const finalPrompt = String(prompt || '').trim();
+  if (!finalPrompt) throw new Error('An image prompt is required.');
+
+  const tryDalle = async (): Promise<AiImageResult | null> => {
+    const apiKey = byokKeys?.openai || process.env.OPENAI_API_KEY;
+    if (!apiKey) return null;
+    const response = await fetch('https://api.openai.com/v1/images/generations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: "dall-e-3",
+        prompt: finalPrompt,
+        n: 1,
+        size: "1024x1024",
+        response_format: "url"
+      })
+    });
+    if (!response.ok) throw new Error("OpenAI Generation Failed: " + (await response.text()).slice(0, 200));
+    const data = await response.json();
+    if (!data.data?.[0]?.url) throw new Error('OpenAI returned no image.');
+    return { imageUrl: data.data[0].url, isAiGenerated: true, model: 'dall-e-3', provider: 'openai' };
+  };
+
+  // OpenRouter serves image models (Nano Banana, GPT-5 Image) over the same
+  // chat completions endpoint — the image comes back base64-encoded in
+  // message.images[].image_url.url. Uses the workspace OpenRouter key already
+  // configured for text generation. Verified live 2026-08:
+  //   google/gemini-3.1-flash-image (Nano Banana 2) ~$0.06/img
+  //   google/gemini-3.1-flash-lite-image (Nano Banana 2 Lite) ~$0.03/img
+  const tryOpenRouterImage = async (): Promise<AiImageResult | null> => {
+    const apiKey = byokKeys?.openrouter || process.env.OPENROUTER_API_KEY;
+    if (!apiKey) return null;
+    const attempts: Array<{ model: string; label: string; body: any }> = [
+      {
+        model: 'google/gemini-3.1-flash-image', label: 'nano-banana-2',
+        body: {
+          model: 'google/gemini-3.1-flash-image',
+          messages: [{ role: 'user', content: finalPrompt }],
+          modalities: ['image'],
+          max_tokens: 4096,
+        },
+      },
+      {
+        model: 'google/gemini-3.1-flash-lite-image', label: 'nano-banana-2-lite',
+        body: {
+          model: 'google/gemini-3.1-flash-lite-image',
+          messages: [{ role: 'user', content: finalPrompt }],
+          modalities: ['image'],
+          max_tokens: 4096,
+        },
+      },
+    ];
+    for (const attempt of attempts) {
+      try {
+        const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+          body: JSON.stringify(attempt.body),
+        });
+        if (!response.ok) throw new Error(`OpenRouter ${attempt.label} failed: ` + (await response.text()).slice(0, 160));
+        const data = await response.json();
+        const msg = data?.choices?.[0]?.message;
+        const images = Array.isArray(msg?.images) ? msg.images : [];
+        let imgUrl = images[0]?.image_url?.url || images[0]?.url;
+        if (imgUrl?.startsWith('data:image')) {
+          // OpenRouter sometimes mislabels JPEG output as image/png — sniff
+          // the magic bytes so browsers/WordPress sideloads decode correctly.
+          const raw = imgUrl.split(',')[1];
+          const head = Buffer.from(raw || '', 'base64').subarray(0, 4);
+          const mime = head[0] === 0xff && head[1] === 0xd8 ? 'image/jpeg'
+            : head[0] === 0x89 && head[1] === 0x50 ? 'image/png'
+            : head[0] === 0x52 && head[1] === 0x49 ? 'image/webp'
+            : 'image/png';
+          imgUrl = `data:${mime};base64,${raw}`;
+        }
+        if (imgUrl) {
+          return { imageUrl: imgUrl, isAiGenerated: true, model: attempt.label, provider: 'openrouter' };
+        }
+        // Some OR image models return a markdown URL in the text content.
+        const content = String(msg?.content || '');
+        const urlMatch = content.match(/https?:\/\/[^\s)\]]+/);
+        if (urlMatch) {
+          return { imageUrl: urlMatch[0], isAiGenerated: true, model: attempt.label, provider: 'openrouter' };
+        }
+        throw new Error(`OpenRouter ${attempt.label} returned no image.`);
+      } catch (e: any) {
+        console.warn('[Image] OpenRouter ' + attempt.label + ' failed:', String(e?.message || e).slice(0, 140));
+      }
+    }
+    return null;
+  };
+
+  const tryHuggingFace = async (): Promise<AiImageResult | null> => {
+    const apiKey = byokKeys?.huggingface || process.env.HF_TOKEN;
+    if (!apiKey) return null;
+    const response = await fetch('https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+      body: JSON.stringify({ inputs: finalPrompt })
+    });
+    if (!response.ok) throw new Error("Hugging Face Generation Failed: " + (await response.text()).slice(0, 200));
+    const buffer = await response.arrayBuffer();
+    const base64 = Buffer.from(buffer).toString('base64');
+    return { imageUrl: `data:image/jpeg;base64,${base64}`, isAiGenerated: true, model: 'stable-diffusion-xl-base-1.0', provider: 'huggingface' };
+  };
+
+  const tryReplicate = async (): Promise<AiImageResult | null> => {
+    const apiKey = byokKeys?.replicate || process.env.REPLICATE_API_TOKEN;
+    if (!apiKey) return null;
+    const start = await fetch('https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+      body: JSON.stringify({ input: { prompt: finalPrompt, go_fast: true } }),
+    });
+    if (!start.ok) throw new Error('Replicate start failed: ' + (await start.text()).slice(0, 200));
+    const { id, urls } = await start.json();
+    // Poll until the prediction finishes (flux-schnell usually < 10s).
+    const deadline = Date.now() + 90000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 2500));
+      const poll = await fetch(urls.get, { headers: { Authorization: `Bearer ${apiKey}` } });
+      const state = await poll.json();
+      if (state.status === 'succeeded' && state.output?.[0]) {
+        return { imageUrl: state.output[0], isAiGenerated: true, model: 'flux-schnell', provider: 'replicate' };
+      }
+      if (state.status === 'failed') throw new Error('Replicate prediction failed.');
+    }
+    throw new Error('Replicate prediction timed out.');
+  };
+
+  const placeholder = (reason: string): AiImageResult => ({
+    imageUrl: `https://picsum.photos/seed/${encodeURIComponent(finalPrompt.replace(/[^a-zA-Z0-9]/g, '-').slice(0, 30) || 'nano-banana')}/${aspectRatio === '1:1' ? 800 : aspectRatio === '4:3' ? 1000 : 1200}/${aspectRatio === '1:1' ? 800 : aspectRatio === '4:3' ? 750 : 675}`,
+    isAiGenerated: false,
+    isPlaceholder: true,
+    model: 'picsum-placeholder',
+    provider: 'none',
+    message: `Placeholder image — no AI image model could be reached (${reason}). Add a Gemini server key, or an OpenAI / Hugging Face / Replicate key in Settings, to generate a real image that follows this prompt.`,
+  });
+
+  // --- 1. Gemini Nano Banana — the default quality path. Imagen was shut
+  // down June 30 2026; image generation now runs through generateContent with
+  // the native image models (gemini-3.1-flash-image — the PAID Nano Banana 2).
+  // Tries the saved (BYOK) key first, then the server key — a rejected saved
+  // key must not silently drop real AI images for a placeholder.
+  const tryGeminiImage = async (apiKey: string): Promise<AiImageResult> => {
+    const ai = new GoogleGenAI({ apiKey });
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.1-flash-image',
+      contents: finalPrompt,
+      config: {
+        responseModalities: ['IMAGE'],
+        imageConfig: { aspectRatio: aspectRatio || '1:1' },
+      },
+    });
+    const parts = response?.candidates?.[0]?.content?.parts || [];
+    const imagePart = parts.find((p: any) => p?.inlineData?.data);
+    if (imagePart?.inlineData?.data) {
+      const mime = imagePart.inlineData.mimeType || 'image/png';
+      return { imageUrl: `data:${mime};base64,${imagePart.inlineData.data}`, isAiGenerated: true, model: 'gemini-3.1-flash-image', provider: 'gemini' };
+    }
+    throw new Error('Gemini returned no image parts.');
+  };
+  if (!modelProvider || modelProvider === 'auto' || modelProvider === 'gemini') {
+    const geminiKeys = [byokKeys?.gemini, process.env.GEMINI_API_KEY].filter((k, i, a): k is string => !!k && a.indexOf(k) === i);
+    for (const key of geminiKeys) {
+      try {
+        return await tryGeminiImage(key);
+      } catch (imageErr: any) {
+        console.warn(`[Image] Gemini failed with ${key === byokKeys?.gemini ? 'saved' : 'server'} key, trying next provider:`, String(imageErr?.message || imageErr).slice(0, 140));
+      }
+    }
+    // Auto chain: Gemini -> OpenRouter (Nano Banana paid) -> DALL-E -> SDXL ->
+    // flagged placeholder (never a silently random photo).
+    if (modelProvider === 'auto' || !modelProvider) {
+      for (const attempt of [tryOpenRouterImage, tryDalle, tryHuggingFace]) {
+        const r = await attempt().catch((e: any) => { console.warn('[Image] fallback failed:', String(e?.message || e).slice(0, 140)); return null; });
+        if (r) return r;
+      }
+      return placeholder('Gemini quota exhausted and no fallback image provider succeeded');
+    }
+    return placeholder('Gemini quota exhausted or image API unavailable');
+  }
+
+  // --- 2. Explicit providers -----------------------------------------------
+  if (modelProvider === 'openai') {
+    const r = await tryDalle().catch(() => null);
+    if (r) return r;
+    const hf = await tryHuggingFace().catch(() => null);
+    if (hf) return hf;
+    return placeholder('OpenAI key missing or generation failed');
+  }
+  if (modelProvider === 'huggingface') {
+    const r = await tryHuggingFace().catch(() => null);
+    if (r) return r;
+    const dalle = await tryDalle().catch(() => null);
+    if (dalle) return dalle;
+    return placeholder('Hugging Face token missing or generation failed');
+  }
+  if (modelProvider === 'replicate') {
+    const r = await tryReplicate().catch((e: any) => { console.warn('[Image] Replicate failed:', String(e?.message || e).slice(0, 140)); return null; });
+    if (r) return r;
+    const dalle = await tryDalle().catch(() => null);
+    if (dalle) return dalle;
+    return placeholder('Replicate token missing or prediction failed');
+  }
+
+  // Unknown provider: fall back to the auto chain.
+  for (const attempt of [tryDalle, tryHuggingFace, tryReplicate]) {
+    const r = await attempt().catch(() => null);
+    if (r) return r;
+  }
+  return placeholder('no image provider configured');
+}
+
+// API Endpoint: Generate AI Image via Gemini or Fallback
+// `topicContext` (article title / keyword / brand) is prepended to every prompt
+// so generated images always match the blog topic, even for short prompts.
 app.post('/api/ai/generate-nano-image', async (req, res) => {
   try {
     const { prompt, aspectRatio, modelProvider, byokKeys, topicContext } = req.body;
     const finalPrompt = topicContext
       ? `${String(topicContext).trim()}\n\nImage prompt: ${String(prompt || '').trim()}`
       : String(prompt || '');
-    if (!finalPrompt.trim()) {
-      return res.status(400).json({ error: 'An image prompt is required.' });
-    }
-
-    // Shared helpers -----------------------------------------------------------
-    const okJson = (payload: any) => res.json({ success: true, prompt: finalPrompt, aspectRatio: aspectRatio || '1:1', ...payload });
-
-    const tryDalle = async (): Promise<any | null> => {
-      const apiKey = byokKeys?.openai || process.env.OPENAI_API_KEY;
-      if (!apiKey) return null;
-      const response = await fetch('https://api.openai.com/v1/images/generations', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-        body: JSON.stringify({
-          model: "dall-e-3",
-          prompt: finalPrompt,
-          n: 1,
-          size: "1024x1024",
-          response_format: "url"
-        })
-      });
-      if (!response.ok) throw new Error("OpenAI Generation Failed: " + (await response.text()).slice(0, 200));
-      const data = await response.json();
-      if (!data.data?.[0]?.url) throw new Error('OpenAI returned no image.');
-      return okJson({ imageUrl: data.data[0].url, isAiGenerated: true, model: 'dall-e-3', provider: 'openai' });
-    };
-
-    // OpenRouter serves image models (Nano Banana, GPT-5 Image) over the same
-    // chat completions endpoint — the image comes back base64-encoded in
-    // message.images[].image_url.url. Uses the workspace OpenRouter key already
-    // configured for text generation. Verified live 2026-08:
-    //   google/gemini-3.1-flash-image (Nano Banana 2) ~$0.06/img
-    //   google/gemini-3.1-flash-lite-image (Nano Banana 2 Lite) ~$0.03/img
-    const tryOpenRouterImage = async (): Promise<any | null> => {
-      const apiKey = byokKeys?.openrouter || process.env.OPENROUTER_API_KEY;
-      if (!apiKey) return null;
-      const attempts: Array<{ model: string; label: string; body: any }> = [
-        {
-          model: 'google/gemini-3.1-flash-image', label: 'nano-banana-2',
-          body: {
-            model: 'google/gemini-3.1-flash-image',
-            messages: [{ role: 'user', content: finalPrompt }],
-            modalities: ['image'],
-            max_tokens: 4096,
-          },
-        },
-        {
-          model: 'google/gemini-3.1-flash-lite-image', label: 'nano-banana-2-lite',
-          body: {
-            model: 'google/gemini-3.1-flash-lite-image',
-            messages: [{ role: 'user', content: finalPrompt }],
-            modalities: ['image'],
-            max_tokens: 4096,
-          },
-        },
-      ];
-      for (const attempt of attempts) {
-        try {
-          const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-            body: JSON.stringify(attempt.body),
-          });
-          if (!response.ok) throw new Error(`OpenRouter ${attempt.label} failed: ` + (await response.text()).slice(0, 160));
-          const data = await response.json();
-          const msg = data?.choices?.[0]?.message;
-          const images = Array.isArray(msg?.images) ? msg.images : [];
-          let imgUrl = images[0]?.image_url?.url || images[0]?.url;
-          if (imgUrl?.startsWith('data:image')) {
-            // OpenRouter sometimes mislabels JPEG output as image/png — sniff
-            // the magic bytes so browsers/WordPress sideloads decode correctly.
-            const raw = imgUrl.split(',')[1];
-            const head = Buffer.from(raw || '', 'base64').subarray(0, 4);
-            const mime = head[0] === 0xff && head[1] === 0xd8 ? 'image/jpeg'
-              : head[0] === 0x89 && head[1] === 0x50 ? 'image/png'
-              : head[0] === 0x52 && head[1] === 0x49 ? 'image/webp'
-              : 'image/png';
-            imgUrl = `data:${mime};base64,${raw}`;
-          }
-          if (imgUrl) {
-            return okJson({ imageUrl: imgUrl, isAiGenerated: true, model: attempt.label, provider: 'openrouter' });
-          }
-          // Some OR image models return a markdown URL in the text content.
-          const content = String(msg?.content || '');
-          const urlMatch = content.match(/https?:\/\/[^\s)\]]+/);
-          if (urlMatch) {
-            return okJson({ imageUrl: urlMatch[0], isAiGenerated: true, model: attempt.label, provider: 'openrouter' });
-          }
-          throw new Error(`OpenRouter ${attempt.label} returned no image.`);
-        } catch (e: any) {
-          console.warn('[Image] OpenRouter ' + attempt.label + ' failed:', String(e?.message || e).slice(0, 140));
-        }
-      }
-      return null;
-    };
-
-    const tryHuggingFace = async (): Promise<any | null> => {
-      const apiKey = byokKeys?.huggingface || process.env.HF_TOKEN;
-      if (!apiKey) return null;
-      const response = await fetch('https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-        body: JSON.stringify({ inputs: finalPrompt })
-      });
-      if (!response.ok) throw new Error("Hugging Face Generation Failed: " + (await response.text()).slice(0, 200));
-      const buffer = await response.arrayBuffer();
-      const base64 = Buffer.from(buffer).toString('base64');
-      return okJson({ imageUrl: `data:image/jpeg;base64,${base64}`, isAiGenerated: true, model: 'stable-diffusion-xl-base-1.0', provider: 'huggingface' });
-    };
-
-    const tryReplicate = async (): Promise<any | null> => {
-      const apiKey = byokKeys?.replicate || process.env.REPLICATE_API_TOKEN;
-      if (!apiKey) return null;
-      const start = await fetch('https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-        body: JSON.stringify({ input: { prompt: finalPrompt, go_fast: true } }),
-      });
-      if (!start.ok) throw new Error('Replicate start failed: ' + (await start.text()).slice(0, 200));
-      const { id, urls } = await start.json();
-      // Poll until the prediction finishes (flux-schnell usually < 10s).
-      const deadline = Date.now() + 90000;
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 2500));
-        const poll = await fetch(urls.get, { headers: { Authorization: `Bearer ${apiKey}` } });
-        const state = await poll.json();
-        if (state.status === 'succeeded' && state.output?.[0]) {
-          return okJson({ imageUrl: state.output[0], isAiGenerated: true, model: 'flux-schnell', provider: 'replicate' });
-        }
-        if (state.status === 'failed') throw new Error('Replicate prediction failed.');
-      }
-      throw new Error('Replicate prediction timed out.');
-    };
-
-    const placeholder = (reason: string) =>
-      okJson({
-        imageUrl: `https://picsum.photos/seed/${encodeURIComponent(finalPrompt.replace(/[^a-zA-Z0-9]/g, '-').slice(0, 30) || 'nano-banana')}/${aspectRatio === '1:1' ? 800 : aspectRatio === '4:3' ? 1000 : 1200}/${aspectRatio === '1:1' ? 800 : aspectRatio === '4:3' ? 750 : 675}`,
-        isAiGenerated: false,
-        isPlaceholder: true,
-        model: 'picsum-placeholder',
-        provider: 'none',
-        message: `Placeholder image — no AI image model could be reached (${reason}). Add a Gemini server key, or an OpenAI / Hugging Face / Replicate key in Settings, to generate a real image that follows this prompt.`,
-      });
-
-    // --- 1. Gemini Nano Banana — the default quality path. Imagen was shut
-    // down June 30 2026; image generation now runs through generateContent with
-    // the native image models (gemini-3.1-flash-image). Tries the saved (BYOK)
-    // key first, then the server key — a rejected saved key must not silently
-    // drop real AI images for a placeholder.
-    const tryGeminiImage = async (apiKey: string) => {
-      const ai = new GoogleGenAI({ apiKey });
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.1-flash-image',
-        contents: finalPrompt,
-        config: {
-          responseModalities: ['IMAGE'],
-          imageConfig: { aspectRatio: aspectRatio || '1:1' },
-        },
-      });
-      const parts = response?.candidates?.[0]?.content?.parts || [];
-      const imagePart = parts.find((p: any) => p?.inlineData?.data);
-      if (imagePart?.inlineData?.data) {
-        const mime = imagePart.inlineData.mimeType || 'image/png';
-        return okJson({ imageUrl: `data:${mime};base64,${imagePart.inlineData.data}`, isAiGenerated: true, model: 'gemini-3.1-flash-image', provider: 'gemini' });
-      }
-      throw new Error('Gemini returned no image parts.');
-    };
-    if (!modelProvider || modelProvider === 'auto' || modelProvider === 'gemini') {
-      const geminiKeys = [byokKeys?.gemini, process.env.GEMINI_API_KEY].filter((k, i, a): k is string => !!k && a.indexOf(k) === i);
-      for (const key of geminiKeys) {
-        try {
-          return await tryGeminiImage(key);
-        } catch (imageErr: any) {
-          console.warn(`[Image] Gemini failed with ${key === byokKeys?.gemini ? 'saved' : 'server'} key, trying next provider:`, String(imageErr?.message || imageErr).slice(0, 140));
-        }
-      }
-      // Auto chain: Gemini -> OpenRouter (DALL-E/Flux via workspace key) ->
-      // DALL-E -> SDXL -> flagged placeholder (never a silently random photo).
-      if (modelProvider === 'auto' || !modelProvider) {
-        for (const attempt of [tryOpenRouterImage, tryDalle, tryHuggingFace]) {
-          const r = await attempt().catch((e: any) => { console.warn('[Image] fallback failed:', String(e?.message || e).slice(0, 140)); return null; });
-          if (r) return r;
-        }
-        return placeholder('Gemini quota exhausted and no fallback image provider succeeded');
-      }
-      return placeholder('Gemini quota exhausted or image API unavailable');
-    }
-
-    // --- 2. Explicit providers -----------------------------------------------
-    if (modelProvider === 'openai') {
-      const r = await tryDalle().catch(() => null);
-      if (r) return r;
-      const hf = await tryHuggingFace().catch(() => null);
-      if (hf) return hf;
-      return placeholder('OpenAI key missing or generation failed');
-    }
-    if (modelProvider === 'huggingface') {
-      const r = await tryHuggingFace().catch(() => null);
-      if (r) return r;
-      const dalle = await tryDalle().catch(() => null);
-      if (dalle) return dalle;
-      return placeholder('Hugging Face token missing or generation failed');
-    }
-    if (modelProvider === 'replicate') {
-      const r = await tryReplicate().catch((e: any) => { console.warn('[Image] Replicate failed:', String(e?.message || e).slice(0, 140)); return null; });
-      if (r) return r;
-      const dalle = await tryDalle().catch(() => null);
-      if (dalle) return dalle;
-      return placeholder('Replicate token missing or prediction failed');
-    }
-
-    // Unknown provider: fall back to the auto chain.
-    for (const attempt of [tryDalle, tryHuggingFace, tryReplicate]) {
-      const r = await attempt().catch(() => null);
-      if (r) return r;
-    }
-    return placeholder('no image provider configured');
+    const result = await generateAiImage({ prompt: finalPrompt, aspectRatio, modelProvider, byokKeys });
+    return res.json({ success: true, prompt: finalPrompt, aspectRatio: aspectRatio || '1:1', ...result });
   } catch (err: any) {
     console.error('Error generating nano image:', err);
     return res.status(500).json({ error: err.message || 'Image generation failed.' });
@@ -1759,7 +2211,7 @@ app.post('/api/wp/test-connection', async (req, res) => {
 // Endpoint: Push Content to WordPress (Post or Page with Template)
 app.post('/api/wp/sync-content', async (req, res) => {
   try {
-    const { brand, contentItem } = req.body;
+    const { brand, contentItem, byokKeys } = req.body;
 
     if (!brand || !contentItem) {
       return res.status(400).json({ success: false, message: 'Brand and Content Item required.' });
@@ -1768,6 +2220,9 @@ app.post('/api/wp/sync-content', async (req, res) => {
     const cleanUrl = brand.wpUrl.replace(/\/+$/, '');
     const endpoint = contentItem.contentType === 'page' ? '/wp-json/wp/v2/pages' : '/wp-json/wp/v2/posts';
     const authHeader = 'Basic ' + Buffer.from(`${brand.wpUsername}:${brand.wpAppPassword || ''}`).toString('base64');
+    // byokKeys (the user's saved paid keys) power sync-time image generation;
+    // falls back to the server env keys when the client sends none.
+    const imageKeys = byokKeys && typeof byokKeys === 'object' ? byokKeys : undefined;
 
     // Publish LIVE by default: the "Publish to WordPress" button must go live.
     // (An explicit { status: 'draft' } in the body still allows a draft sync.)
@@ -1786,8 +2241,158 @@ app.post('/api/wp/sync-content', async (req, res) => {
       payload.template = contentItem.wpTemplate;
     }
 
-    if (contentItem.wpMediaId) {
+    // Featured-media precedence: the AI-generated hero's media id (set at
+    // Auto-Write time) is freshest, then any previously synced wpMediaId, then
+    // the upload/guarantee path below.
+    if (typeof contentItem.featuredMediaId === 'number') {
+      payload.featured_media = contentItem.featuredMediaId;
+    } else if (contentItem.wpMediaId) {
       payload.featured_media = contentItem.wpMediaId;
+    }
+
+    // --- Sync-time AI image guarantee -----------------------------------------
+    // Every pushed article must carry at least 2 topic-matched images:
+    //  1. featured (hero) — from featuredMediaId / wpMediaId, or uploaded from
+    //     pickHeroImage(); items with NO hero image at all get one GENERATED
+    //     on the fly with the paid Nano Banana chain (topic + body context).
+    //  2. in-body (secondary) — the item's stored secondaryImageUrl, or a
+    //     GENERATED one embedded as an idempotent <figure class="fg-art-
+    //     secondary">. Old items whose blocks already hold a real (non-
+    //     placeholder) image skip generation — they already have 2 images.
+    // Generated images are returned so the client persists them for
+    // deterministic re-pushes. Any hiccup here never fails the publish.
+    const imagesReturn: { heroUrl?: string; heroMediaId?: number; secondaryUrl?: string; secondaryMediaId?: number } = {};
+    const blocksHaveRealImage = (contentItem.blocks || []).some(
+      (b: any) => b && String(b.imageUrl || '').trim() && !/placehold\.co|picsum\.photos/i.test(String(b.imageUrl)),
+    );
+
+    let featuredMediaId: number | null = null;
+    if (!payload.featured_media) {
+      let heroSrc = pickHeroImage(contentItem);
+      // Old/image-less items: generate a topic-matched hero instead of
+      // publishing without a featured image (grids/cards would look empty).
+      if (!heroSrc) {
+        try {
+          const gen = await generateAiImage({
+            prompt: `${buildImageTopicContext(contentItem, brand)}\n\nImage prompt: ${String(contentItem.nanoBananaPrompt || '').trim() || `${contentItem.primaryKeyword || contentItem.title} hero photo`}`,
+            aspectRatio: '16:9',
+            byokKeys: imageKeys,
+          });
+          if (!gen.isPlaceholder) heroSrc = gen.imageUrl;
+        } catch (genErr: any) {
+          console.warn('[Sync] hero generation skipped:', String(genErr?.message || genErr).slice(0, 140));
+        }
+      }
+      if (heroSrc) {
+        try {
+          const isData = /^data:image/i.test(heroSrc);
+          const { wpMediaId, wpMediaUrl } = await uploadImageToWp(
+            brand,
+            isData ? { dataBase64: heroSrc, filename: 'featured-image' } : { imageUrl: heroSrc, filename: 'featured-image' },
+          );
+          payload.featured_media = wpMediaId;
+          featuredMediaId = wpMediaId;
+          if (isData) imagesReturn.heroUrl = wpMediaUrl;
+          imagesReturn.heroMediaId = wpMediaId;
+        } catch (featErr: any) {
+          console.warn('[Sync] featured-image upload skipped:', String(featErr?.message || featErr).slice(0, 160));
+        }
+      }
+    }
+
+    // Secondary (in-body) image: embed as an idempotent figure so the article
+    // body carries a second topic-matched image even without a body <img>.
+    const bodyHasSecondary = /fg-art-secondary/.test(payload.content || '');
+    const storedSecondary = String(contentItem.secondaryImageUrl || '').trim();
+    let secondarySrc = storedSecondary;
+    if (!secondarySrc && !bodyHasSecondary && !blocksHaveRealImage) {
+      try {
+        const gen = await generateAiImage({
+          prompt: `${buildImageTopicContext(contentItem, brand)}\n\nImage prompt: ${contentItem.primaryKeyword || contentItem.title} lifestyle detail photo`,
+          aspectRatio: '4:3',
+          byokKeys: imageKeys,
+        });
+        if (!gen.isPlaceholder) secondarySrc = gen.imageUrl;
+      } catch (genErr: any) {
+        console.warn('[Sync] secondary image generation skipped:', String(genErr?.message || genErr).slice(0, 140));
+      }
+    }
+    if (secondarySrc && !bodyHasSecondary) {
+      let embedSrc = secondarySrc;
+      if (/^data:image/i.test(secondarySrc)) {
+        try {
+          const up = await uploadImageToWp(brand, { dataBase64: secondarySrc, filename: 'article-image-2' });
+          embedSrc = up.wpMediaUrl;
+          imagesReturn.secondaryUrl = up.wpMediaUrl;
+          imagesReturn.secondaryMediaId = up.wpMediaId;
+        } catch (secErr: any) {
+          console.warn('[Sync] secondary image upload skipped:', String(secErr?.message || secErr).slice(0, 140));
+        }
+      } else {
+        imagesReturn.secondaryUrl = secondarySrc;
+      }
+      payload.content = embedSecondaryFigure(
+        payload.content || '',
+        embedSrc,
+        String(contentItem.primaryKeyword || contentItem.title || 'Article image').trim(),
+      );
+    }
+
+    // --- Image hosting guarantee -------------------------------------------------
+    // WordPress strips data: URLs from content (kses allowed-protocols), so any
+    // app-generated image (nano-image / AI flows return base64 data URIs) would
+    // render as a broken image on the live site. Upload data-URI images to the
+    // WP media library here and rewrite the <img> srcs before publishing, so
+    // every pushed article keeps its images. A hiccup here never fails the
+    // whole publish — the article goes out as-is and the error is logged.
+    try {
+      const srcRe = /<img\b[^>]*src\s*=\s*["']([^"']+)["']/gi;
+      const seen = new Set<string>();
+      const srcs: string[] = [];
+      let sm: RegExpExecArray | null;
+      while ((sm = srcRe.exec(payload.content || '')) !== null) {
+        const src = sm[1];
+        if (src && src.startsWith('data:image') && !seen.has(src)) {
+          seen.add(src);
+          srcs.push(src);
+        }
+      }
+      for (const [i, src] of srcs.entries()) {
+        try {
+          const { wpMediaUrl } = await uploadImageToWp(brand, {
+            dataBase64: src,
+            filename: `article-image-${i + 1}`,
+          });
+          payload.content = String(payload.content || '').split(src).join(wpMediaUrl);
+        } catch (imgErr: any) {
+          console.warn(`[Sync] data-URI image upload skipped (${i + 1}/${srcs.length}):`, String(imgErr?.message || imgErr).slice(0, 160));
+        }
+      }
+    } catch (imgScanErr: any) {
+      console.warn('[Sync] image scan skipped:', String(imgScanErr?.message || imgScanErr).slice(0, 160));
+    }
+
+    // --- Publish-readiness verification (log-only, never blocks publishing) ---
+    // A hand-edited draft can still be truncated or far short of its target —
+    // this catches that at the publish gate so it can be fixed before the post
+    // goes live. Checks the item's own blocks (the structured truth the editor
+    // shows), not the frame-wrapped HTML (whose static footer would add noise).
+    try {
+      const blockText = (contentItem.blocks || [])
+        .map((b: any) => String(b?.content || b?.subtitle || '').trim())
+        .filter(Boolean).join(' ').trim();
+      if (blockText) {
+        const blockWords = blockText.split(/\s+/).length;
+        const target = safeCount(contentItem.targetWordCount) || 0;
+        if (!ENDS_WITH_FINAL_PUNCT.test(blockText)) {
+          console.warn(`[Sync] "${contentItem.title}" may be truncated: the last block does not end with sentence-final punctuation (${blockWords} words).`);
+        }
+        if (target > 0 && blockWords < Math.max(200, Math.round(target * 0.5))) {
+          console.warn(`[Sync] "${contentItem.title}" is well below target length: ${blockWords} words vs target ${target}.`);
+        }
+      }
+    } catch (verErr: any) {
+      console.warn('[Sync] publish-readiness check skipped:', String(verErr?.message || verErr).slice(0, 120));
     }
 
     try {
@@ -1856,7 +2461,10 @@ app.post('/api/wp/sync-content', async (req, res) => {
           link,
           previewUrl,
           wpStatus,
-          status: appStatus
+          status: appStatus,
+          wpMediaId: featuredMediaId ?? payload.featured_media ?? null,
+          featuredMediaId: featuredMediaId ?? payload.featured_media ?? null,
+          images: imagesReturn,
         });
       } else {
         const errorData = await wpRes.text();
@@ -1906,6 +2514,42 @@ app.post('/api/wp/get-post', async (req, res) => {
     return res.json({ success: true, post: data });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err.message || 'Fetch failed' });
+  }
+});
+
+// Endpoint: Lightweight list of recently published posts for a brand — used
+// to build the article footer "related posts" strip at sync time. Deliberately
+// small (_fields limits the payload; per_page caps the round trip).
+app.post('/api/wp/list-posts', async (req, res) => {
+  try {
+    const { brand, excludeSlug, perPage } = req.body;
+    if (!brand || !brand.wpUrl || !brand.wpUsername) {
+      return res.status(400).json({ success: false, message: 'Brand with WordPress details required.' });
+    }
+    const cleanUrl = brand.wpUrl.replace(/\/+$/, '');
+    const authHeader = 'Basic ' + Buffer.from(`${brand.wpUsername}:${brand.wpAppPassword || ''}`).toString('base64');
+    const n = Math.min(20, Math.max(1, Number(perPage) || 6));
+    const wpRes = await fetch(
+      `${cleanUrl}/wp-json/wp/v2/posts?per_page=${n}&status=publish&orderby=date&order=desc&_fields=id,title,link,slug`,
+      {
+        headers: { 'Authorization': authHeader, 'Content-Type': 'application/json', 'User-Agent': 'GreenOpsContentStudio/1.0' },
+      },
+    );
+    if (!wpRes.ok) {
+      return res.status(wpRes.status).json({ success: false, message: `WordPress API Error (${wpRes.status})` });
+    }
+    const posts = await wpRes.json();
+    const list = (Array.isArray(posts) ? posts : [])
+      .filter((p: any) => !excludeSlug || !p?.slug || p.slug !== excludeSlug)
+      .slice(0, 4)
+      .map((p: any) => ({
+        title: p?.title?.rendered || p?.title || 'Untitled',
+        url: p?.link || '',
+        slug: p?.slug || '',
+      }));
+    return res.json({ success: true, posts: list });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not list posts.' });
   }
 });
 
@@ -1969,6 +2613,137 @@ app.post('/api/wp/delete-post', async (req, res) => {
   }
 });
 
+// First image-bearing source for an item, in priority order: the item's own
+// featuredImageUrl, then hero > product_cta > image_banner blocks, then the
+// first card/slide image. Used to guarantee every pushed article gets a
+// featured image on WordPress.
+function pickHeroImage(contentItem: any): string | null {
+  if (!contentItem) return null;
+  const itemSrc = String(contentItem.featuredImageUrl || '').trim();
+  if (itemSrc) return itemSrc;
+  const blocks: any[] = Array.isArray(contentItem.blocks) ? contentItem.blocks : [];
+  const order = ['hero', 'product_cta', 'image_banner'];
+  for (const type of order) {
+    for (const b of blocks) {
+      if (b && b.type === type && String(b.imageUrl || '').trim()) {
+        return String(b.imageUrl).trim();
+      }
+    }
+  }
+  for (const b of blocks) {
+    if (!b) continue;
+    if (b.type === 'cards' && Array.isArray(b.cards)) {
+      const c = b.cards.find((x: any) => x && String(x.imageUrl || '').trim());
+      if (c) return String(c.imageUrl).trim();
+    }
+    if (b.type === 'carousel' && Array.isArray(b.slides)) {
+      const s = b.slides.find((x: any) => x && String(x.imageUrl || '').trim());
+      if (s) return String(s.imageUrl).trim();
+    }
+  }
+  return null;
+}
+
+/**
+ * Topic + context string prepended to every auto-generated image prompt so
+ * renders always match the article: title, focus keyphrase, brand and a short
+ * body excerpt. Shared by the Auto-Write image step and the sync-time
+ * image guarantee.
+ */
+function buildImageTopicContext(contentItem: any, brand: any): string {
+  const title = String(contentItem?.title || '').trim();
+  const kw = String(contentItem?.primaryKeyword || '').trim();
+  const excerpt = stripHtml(String(contentItem?.bodyHtml || '')).replace(/\s+/g, ' ').trim().slice(0, 400);
+  return `Images for a blog article${title ? ` titled "${title}"` : ''}${kw ? ` about "${kw}"` : ''}. Brand: ${brand?.name || 'the site'}.${
+    excerpt ? ` Article context: "${excerpt}"` : ''
+  } Editorial, photorealistic, warm and authentic — no text, captions, logos or watermarks.`;
+}
+
+const escapeHtmlAttr = (s: any) =>
+  String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+/**
+ * Embed the generated in-body image as an idempotent figure:
+ *   1. an existing <figure class="fg-art-secondary"> gets its <img> src
+ *      updated in place (deterministic re-pushes);
+ *   2. otherwise the model's first placehold.co placeholder image is replaced;
+ *   3. otherwise the figure is inserted right after the first paragraph.
+ */
+function embedSecondaryFigure(content: string, src: string, alt: string): string {
+  const figure = `<figure class="fg-art-figure fg-art-secondary" style="margin:2rem 0;text-align:center;"><img src="${escapeHtmlAttr(src)}" alt="${escapeHtmlAttr(alt)}" style="max-width:100%;height:auto;border-radius:12px;" loading="lazy" /></figure>`;
+  const existing = /<figure[^>]*class="[^"]*fg-art-secondary[^"]*"[^>]*>[\s\S]*?<\/figure>/i.exec(content);
+  if (existing) {
+    return content.replace(
+      existing[0],
+      existing[0].replace(
+        /<img\b[^>]*src\s*=\s*["'][^"']*["']/i,
+        `<img src="${escapeHtmlAttr(src)}" alt="${escapeHtmlAttr(alt)}" style="max-width:100%;height:auto;border-radius:12px;" loading="lazy"`,
+      ),
+    );
+  }
+  const placeholder = /<img\b[^>]*src\s*=\s*["'][^"']*placehold\.co[^"']*["'][^>]*>/i.exec(content);
+  if (placeholder) return content.replace(placeholder[0], figure);
+  const p = /<\/p\s*>/i.exec(content);
+  if (p) return content.slice(0, p.index + p[0].length) + figure + content.slice(p.index + p[0].length);
+  return content + figure;
+}
+
+// Shared WP media upload — used by /api/wp/upload-media (editor image upload)
+// AND /api/wp/sync-content (data-URI article images are uploaded to the media
+// library before publishing, because WordPress strips data: URLs from content).
+async function uploadImageToWp(
+  brand: any,
+  opts: { imageUrl?: string; dataBase64?: string; filename?: string; mime?: string },
+): Promise<{ wpMediaUrl: string; wpMediaId: number }> {
+  const { imageUrl, dataBase64, filename, mime } = opts;
+  let imageBuffer: Buffer;
+  let fileMime = mime || 'image/jpeg';
+  let fileExt = (filename || 'image').replace(/[^\w.-]/g, '').replace(/\.(jpe?g|png|webp|gif|avif)$/i, '') || 'image';
+
+  if (dataBase64) {
+    // PC upload: strip any data URL prefix, decode the base64 payload.
+    const raw = String(dataBase64).trim();
+    const b64 = raw.includes(',') ? raw.slice(raw.indexOf(',') + 1) : raw;
+    const mimeMatch = raw.match(/^data:([^;]+);/);
+    if (mimeMatch) fileMime = mimeMatch[1];
+    if (!fileMime || fileMime.startsWith('text/')) fileMime = 'image/jpeg';
+    imageBuffer = Buffer.from(b64, 'base64');
+    if (!imageBuffer.length) throw new Error('Empty image payload.');
+    if (imageBuffer.length > 12 * 1024 * 1024) throw new Error('Image too large (max 12 MB).');
+  } else {
+    if (!imageUrl) throw new Error('No image source provided.');
+    const imgRes = await fetch(imageUrl);
+    if (!imgRes.ok) throw new Error('Failed to fetch source image for upload.');
+    imageBuffer = Buffer.from(await imgRes.arrayBuffer());
+  }
+
+  const cleanUrl = brand.wpUrl.replace(/\/+$/, '');
+  const authHeader = 'Basic ' + Buffer.from(`${brand.wpUsername}:${brand.wpAppPassword || ''}`).toString('base64');
+
+  const wpRes = await fetch(`${cleanUrl}/wp-json/wp/v2/media`, {
+    method: 'POST',
+    headers: {
+      'Authorization': authHeader,
+      'Content-Disposition': `attachment; filename="${fileExt}.${(fileMime.split('/')[1] || 'jpg').replace('jpeg', 'jpg')}"`,
+      'Content-Type': fileMime,
+      'User-Agent': 'GreenOpsContentStudio/1.0'
+    },
+    body: imageBuffer
+  });
+
+  if (!wpRes.ok) {
+    const errText = await wpRes.text();
+    throw new Error(`WordPress Media Upload Error: ${errText}`);
+  }
+
+  const wpData = await wpRes.json();
+  return { wpMediaUrl: wpData.source_url, wpMediaId: wpData.id };
+}
+
 // Endpoint: Upload Media to WordPress Media Library
 // Supports two sources:
 //   a) { brand, imageUrl, filename }  — remote URL (server fetches it)
@@ -1984,51 +2759,11 @@ app.post('/api/wp/upload-media', async (req, res) => {
     }
 
     try {
-      let imageBuffer: Buffer;
-      let fileMime = mime || 'image/jpeg';
-      let fileExt = (filename || 'image').replace(/[^\w.-]/g, '').replace(/\.(jpe?g|png|webp|gif|avif)$/i, '') || 'image';
-
-      if (dataBase64) {
-        // PC upload: strip any data URL prefix, decode the base64 payload.
-        const raw = String(dataBase64).trim();
-        const b64 = raw.includes(',') ? raw.slice(raw.indexOf(',') + 1) : raw;
-        const mimeMatch = raw.match(/^data:([^;]+);/);
-        if (mimeMatch) fileMime = mimeMatch[1];
-        if (!fileMime || fileMime.startsWith('text/')) fileMime = 'image/jpeg';
-        imageBuffer = Buffer.from(b64, 'base64');
-        if (!imageBuffer.length) throw new Error('Empty image payload.');
-        if (imageBuffer.length > 12 * 1024 * 1024) throw new Error('Image too large (max 12 MB).');
-      } else {
-        const imgRes = await fetch(imageUrl);
-        if (!imgRes.ok) throw new Error('Failed to fetch source image for upload.');
-        imageBuffer = Buffer.from(await imgRes.arrayBuffer());
-      }
-
-      const cleanUrl = brand.wpUrl.replace(/\/+$/, '');
-      const authHeader = 'Basic ' + Buffer.from(`${brand.wpUsername}:${brand.wpAppPassword || ''}`).toString('base64');
-
-      const wpRes = await fetch(`${cleanUrl}/wp-json/wp/v2/media`, {
-        method: 'POST',
-        headers: {
-          'Authorization': authHeader,
-          'Content-Disposition': `attachment; filename="${fileExt}.${(fileMime.split('/')[1] || 'jpg').replace('jpeg', 'jpg')}"`,
-          'Content-Type': fileMime,
-          'User-Agent': 'GreenOpsContentStudio/1.0'
-        },
-        body: imageBuffer
-      });
-
-      if (!wpRes.ok) {
-        const errText = await wpRes.text();
-        throw new Error(`WordPress Media Upload Error: ${errText}`);
-      }
-
-      const wpData = await wpRes.json();
-
+      const { wpMediaId, wpMediaUrl } = await uploadImageToWp(brand, { imageUrl, dataBase64, filename, mime });
       return res.json({
         success: true,
-        wpMediaId: wpData.id,
-        wpMediaUrl: wpData.source_url,
+        wpMediaId,
+        wpMediaUrl,
         message: `Image uploaded to WordPress Media Library successfully.`
       });
     } catch (uploadErr: any) {
@@ -2356,23 +3091,36 @@ app.post('/api/wp/preview', async (req, res) => {
 // ==========================================
 app.post('/api/wp/posts', async (req, res) => {
   try {
-    const { wpUrl, wpUsername, wpAppPassword, per_page = 5 } = req.body;
+    const { wpUrl, wpUsername, wpAppPassword, per_page = 100, status = 'any' } = req.body;
     if (!wpUrl) return res.status(400).json({ success: false, message: 'wpUrl is required' });
 
     const baseUrl = wpUrl.replace(/\/$/, '');
     const headers = { 'Content-Type': 'application/json' };
-    
+
     if (wpUsername && wpAppPassword) {
       headers['Authorization'] = 'Basic ' + Buffer.from(`${wpUsername}:${wpAppPassword}`).toString('base64');
     }
 
-    const response = await fetch(`${baseUrl}/wp-json/wp/v2/posts?per_page=${per_page}&_embed=1`, { headers });
-    if (response.ok) {
-      const posts = await response.json();
-      return res.json({ success: true, posts });
-    } else {
-      return res.status(response.status).json({ success: false, message: 'Failed to fetch posts from WordPress' });
+    // Paginate so the Content Hub can pull the full history (drafts + live +
+    // trashed) in one call — 'any' status requires the auth header above.
+    const pageSize = Math.min(100, Math.max(1, per_page || 100));
+    const posts: any[] = [];
+    for (let page = 1; page <= 10; page++) {
+      const response = await fetch(
+        `${baseUrl}/wp-json/wp/v2/posts?per_page=${pageSize}&page=${page}&status=${encodeURIComponent(status)}&_embed=1`,
+        { headers },
+      );
+      if (!response.ok) {
+        if (page === 1) {
+          return res.status(response.status).json({ success: false, message: `Failed to fetch posts from WordPress (${response.status})` });
+        }
+        break; // no more pages
+      }
+      const batch = await response.json();
+      posts.push(...batch);
+      if (batch.length < pageSize) break;
     }
+    return res.json({ success: true, posts });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
   }

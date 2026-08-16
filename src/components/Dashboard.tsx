@@ -178,6 +178,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [syncingPerf, setSyncingPerf] = useState(false);
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
   const [dataError, setDataError] = useState<string | null>(null);
+  // wpPostId currently being pulled into the editor from the activity feed
+  const [openingFeedId, setOpeningFeedId] = useState<string | null>(null);
 
   const fetchOverviewFor = async (brand: Brand, refresh = false) => {
     try {
@@ -265,6 +267,67 @@ export const Dashboard: React.FC<DashboardProps> = ({
       brands.forEach((b) => { void fetchOverviewFor(b, true); });
     } catch (e: any) {
       window.alert(e?.message || 'Failed to delete the post.');
+    }
+  };
+
+  // Open a feed post in the Blog Editor: mirrored items open directly; posts
+  // that only exist on WordPress are fetched with their REAL content (via the
+  // same get-post endpoint the editor uses) and imported first — the editor
+  // never opens a shell. This keeps one entry point per post: feed → editor.
+  const openWpPostInEditor = async (e: any) => {
+    const feedId = String(e.wpPostId);
+    if (openingFeedId === feedId) return;
+    const appItem = items.find((i) => String(i.wpPostId) === feedId);
+    if (appItem) { onEditItem(appItem); return; }
+    const brand = brands.find((b) => b.id === e.brandId);
+    if (!brand) return;
+    setOpeningFeedId(feedId);
+    const finishImport = (post: any) => {
+      setOpeningFeedId(null);
+      if (onImportWPPost) onImportWPPost(post);
+    };
+    try {
+      const res = await fetch('/api/wp/get-post', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brand, wpPostId: e.wpPostId, contentType: 'post' }),
+      });
+      const data = await res.json();
+      if (data.success && data.post) {
+        const p = data.post;
+        finishImport({
+          id: p.id,
+          brandId: e.brandId,
+          title: { rendered: p.title?.rendered || e.title },
+          slug: p.slug || '',
+          type: 'post',
+          status: p.status || 'publish',
+          link: p.link || e.wpLiveUrl || '',
+          content: { rendered: p.content?.rendered || '' },
+        });
+      } else {
+        finishImport({
+          id: e.wpPostId,
+          brandId: e.brandId,
+          title: { rendered: e.title },
+          slug: '',
+          type: 'post',
+          status: 'publish',
+          link: e.wpLiveUrl || '',
+          content: { rendered: '' },
+        });
+      }
+    } catch {
+      finishImport({
+        id: e.wpPostId,
+        brandId: e.brandId,
+        title: { rendered: e.title },
+        slug: '',
+        type: 'post',
+        status: 'publish',
+        link: e.wpLiveUrl || '',
+        content: { rendered: '' },
+      });
     }
   };
 
@@ -1337,19 +1400,18 @@ export const Dashboard: React.FC<DashboardProps> = ({
                         <span className="text-[9px] font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded-full">{e.brandName}</span>
                         <span className="text-[10px] text-slate-400">{timeAgo(e.date)}</span>
                       </div>
-                      {e.kind === 'published' && e.wpPostId != null && (
+                      {(e.kind === 'published' || e.kind === 'edited') && e.wpPostId != null && (
                         <div className="flex items-center gap-1.5 mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                          {(() => {
-                            const appItem = items.find(i => String(i.wpPostId) === String(e.wpPostId));
-                            return appItem ? (
-                              <button
-                                onClick={() => onEditItem(appItem)}
-                                className="flex items-center gap-1 px-2 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-600 text-[10px] font-bold transition"
-                              >
-                                <Pencil className="w-3 h-3" /> Edit
-                              </button>
-                            ) : null;
-                          })()}
+                          <button
+                            onClick={() => void openWpPostInEditor(e)}
+                            disabled={openingFeedId === String(e.wpPostId)}
+                            title={items.find((i) => String(i.wpPostId) === String(e.wpPostId))
+                              ? 'Open this post in the Blog Editor — see its live/draft state and publish options'
+                              : 'Import this post into the app, then open it in the Blog Editor'}
+                            className="flex items-center gap-1 px-2 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-600 text-[10px] font-bold transition disabled:opacity-50"
+                          >
+                            <Pencil className="w-3 h-3" /> {openingFeedId === String(e.wpPostId) ? 'Opening…' : 'Edit'}
+                          </button>
                           <button
                             onClick={() => void trashWpPost({ id: e.wpPostId, brandId: e.brandId, title: e.title })}
                             title={`Trash this WordPress post (${e.wpLiveUrl || 'no link'}) — recoverable in WP for 30 days`}

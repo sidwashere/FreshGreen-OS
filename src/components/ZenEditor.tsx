@@ -3,7 +3,8 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import ReactQuill from 'react-quill-new';
 import 'react-quill-new/dist/quill.snow.css';
 import { ContentItem, Brand, VisualBlock, VisualBlockType, PipelineStatus, GenerationLogEntry, AiModelPref, BlockTune, CardItem, CarouselSlide } from '../types';
-import { figureHtmlFor as figureHtmlForLib, rebuildArticleHtml, blocksToHtml } from '../lib/blogHtml';
+import { figureHtmlFor as figureHtmlForLib, rebuildArticleHtml, syncImageMarkers } from '../lib/blogHtml';
+import { countWords, deriveWpState, syncItemToWp, refreshWpState } from '../lib/wpSync';
 import { SeoPanel } from './SeoPanel';
 import { 
   Sparkles, 
@@ -46,12 +47,20 @@ import {
 
 // Blog production workflow — the order every post moves through
 const WORKFLOW_STAGES = [
-  { status: 'Planned', label: 'Plan', icon: Lightbulb, hint: 'Idea, outline & keyword brief' },
-  { status: 'Researching', label: 'Research', icon: Compass, hint: 'Competitor & source research' },
+  { status: 'Planned', label: 'Plan', icon: Lightbulb, hint: 'Idea, outline & keyword brief' },  { status: 'Researching', label: 'Research', icon: Compass, hint: 'Competitor & source research' },
   { status: 'Generating', label: 'Write', icon: PenLine, hint: 'Auto-write & structure content' },
   { status: 'Draft_Ready', label: 'Review', icon: SearchCheck, hint: 'SEO audit & final polish' },
   { status: 'Published', label: 'Live', icon: Rocket, hint: 'Synced to WordPress' },
 ] as const;
+
+/** Compact timestamp for the history rows: time for today, date + time older. */
+const formatLogTime = (iso: string) => {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const sameDay = d.toDateString() === new Date().toDateString();
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  return sameDay ? time : `${d.toLocaleDateString([], { day: 'numeric', month: 'short' })} ${time}`;
+};
 
 // Brand-color helpers: the editor inherits the brand's primary color so switching
 // brands is visually unmistakable. Tailwind can't generate runtime colors, so we
@@ -64,16 +73,6 @@ const withAlpha = (hex: string, alpha: number) => {
   if (Number.isNaN(n)) return `rgba(79, 70, 229, ${alpha})`;
   return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
 };
-// Rough word count for streamed HTML text (client-side live counter)
-const countWords = (text: string = '') =>
-  text
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&[a-z]+;/gi, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .split(' ')
-    .filter(Boolean).length;
 
 // Article length presets. "SEO Recommended" (900) is the default — it maps to
 // the minimum SEO-recommended body text volume (~800–1200 words per post).
@@ -190,6 +189,9 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
       generationLog: [entry, ...(prev.generationLog || [])].slice(0, 30),
     }));
   };
+  // Sticky generation-history panel (top-right below the tabs) — expanded by
+  // default so the latest activity is always visible while working.
+  const [historyOpen, setHistoryOpen] = useState(true);
   // Unified post preview: renders the post exactly as it appears on the site
   // (live published page, WP draft render, or local content in the site's theme).
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -280,11 +282,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
   //  - 'live':  synced and published — visitors can see it
   //  - 'draft': synced as a draft — hidden on the site
   //  - 'none':  never synced to WordPress yet
-  const wpState: 'live' | 'draft' | 'none' = !editingItem?.wpPostId
-    ? 'none'
-    : editingItem.status === 'Published'
-      ? 'live'
-      : 'draft';
+  const wpState: 'live' | 'draft' | 'none' = deriveWpState(editingItem);
   const wpBase = brand?.wpUrl ? brand.wpUrl.replace(/\/+$/, '') : '';
   const wpSlug = editingItem?.slug || '';
   const wpLiveUrl = editingItem?.wpLiveUrl || (wpState === 'live' && wpBase && editingItem?.wpPostId ? `${wpBase}/?p=${editingItem.wpPostId}` : '');
@@ -348,6 +346,44 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
         } else if (evt.type === 'heartbeat') {
           lastUpdateRef.current = Date.now();
           setGenState((prev) => (prev ? { ...prev, elapsed: evt.elapsed ?? prev.elapsed, stalled: false } : prev));
+        } else if (evt.type === 'image') {
+          // Auto-generated Nano Banana image (paid chain) from Phase 2.5 —
+          // hero is the featured image, secondary is the in-body image.
+          lastUpdateRef.current = Date.now();
+          const img = evt as any;
+          if (img.role === 'hero') {
+            setEditingItem((prev) => ({
+              ...prev,
+              featuredImageUrl: img.url || prev?.featuredImageUrl,
+              featuredMediaId: typeof img.mediaId === 'number' ? img.mediaId : prev?.featuredMediaId,
+              nanoBananaPrompt: img.prompt || prev?.nanoBananaPrompt,
+              updatedAt: new Date().toISOString(),
+            }));
+            setNanoImageMeta({
+              isPlaceholder: !!img.isPlaceholder,
+              message: img.message,
+              provider: img.provider,
+              model: img.model,
+              isAiGenerated: !!img.isAiGenerated,
+            });
+          } else if (img.role === 'secondary') {
+            setEditingItem((prev) => ({
+              ...prev,
+              secondaryImageUrl: img.url || prev?.secondaryImageUrl,
+              updatedAt: new Date().toISOString(),
+            }));
+          }
+          setGenState((prev) => (prev ? {
+            ...prev,
+            phase: img.role === 'hero' ? 'Hero image ready — rendering in-body image…' : 'Both AI images ready.',
+            percent: img.role === 'hero' ? 90 : 92,
+            stalled: false,
+          } : prev));
+        } else if (evt.type === 'imageWarning') {
+          lastUpdateRef.current = Date.now();
+          const w = evt as any;
+          console.warn(`[Images] ${w.role} warning:`, w.message);
+          setGenState((prev) => (prev ? { ...prev, phase: `${w.role === 'hero' ? 'Hero' : 'In-body'} image failed (${w.message || 'model error'}) — draft still completes.`, stalled: false } : prev));
         } else if (evt.type === 'error') {
           // Record the REAL error instead of throwing here — the caller wraps
           // handleEvent in a catch that would swallow the exception and surface
@@ -445,14 +481,60 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
       });
     }
 
+    // Merge the 2 auto-generated Nano Banana images (Phase 2.5): hero becomes
+    // the featured image AND the frame's hero-band media; the secondary image
+    // replaces the model's placeholder <img> (image_banner block) so the frame
+    // renders a second real image in the body. Deterministic — the same block
+    // mapping reproduces byte-identical pushes.
+    const imgs: any[] = Array.isArray(aiData.images) ? aiData.images : [];
+    const heroImg = imgs.find((i: any) => i?.role === 'hero') || (aiData.featuredImageUrl ? { url: aiData.featuredImageUrl, mediaId: aiData.featuredMediaId, prompt: aiData.suggestedNanoPrompt } : null);
+    const secondaryImg = imgs.find((i: any) => i?.role === 'secondary') || (aiData.secondaryImageUrl ? { url: aiData.secondaryImageUrl } : null);
+    const isPlaceholderSrc = (u?: string) => !u || /placehold\.co|picsum\.photos/i.test(String(u));
+    const remappedBlocks: VisualBlock[] = updatedBlocks.map((b: any) => {
+      if (b.type === 'hero' && heroImg?.url && isPlaceholderSrc(b.imageUrl)) {
+        return { ...b, imageUrl: heroImg.url, imageAlt: b.imageAlt || b.title || aiData.articleTitle || 'Featured image' };
+      }
+      if (b.type === 'image_banner' && secondaryImg?.url && isPlaceholderSrc(b.imageUrl)) {
+        return { ...b, imageUrl: secondaryImg.url, imageAlt: b.imageAlt || 'Article image' };
+      }
+      return b;
+    });
+    if (
+      secondaryImg?.url &&
+      !remappedBlocks.some((b: any) => b.type === 'image_banner' && b.imageUrl === secondaryImg.url) &&
+      !remappedBlocks.some((b: any) => b.type === 'hero' && b.imageUrl === secondaryImg.url)
+    ) {
+      remappedBlocks.push({
+        id: `block-img-${Date.now()}`,
+        type: 'image_banner',
+        title: '',
+        subtitle: '',
+        content: '',
+        buttonText: '',
+        buttonUrl: '#',
+        badge: '',
+        keywords: '',
+        imageLayout: 'full',
+        imageUrl: secondaryImg.url,
+        imageAlt: 'Article image',
+      });
+    }
+
     setEditingItem((prev) => ({
       ...prev,
+      // The AI's crafted h1 becomes the article's real title (the seed stays
+      // in initialPrompt and is never rendered as the page headline).
+      title: (aiData.articleTitle && aiData.articleTitle !== prev.title ? aiData.articleTitle : prev.title),
+      initialPrompt: prev.initialPrompt || prev.title,
       bodyHtml: aiData.bodyHtml || prev.bodyHtml,
       seoBrief: aiData.seoBrief || prev.seoBrief,
       metaTitle: aiData.metaTitle || prev.metaTitle,
       metaDescription: aiData.metaDescription || prev.metaDescription,
       nanoBananaPrompt: aiData.suggestedNanoPrompt || prev.nanoBananaPrompt,
-      blocks: updatedBlocks.length > 0 ? updatedBlocks : prev.blocks,
+      featuredImageUrl: heroImg?.url || prev.featuredImageUrl,
+      featuredMediaId: typeof heroImg?.mediaId === 'number' ? heroImg.mediaId : prev.featuredMediaId,
+      secondaryImageUrl: secondaryImg?.url || prev.secondaryImageUrl,
+      blocks: remappedBlocks.length > 0 ? remappedBlocks : prev.blocks,
       status: 'Draft_Ready',
       updatedAt: new Date().toISOString(),
     }));
@@ -498,10 +580,22 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
         provider: data.provider || 'gemini',
         model: data.model || 'gemini-3.5-flash',
         ok: true,
+        humanized: true,
+        words: countWords(data.humanized || html),
+        insight: data.note || (data.changed ? 'Rewrote the draft in a more natural voice' : 'No changes needed'),
       });
     } catch (e: any) {
       console.error('Humanise failed:', e);
       setHumanizeError(e?.message || 'Humanisation failed. Please try again.');
+      logGeneration({
+        at: new Date().toISOString(),
+        action: 'Humanise Draft',
+        provider: 'gemini',
+        model: 'gemini-flash-latest',
+        ok: false,
+        error: (e?.message || 'Humanisation failed.').slice(0, 200),
+        insight: 'Humanisation failed — see error',
+      });
     } finally {
       setIsHumanizing(false);
     }
@@ -635,6 +729,9 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
           ...prev,
           nanoBananaPrompt: promptToUse,
           featuredImageUrl: data.imageUrl,
+          // A fresh manual render supersedes any AI-generated media id — a
+          // stale id would win in sync and pin the OLD image as featured.
+          featuredMediaId: undefined,
           updatedAt: new Date().toISOString(),
         }));
         setNanoImageMeta({
@@ -706,54 +803,19 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
   };
 
   // statusTarget: 'publish' (default, LIVE on WordPress) or 'draft' (WP draft only)
+  // Serialisation + payload logic lives in ../lib/wpSync so the Content Hub
+  // publishes/saves drafts through the exact same code path.
   const handleSyncToWordPress = async (statusTarget: 'publish' | 'draft' = 'publish') => {
     setIsSyncingWp(true);
     setSyncStatusMsg(statusTarget === 'draft' ? 'Saving draft to WP...' : 'Syncing to WP...');
     try {
-      // Re-serialise the article body right before the sync so WordPress always
-      // receives the current blocks, brand-styled and intact — regardless of
-      // what the HTML-tab Quill sanitizer did to the working copy:
-      //  - items with any structured component (hero/faq/cards/quote/CTA/
-      //    carousel/image) or an fg-art region are REGENERATED from blocks
-      //    (rich, responsive, professional — every time);
-      //  - plain-paragraph or free-form HTML items keep their HTML untouched
-      //    (marker region re-rendered only when present).
-      const blocks = editingItem.blocks || [];
-      const hasStyledRegion = /<!--fg-art:start-->[\s\S]*<!--fg-art:end-->/.test(editingItem.bodyHtml || '');
-      const hasStructuredBlocks = blocks.some((b) => b.type !== 'paragraph');
-      const rebuilt = hasStyledRegion || hasStructuredBlocks
-        ? blocksToHtml(blocks, brand)
-        : rebuildArticleHtml(editingItem.bodyHtml || '', blocks, brand);
-      // Then re-serialise image-block figures (Quill strips <figure>/markers,
-      // so without this images would silently drop off the published post).
-      // The image markers themselves are stripped from the WP payload: WordPress
-      // wpautop wraps bare HTML comments in <p> tags, which renders as empty
-      // vertical gaps around every image on the live page.
-      const bodyHtmlToSend = syncImageMarkers(blocks, rebuilt).replace(/<!--\/?image:[^>]*-->/g, '');
-      const res = await fetch('/api/wp/sync-content', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          brand,
-          contentItem: { ...editingItem, bodyHtml: bodyHtmlToSend },
-          ...(statusTarget === 'draft' ? { status: 'draft' } : {}),
-        }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        const updated = {
-          ...editingItem,
-          wpPostId: data.wpPostId,
-          wpPreviewUrl: data.previewUrl,
-          wpLiveUrl: data.link,
-          status: (data.status || 'Published') as PipelineStatus,
-          lastSyncedAt: new Date().toISOString(),
-        };
-        setEditingItem(updated);
-        onSaveItem(updated);
-        setSyncStatusMsg(data.message || (statusTarget === 'draft' ? 'Draft saved to WordPress.' : 'Synced successfully!'));
+      const result = await syncItemToWp(brand, editingItem, statusTarget);
+      if (result.ok && result.updated) {
+        setEditingItem(result.updated);
+        onSaveItem(result.updated);
+        setSyncStatusMsg(result.message);
       } else {
-        setSyncStatusMsg(`Sync error: ${data.message}`);
+        setSyncStatusMsg(`Sync error: ${result.message}`);
       }
     } catch (err: any) {
       setSyncStatusMsg(`Network error: ${err.message}`);
@@ -774,30 +836,14 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
     if (!id || !brand) return;
     setSyncStatusMsg(`Checking post #${id} on WordPress…`);
     try {
-      const res = await fetch('/api/wp/get-post', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ brand, wpPostId: id, contentType: editingItem.contentType }),
-      });
-      const data = await res.json();
-      if (!data.success || !data.post) {
-        setSyncStatusMsg(`Refresh failed: ${data.message || 'post not found on WordPress'}`);
-        return;
-      }
-      const p = data.post;
-      const updated = { ...editingItem, wpLiveUrl: p.link || editingItem.wpLiveUrl, lastSyncedAt: new Date().toISOString() };
-      if (p.status === 'publish') {
-        updated.status = 'Published';
-        setSyncStatusMsg(`Post #${id} is LIVE on WordPress — ${p.link}`);
-      } else if (p.status === 'trash') {
-        updated.status = 'Draft_Ready';
-        setSyncStatusMsg(`Post #${id} is in the WordPress TRASH — publish from here to restore it and bring it live.`);
+      const result = await refreshWpState(brand, editingItem);
+      if (result.ok && result.updated) {
+        setEditingItem(result.updated);
+        onSaveItem(result.updated);
+        setSyncStatusMsg(result.message);
       } else {
-        updated.status = 'Draft_Ready';
-        setSyncStatusMsg(`Post #${id} is a hidden DRAFT on WordPress (status: ${p.status}).`);
+        setSyncStatusMsg(`Refresh failed: ${result.message}`);
       }
-      setEditingItem(updated);
-      onSaveItem(updated);
     } catch (err: any) {
       setSyncStatusMsg(`Refresh error: ${err.message}`);
     } finally {
@@ -936,38 +982,6 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
   // Image figures live in ../lib/blogHtml (shared with the branded article
   // engine + HTML editor insert) — delegate here so marker logic stays identical.
   const figureHtmlFor = (block: VisualBlock): string => figureHtmlForLib(block, 12);
-
-  // Rebuild the image markers inside bodyHtml for the given block list.
-  // Existing markers are replaced/removed in place; new ones are appended
-  // at the end of the article so nothing else in the HTML is touched.
-  const syncImageMarkers = (blocks: VisualBlock[], html: string): string => {
-    const imageBlocks = blocks.filter((b) => b.type === 'image_banner' && (b.imageUrl || '').trim());
-    let out = html || '';
-
-    imageBlocks.forEach((b) => {
-      const src = (b.imageUrl || '').trim();
-      const markerRe = new RegExp(`<!--image:${b.id}-->[\\s\\S]*?<!--\\/image:${b.id}-->`);
-      if (markerRe.test(out)) {
-        out = out.replace(markerRe, figureHtmlFor(b));
-      } else {
-        // Strip any bare <img> paragraph the HTML editor's Quill sanitizer left
-        // behind for this image (it drops <figure>/markers), then append fresh.
-        const escaped = src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        out = out.replace(new RegExp(`<p[^>]*>\\s*<img[^>]*src\\s*=\\s*["']${escaped}["'][^>]*>\\s*<\\/p>`, 'g'), '');
-        out = `${out.replace(/\s*$/, '')}\n${figureHtmlFor(b)}`;
-      }
-    });
-
-    // Drop markers whose image blocks no longer exist (or lost their image).
-    const keepIds = new Set(imageBlocks.map((b) => b.id));
-    const orphanRe = /<!--image:[\s\S]*?-->\s*<figure[\s\S]*?<\/figure>\s*<!--\/image:[\s\S]*?-->/g;
-    out = out.replace(orphanRe, (match) => {
-      const idMatch = match.match(/<!--image:([\s\S]*?)-->/);
-      return idMatch && !keepIds.has(idMatch[1]) ? '' : match;
-    });
-
-    return out;
-  };
 
   // Shared PC upload: file -> base64 -> WordPress media library -> URL.
   const [uploadingImgFor, setUploadingImgFor] = useState<string | null>(null);
@@ -1305,6 +1319,14 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
             className="w-full text-2xl md:text-3xl font-serif font-bold text-slate-900 focus:outline-none placeholder:text-slate-300"
             placeholder="Article Title"
           />
+          {editingItem.initialPrompt && editingItem.initialPrompt !== editingItem.title && (
+            <div className="mt-1 text-xs text-slate-400 flex items-center gap-1.5">
+              <span className="inline-block h-1.5 w-1.5 rounded-full bg-slate-300" />
+              <span className="truncate" title={editingItem.initialPrompt}>
+                Initial prompt: <span className="italic">{editingItem.initialPrompt}</span>
+              </span>
+            </div>
+          )}
 
           {/* Workflow Stepper: Plan -> Research -> Write -> Review -> Live */}
           <div className="mt-5 pt-4 border-t border-slate-100">
@@ -1483,6 +1505,101 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
             </span>
           )}
         </button>
+      </div>
+
+      {/* Generation history — sticky, top-right below the tabs, visible on every step */}
+      <div className="sticky top-2 z-20 mt-3 w-full md:w-[440px] md:ml-auto bg-white/95 backdrop-blur rounded-2xl border border-slate-200 shadow-lg overflow-hidden">
+        <button
+          onClick={() => setHistoryOpen((o) => !o)}
+          className="w-full px-4 py-2.5 flex items-center gap-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 transition select-none"
+          title={historyOpen ? 'Collapse generation history' : 'Expand generation history'}
+        >
+          <ClipboardList className="w-4 h-4 text-slate-400 shrink-0" />
+          Generation history
+          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-600 tabular-nums">
+            {editingItem.generationLog?.length ?? 0}
+          </span>
+          <ArrowDown
+            className={`w-3.5 h-3.5 ml-auto text-slate-400 transition-transform shrink-0 ${historyOpen ? 'rotate-180' : ''}`}
+          />
+        </button>
+        {historyOpen && (
+          <div className="max-h-80 overflow-y-auto px-3 pb-3 space-y-1">
+            {!editingItem.generationLog || editingItem.generationLog.length === 0 ? (
+              <p className="text-xs text-slate-400 px-1 py-2">
+                No AI activity yet — Auto-Write, humanise, SEO fix and image actions will appear here with timestamps.
+              </p>
+            ) : (
+              editingItem.generationLog.map((g, idx) => (
+                <div key={`${g.at}-${idx}`} className="rounded-xl border border-slate-100 bg-slate-50/60 px-3 py-2">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`w-2 h-2 rounded-full shrink-0 ${g.ok ? 'bg-emerald-500' : 'bg-red-400'}`}
+                      title={g.ok ? 'Success' : 'Failed'}
+                    />
+                    <span className="tabular-nums text-[10px] text-slate-400 shrink-0" title={new Date(g.at).toLocaleString()}>
+                      {formatLogTime(g.at)}
+                    </span>
+                    <span className="font-semibold text-slate-700 text-xs shrink-0 truncate">{g.action}</span>
+                    {g.fallback && (
+                      <span className="text-[9px] font-bold px-1 py-0.5 rounded bg-amber-100 text-amber-700 shrink-0" title="Fell back to a backup model">
+                        fallback
+                      </span>
+                    )}
+                    {g.humanized && (
+                      <span className="text-[9px] font-bold px-1 py-0.5 rounded bg-teal-100 text-teal-700 shrink-0">
+                        humanised
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 mt-1 pl-4">
+                    <span
+                      className="px-1.5 py-0.5 rounded-md bg-indigo-50 text-indigo-700 font-mono text-[10px] truncate min-w-0"
+                      title={`${g.provider}/${g.model}${g.fallback ? ' (auto-fallback)' : ''}`}
+                    >
+                      {g.provider}/{g.model}
+                    </span>
+                    {g.seoBefore != null && (
+                      <span
+                        className={`tabular-nums text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                          g.seoAfter != null && g.seoAfter > g.seoBefore
+                            ? 'bg-emerald-100 text-emerald-700'
+                            : 'bg-slate-100 text-slate-600'
+                        }`}
+                      >
+                        SEO {g.seoBefore}
+                        {g.seoAfter != null ? ` → ${g.seoAfter}` : ''}
+                      </span>
+                    )}
+                    {typeof g.words === 'number' && g.words > 0 && (
+                      <span className="tabular-nums text-[10px] text-slate-500 shrink-0">{g.words.toLocaleString()} words</span>
+                    )}
+                    {!!g.durationMs && (
+                      <span className="tabular-nums text-[10px] text-slate-400 shrink-0">{(g.durationMs / 1000).toFixed(1)}s</span>
+                    )}
+                  </div>
+                  {g.insight && (
+                    <p className={`text-[11px] mt-1 pl-4 leading-snug ${g.ok ? 'text-slate-500' : 'text-red-500'}`}>{g.insight}</p>
+                  )}
+                  {!g.ok && g.error && (
+                    <p className="text-[11px] mt-1 pl-4 text-red-500 truncate" title={g.error}>
+                      {g.error}
+                    </p>
+                  )}
+                  {!!g.details?.length && (
+                    <ul className="mt-1 pl-8 space-y-0.5">
+                      {g.details.map((d, i) => (
+                        <li key={i} className="text-[10px] text-slate-500 flex items-start gap-1.5">
+                          <Check className="w-3 h-3 text-emerald-500 shrink-0 mt-0.5" /> {d}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        )}
       </div>
 
       {/* Step: Brief — plan the post */}
@@ -1874,40 +1991,6 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
               />
             </div>
           </div>
-
-          {/* Generation history: timestamped, model-attributed AI activity */}
-          {!!editingItem.generationLog?.length && (
-            <details className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden group">
-              <summary className="px-4 py-3 cursor-pointer text-sm font-semibold text-slate-700 flex items-center gap-2 hover:bg-slate-50 select-none">
-                <ClipboardList className="w-4 h-4 text-slate-400" />
-                Generation history
-                <span className="ml-auto text-[11px] font-normal text-slate-400 group-open:hidden">tap to expand</span>
-              </summary>
-              <div className="px-4 pb-4 space-y-1.5">
-                {editingItem.generationLog.map((g, idx) => (
-                  <div key={idx} className="flex items-center gap-2.5 text-xs py-1.5 border-b border-slate-100 last:border-0">
-                    <span className={`w-2 h-2 rounded-full shrink-0 ${g.ok ? 'bg-emerald-500' : 'bg-red-400'}`} />
-                    <span className="tabular-nums text-slate-400 shrink-0">
-                      {new Date(g.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                    </span>
-                    <span className="font-semibold text-slate-700 shrink-0">{g.action}</span>
-                    <span
-                      className="px-1.5 py-0.5 rounded-md bg-indigo-50 text-indigo-700 font-mono text-[10px] min-w-0 truncate"
-                      title={`${g.provider}/${g.model}${g.fallback ? ' (auto-fallback)' : ''}`}
-                    >
-                      {g.provider}/{g.model}
-                      {g.fallback ? ' · fallback' : ''}
-                    </span>
-                    {typeof g.words === 'number' && g.words > 0 && (
-                      <span className="tabular-nums text-slate-500 shrink-0">{g.words.toLocaleString()} words</span>
-                    )}
-                    {!!g.durationMs && <span className="tabular-nums text-slate-400 shrink-0">{(g.durationMs / 1000).toFixed(0)}s</span>}
-                    {!g.ok && g.error && <span className="text-red-500 truncate">{g.error}</span>}
-                  </div>
-                ))}
-              </div>
-            </details>
-          )}
 
           {writeMode === 'visual' && (
             <div className="space-y-4">
@@ -2475,12 +2558,24 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
               </div>
               <SeoPanel
                 item={editingItem}
-                onChange={(patch) => setEditingItem({ ...editingItem, ...patch })}
+                onChange={(patch) =>
+                  setEditingItem((prev) => {
+                    const { blocks, ...rest } = patch as any;
+                    return {
+                      ...prev,
+                      ...rest,
+                      blocks: Array.isArray(blocks) && blocks.length ? blocks : prev.blocks,
+                      status: 'Draft_Ready',
+                      updatedAt: new Date().toISOString(),
+                    };
+                  })
+                }
                 siteUrl={brand?.wpUrl || undefined}
                 wordCount={wordCount}
                 onScore={setLiveSeoPct}
                 onGeneration={logGeneration}
                 modelPref={aiPref}
+                brand={brand || null}
               />
             </div>
           )}
@@ -2535,6 +2630,39 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                 >
                   {isGeneratingPrompts ? 'Analyzing article...' : 'Generate Image Ideas'}
                 </button>
+              </div>
+
+              {/* Secondary (in-body) image */}
+              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-bold text-slate-900 text-sm flex items-center gap-2">
+                    <ImageIcon className="w-4 h-4 text-slate-400" /> Secondary Image
+                  </h3>
+                  {editingItem.secondaryImageUrl && (
+                    <span className="text-[10px] font-bold px-2 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">Set ✓</span>
+                  )}
+                </div>
+
+                {editingItem.secondaryImageUrl ? (
+                  <div className="relative rounded-xl overflow-hidden group border border-slate-200">
+                    <img src={editingItem.secondaryImageUrl} alt="Secondary" className="w-full h-56 object-cover" />
+                    <button
+                      onClick={() => { setEditingItem({ ...editingItem, secondaryImageUrl: undefined, updatedAt: new Date().toISOString() }); }}
+                      className="absolute top-2 right-2 bg-white/90 text-red-600 p-1.5 rounded-lg shadow-sm opacity-0 group-hover:opacity-100 transition"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                ) : (
+                  <div className="h-56 rounded-xl border-2 border-dashed border-slate-200 bg-slate-50 flex flex-col items-center justify-center text-slate-400">
+                    <ImagePlus className="w-8 h-8 mb-2" />
+                    <span className="text-sm font-medium">No secondary image yet</span>
+                    <span className="text-xs text-slate-400 mt-1">Auto-Write generates one; it renders inside the article body.</span>
+                  </div>
+                )}
+                <p className="text-[11px] text-slate-400 leading-snug">
+                  In-body editorial image generated from the article topic + context with the paid Nano Banana model. It appears as a figure inside the published post.
+                </p>
               </div>
 
               {/* Prompt library + studio */}

@@ -17,6 +17,7 @@ export const FONT_STACKS: Record<string, string> = {
   garamond: "'Palatino Linotype', Palatino, 'Book Antiqua', Georgia, serif",
   helvetica: "'Helvetica Neue', Arial, sans-serif",
   verdana: 'Verdana, Geneva, Tahoma, sans-serif',
+  jost: "'Jost', 'Helvetica Neue', Arial, sans-serif",
   mono: "'SF Mono', Menlo, Consolas, 'Courier New', monospace",
 };
 
@@ -26,6 +27,7 @@ export const FONT_STACK_LABELS: Record<string, string> = {
   garamond: 'Garamond (elegant serif)',
   helvetica: 'Helvetica (editorial sans)',
   verdana: 'Verdana (wide, readable)',
+  jost: 'Jost (brand signature sans)',
   mono: 'Monospace (technical)',
 };
 
@@ -181,6 +183,8 @@ function scopedStyles(scope: string, kit: BlogStyleKit): string {
 .fg-art-${scope} { box-sizing: border-box; }
 .fg-art-${scope} *, .fg-art-${scope} *::before, .fg-art-${scope} *::after { box-sizing: border-box; }
 .fg-art-${scope} a.fg-btn:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(15,23,42,.16); }
+.fg-art-${scope} .fg-share-btn:hover { background: ${kit.primary} !important; color: #fff !important; border-color: ${kit.primary} !important; }
+.fg-art-${scope} .fg-related-link:hover { border-color: ${kit.primary} !important; box-shadow: 0 4px 14px rgba(15,23,42,.08); }
 .fg-art-${scope} details > summary { list-style: none; }
 .fg-art-${scope} details > summary::-webkit-details-marker { display: none; }
 .fg-art-${scope} details[open] .fg-chev { transform: rotate(180deg); }
@@ -203,10 +207,15 @@ function scopedStyles(scope: string, kit: BlogStyleKit): string {
 // ---------------------------------------------------------------------------
 function renderHero(block: VisualBlock, kit: BlogStyleKit): string {
   const hasMedia = !!(block.imageUrl || '').trim();
+  // NOTE: deliberately NO title heading here. The WordPress theme always
+  // renders the post title as its own <h1 class="entry-title"> above the
+  // content, so rendering the article title again inside the hero produced
+  // the recurring "two headers" on published pages (entry-title + giant hero
+  // h2). The single page header is the theme's entry-title; the hero band
+  // carries the badge, intro, CTA and image instead.
   return `<section class="fg-hero" style="background:linear-gradient(135deg, ${kit.band}, ${shade(kit.band, 0.82)});color:#fff;border-radius:${kit.radius}px;padding:clamp(24px,5vw,56px);display:flex;flex-wrap:wrap;align-items:center;gap:clamp(16px,4vw,32px);margin:0 0 24px;">
   <div style="flex:1 1 320px;min-width:0;">
     ${chip(kit, block.badge)}
-    <h2 style="margin:0 0 12px;font-family:${kit.headingFont};font-size:clamp(26px,4.5vw,40px);line-height:1.15;color:#fff;">${txt(block.title)}</h2>
     ${block.subtitle ? `<p style="margin:0 0 8px;font-size:clamp(15px,1.8vw,17px);line-height:1.7;color:rgba(255,255,255,.94);max-width:62ch;">${txt(block.subtitle)}</p>` : ''}
     ${block.content ? `<p style="margin:0 0 20px;font-size:15.5px;line-height:1.7;color:rgba(255,255,255,.85);max-width:62ch;">${txt(block.content)}</p>` : ''}
     ${bandBtn(kit, block.buttonText, block.buttonUrl)}
@@ -220,8 +229,26 @@ function renderParagraph(block: VisualBlock, kit: BlogStyleKit): string {
   // `title` and the section body in `content`. Render the heading (styled) so
   // articles never degrade into heading-less walls of text.
   const head = (block.title || '').trim() ? h2(kit, block.title, `padding-top:6px;`) : '';
-  const body = (block.content || '').trim()
-    ? `<p style="margin:0 0 20px;font-size:17px;line-height:1.75;color:${kit.text};">${txt(block.content)}</p>`
+  const raw = (block.content || '').trim();
+  if (!raw) return head;
+
+  // Section text can carry bullet markers ("• " from <li> parsing) — render
+  // those as a real <ul> instead of flattening the whole section into one
+  // paragraph, so list content survives the round-trip to WordPress.
+  const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
+  const bullet = (l: string) => /^[•\-*]\s*/.test(l);
+  if (lines.some(bullet)) {
+    const lead = lines.filter((l) => !bullet(l)).join(' ');
+    const items = lines.filter(bullet).map((l) => l.replace(/^[•\-*]\s*/, ''));
+    const leadHtml = lead ? `<p style="margin:0 0 20px;font-size:17px;line-height:1.75;color:${kit.text};">${txt(lead)}</p>` : '';
+    const listHtml = `<ul style="margin:0 0 22px;padding-left:1.4em;list-style:disc;color:${kit.text};font-size:16.5px;line-height:1.7;">
+${items.map((i) => `  <li style="margin:0 0 8px;">${txt(i)}</li>`).join('\n')}
+</ul>`;
+    return head + leadHtml + listHtml;
+  }
+
+  const body = raw
+    ? `<p style="margin:0 0 20px;font-size:17px;line-height:1.75;color:${kit.text};">${txt(raw)}</p>`
     : '';
   return head + body;
 }
@@ -323,6 +350,142 @@ function renderProductCta(block: VisualBlock, kit: BlogStyleKit): string {
 }
 
 // ---------------------------------------------------------------------------
+// Article frame (byline, share, author, CTA, related) — wraps every pushed
+// article so posts carry the brand's editorial furniture, not just body copy.
+// Deterministic: the same meta always renders byte-identical HTML, so re-syncs
+// stay diff-friendly. Everything is inline-styled + scoped classes, consistent
+// with the rest of the generator. The theme's own entry-title stays the page's
+// single h1 — the frame never renders the title as a heading.
+// ---------------------------------------------------------------------------
+
+export interface ArticleFrameMeta {
+  /** Article title — used in share intent text. */
+  title?: string;
+  /** Base site URL (brand.wpUrl) — share URL base + footer CTA target. */
+  siteUrl?: string;
+  /** Article slug — builds the share URL `${siteUrl}/${slug}/`. */
+  slug?: string;
+  /** Brand display name — byline fallback, author box, footer CTA. */
+  brandName?: string;
+  /** Author line, e.g. "The Daniel's Tasty Petfoods Team". */
+  author?: string;
+  /** ISO date — formatted "August 15, 2026". */
+  date?: string;
+  /** Related posts strip. */
+  related?: Array<{ title: string; url: string }>;
+}
+
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+/** "2026-08-15T…" → "August 15, 2026"; '' when absent/invalid. */
+export function formatArticleDate(iso?: string | null): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return `${MONTHS[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
+}
+
+/** Rough read-time from block text (~5 chars/word, ~200 wpm). */
+export function estimateReadMins(blocks: VisualBlock[] | undefined): number {
+  const chars = (blocks || []).reduce(
+    (n, b) => n + (b.title || '').length + (b.content || '').length + (b.subtitle || '').length,
+    0,
+  );
+  return Math.max(1, Math.round(chars / 5 / 200));
+}
+
+/** Share URL for the article — `${siteUrl}/${slug}/`; '' when not derivable. */
+export function frameShareUrl(meta: ArticleFrameMeta | undefined): string {
+  if (!meta?.slug || !meta?.siteUrl) return '';
+  return `${String(meta.siteUrl).replace(/\/+$/, '')}/${encodeURIComponent(meta.slug)}/`;
+}
+
+function frameShareRow(kit: BlogStyleKit, meta: ArticleFrameMeta | undefined, compact = false): string {
+  const url = frameShareUrl(meta);
+  if (!url) return '';
+  const enc = encodeURIComponent(url);
+  const title = encodeURIComponent((meta?.title || '').slice(0, 120));
+  const base = `display:inline-block;padding:6px 12px;border-radius:999px;font-size:12.5px;font-weight:700;text-decoration:none;background:${softTint(kit.primary)};color:${kit.primary};border:1px solid ${tint(kit.primary, 0.78)};`;
+  const items: Array<[string, string]> = [
+    ['Facebook', `https://www.facebook.com/sharer/sharer.php?u=${enc}`],
+    ['X', `https://twitter.com/intent/tweet?url=${enc}${title ? `&text=${title}` : ''}`],
+    ['LinkedIn', `https://www.linkedin.com/sharing/share-offsite/?url=${enc}`],
+    ['WhatsApp', `https://wa.me/?text=${title ? `${title}%20${enc}` : enc}`],
+    ['Email', `mailto:?subject=${title}&body=${enc}`],
+  ];
+  const chips = items
+    .map(([label, href]) => `<a class="fg-share-btn" href="${esc(href)}" target="_blank" rel="noopener" style="${base}">${label}</a>`)
+    .join('\n  ');
+  return `<div class="fg-share" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;${compact ? 'margin-top:0' : 'margin-top:12px'};">
+  <span style="font-size:12.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:${kit.muted};">Share</span>
+  ${chips}
+</div>`;
+}
+
+function frameHead(kit: BlogStyleKit, meta: ArticleFrameMeta | undefined, readMins: number): string {
+  if (!meta) return '';
+  const parts: string[] = [];
+  const byline = (meta.author || '').trim() || (meta.brandName ? `The ${meta.brandName} Team` : '');
+  if (byline) parts.push(byline);
+  const date = formatArticleDate(meta.date);
+  if (date) parts.push(date);
+  parts.push(`${readMins} min read`);
+  const share = frameShareRow(kit, meta);
+  return `<header class="fg-frame-head" style="margin:0 0 22px;padding-bottom:16px;border-bottom:1px solid ${tint(kit.primary, 0.85)};">
+  <p style="margin:0;font-size:13.5px;font-weight:600;letter-spacing:.02em;color:${kit.muted};">${esc(parts.join(' · '))}</p>
+  ${share}
+</header>`;
+}
+
+function frameFoot(kit: BlogStyleKit, meta: ArticleFrameMeta | undefined): string {
+  if (!meta) return '';
+  const parts: string[] = [];
+
+  const share = frameShareRow(kit, meta, true);
+  if (share) {
+    parts.push(`<div style="display:flex;justify-content:center;margin:0 0 20px;">${share}</div>`);
+  }
+
+  const brandName = (meta.brandName || '').trim();
+  if (brandName) {
+    const authorLine = (meta.author || '').trim() || `The ${brandName} Team`;
+    const initial = brandName.charAt(0).toUpperCase();
+    parts.push(`<div class="fg-author" style="display:flex;align-items:center;gap:14px;background:${softTint(kit.primary)};border:1px solid ${tint(kit.primary, 0.82)};border-radius:${kit.radius}px;padding:16px 18px;margin:0 0 20px;">
+  <span style="flex:0 0 auto;width:44px;height:44px;border-radius:999px;background:${kit.primary};color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800;font-family:${kit.headingFont};font-size:18px;">${esc(initial)}</span>
+  <div>
+    <p style="margin:0 0 2px;font-weight:800;font-size:15px;color:${kit.text};">${esc(authorLine)}</p>
+    <p style="margin:0;font-size:13.5px;line-height:1.6;color:${kit.muted};">Fresh content, tips and stories from the ${esc(brandName)} team.</p>
+  </div>
+</div>`);
+  }
+
+  const siteUrl = (meta.siteUrl || '').trim();
+  if (brandName && siteUrl) {
+    parts.push(`<section class="fg-frame-cta" style="background:linear-gradient(120deg, ${kit.band}, ${shade(kit.band, 0.78)});border-radius:${kit.radius}px;padding:clamp(20px,4vw,36px);text-align:center;color:#fff;margin:0 0 20px;">
+  ${chip(kit, `More from ${esc(brandName)}`)}
+  <h3 style="margin:0 auto 6px;font-family:${kit.headingFont};font-size:clamp(19px,2.8vw,26px);line-height:1.25;color:#fff;max-width:30ch;">Fresh ideas for you and your pet</h3>
+  <p style="margin:0 auto 20px;max-width:50ch;color:rgba(255,255,255,.92);font-size:15px;line-height:1.7;">${esc(meta.title || 'Keep exploring')}</p>
+  <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center;">${bandBtn(kit, `Visit ${esc(brandName)}`, siteUrl)}</div>
+</section>`);
+  }
+
+  const related = (meta.related || []).filter((r) => r && r.url && r.title).slice(0, 3);
+  if (related.length) {
+    parts.push(`<aside class="fg-related" style="margin:0 0 4px;">
+  <h3 style="margin:0 0 12px;font-family:${kit.headingFont};font-size:18px;line-height:1.3;color:${kit.text};">Keep reading</h3>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:10px;">
+  ${related.map((r) => `<a class="fg-related-link" href="${esc(r.url)}" style="display:block;background:${kit.surface};border:1px solid ${tint(kit.primary, 0.8)};border-radius:${kit.radius}px;padding:12px 14px;text-decoration:none;color:${kit.text};font-weight:700;font-size:14.5px;line-height:1.45;">${txt(r.title)}<span style="color:${kit.primary};margin-left:4px;">&#8594;</span></a>`).join('\n')}
+  </div>
+</aside>`);
+  }
+
+  if (!parts.length) return '';
+  return `<footer class="fg-frame-foot" style="margin:26px 0 0;padding-top:18px;border-top:1px solid ${tint(kit.primary, 0.85)};">
+${parts.join('\n')}
+</footer>`;
+}
+
+// ---------------------------------------------------------------------------
 // Block → HTML (the full branded article body)
 // ---------------------------------------------------------------------------
 function renderBlock(block: VisualBlock, kit: BlogStyleKit): string {
@@ -342,8 +505,36 @@ function renderBlock(block: VisualBlock, kit: BlogStyleKit): string {
   }
 }
 
-/** Serialise the full block list into the branded, responsive article body. */
-export function blocksToHtml(blocks: VisualBlock[] | undefined, brand?: Pick<Brand, 'primaryColor' | 'blogStyle'> | null): string {
+/**
+ * Deterministic scoped-class hash (FNV-1a) derived from the style kit + the
+ * rendered block list. The SAME article + brand ALWAYS renders the same
+ * `fg-art-{scope}` class across preview, save, re-sync and WordPress push, so:
+ *  - the scoped <style> block never gets orphaned by a re-push;
+ *  - editor preview and the live page stay byte-stable (diff-friendly);
+ *  - different articles still get their own scope (no cross-article CSS bleed).
+ */
+function stableScope(blocks: VisualBlock[] | undefined, kit: BlogStyleKit): string {
+  const seed = [
+    kit.primary, kit.accent, kit.band, kit.headingFont, kit.bodyFont, kit.text,
+    (blocks || []).map((b) => `${b.type}:${b.title || ''}:${(b.imageUrl || '').slice(0, 120)}`).join('|'),
+  ].join('§');
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(36);
+}
+
+/** Serialise the full block list into the branded, responsive article body.
+ *  Optional `meta` renders the article frame (byline/date, share buttons,
+ *  author box, footer CTA and related strip) around the blocks — used on the
+ *  WordPress push path; the editor preview passes no meta and stays frameless. */
+export function blocksToHtml(
+  blocks: VisualBlock[] | undefined,
+  brand?: Pick<Brand, 'primaryColor' | 'blogStyle'> | null,
+  meta?: ArticleFrameMeta,
+): string {
   const kit = resolveBlogStyle(brand);
   const list = (blocks || []).filter((b) => {
     if (b.type === 'image_banner') return !!(b.imageUrl || '').trim();
@@ -354,10 +545,14 @@ export function blocksToHtml(blocks: VisualBlock[] | undefined, brand?: Pick<Bra
     return !!(b.content || '').trim() || !!(b.title || '').trim();
   });
   if (!list.length) return '';
-  const scope = Math.random().toString(36).slice(2, 8);
+  const scope = stableScope(list, kit);
+  const head = frameHead(kit, meta, estimateReadMins(list));
+  const foot = frameFoot(kit, meta);
   return `<div class="fg-art fg-art-${scope}" style="font-family:${kit.bodyFont};color:${kit.text};line-height:1.7;max-width:860px;margin:0 auto;">
 ${scopedStyles(scope, kit)}
+${head}
 ${list.map((b) => renderBlock(b, kit)).join('\n')}
+${foot}
 </div>`;
 }
 
@@ -387,4 +582,40 @@ export function rebuildArticleHtml(
     return styled ? `${html.replace(/\s*$/, '')}\n${ART_REGION_START}\n${styled}\n${ART_REGION_END}` : html;
   }
   return html;
+}
+
+/**
+ * Rebuild the image markers inside bodyHtml for the given block list.
+ * Existing markers are replaced/removed in place; new ones are appended
+ * at the end of the article so nothing else in the HTML is touched.
+ * Shared by the editor and the Content Hub so the WordPress payload
+ * serialisation stays identical everywhere.
+ */
+export function syncImageMarkers(blocks: VisualBlock[] | undefined, html: string | undefined): string {
+  const imageBlocks = (blocks || []).filter((b) => b.type === 'image_banner' && (b.imageUrl || '').trim());
+  let out = html || '';
+
+  imageBlocks.forEach((b) => {
+    const src = (b.imageUrl || '').trim();
+    const markerRe = new RegExp(`<!--image:${b.id}-->[\\s\\S]*?<!--\\/image:${b.id}-->`);
+    if (markerRe.test(out)) {
+      out = out.replace(markerRe, figureHtmlFor(b));
+    } else {
+      // Strip any bare <img> paragraph the HTML editor's Quill sanitizer left
+      // behind for this image (it drops <figure>/markers), then append fresh.
+      const escaped = src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      out = out.replace(new RegExp(`<p[^>]*>\\s*<img[^>]*src\\s*=\\s*["']${escaped}["'][^>]*>\\s*<\\/p>`, 'g'), '');
+      out = `${out.replace(/\s*$/, '')}\n${figureHtmlFor(b)}`;
+    }
+  });
+
+  // Drop markers whose image blocks no longer exist (or lost their image).
+  const keepIds = new Set(imageBlocks.map((b) => b.id));
+  const orphanRe = /<!--image:[\s\S]*?-->\s*<figure[\s\S]*?<\/figure>\s*<!--\/image:[\s\S]*?-->/g;
+  out = out.replace(orphanRe, (match) => {
+    const idMatch = match.match(/<!--image:([\s\S]*?)-->/);
+    return idMatch && !keepIds.has(idMatch[1]) ? '' : match;
+  });
+
+  return out;
 }

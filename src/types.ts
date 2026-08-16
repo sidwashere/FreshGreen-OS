@@ -141,6 +141,15 @@ export interface GenerationLogEntry {
   durationMs?: number;
   ok: boolean;
   error?: string;
+  /** One-line insight shown in the history row, e.g. 'Score 64 → 84 · 12 checks fixed'. */
+  insight?: string;
+  /** Expanded details for a row (e.g. the list of SEO checks that were fixed). */
+  details?: string[];
+  /** SEO audit score before/after an SEO action. */
+  seoBefore?: number | null;
+  seoAfter?: number | null;
+  /** True when the action included a humanisation pass. */
+  humanized?: boolean;
 }
 
 /** Runtime AI model preference — which provider/model runs every AI action. */
@@ -154,6 +163,10 @@ export interface ContentItem {
   id: string;
   brandId: string;
   title: string;
+  /** The original seed/prompt the article was created from. Kept separate from
+   *  `title` so the working title never renders as the article's headline —
+   *  the published page shows the article's real title only. */
+  initialPrompt?: string;
   slug: string;
   contentType: ContentType;
   wpTemplate: string;
@@ -168,6 +181,10 @@ export interface ContentItem {
   nanoBananaPrompt?: string;
   nanoBananaStyle?: string;
   featuredImageUrl?: string;
+  /** AI-generated in-body image (hosted WP media URL, or data URI fallback). */
+  secondaryImageUrl?: string;
+  /** WP media id of the AI-generated featured image (avoids re-upload on push). */
+  featuredMediaId?: number;
   wpPostId?: number;
   wpMediaId?: number;
   wpPreviewUrl?: string;

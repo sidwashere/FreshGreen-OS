@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { GenerationLogEntry, AiModelPref } from '../types';
+import { GenerationLogEntry, AiModelPref, Brand, VisualBlock } from '../types';
+import { runSeoFix } from '../lib/seoFix';
 import {
   Search,
   Target,
@@ -48,6 +49,8 @@ interface SeoPanelItem {
   bodyHtml?: string;
   featuredImageUrl?: string;
   targetWordCount?: number;
+  /** Derived blocks for the improved body (returned by the shared fix pipeline). */
+  blocks?: VisualBlock[];
 }
 
 interface SeoPanelProps {
@@ -60,6 +63,8 @@ interface SeoPanelProps {
   onGeneration?: (entry: GenerationLogEntry) => void;
   /** Runtime AI model preference sent with every refine request. */
   modelPref?: AiModelPref;
+  /** Brand context (name / voice / banned words) for the AI fix pipeline. */
+  brand?: Brand | null;
 }
 
 // ---------- Helpers ----------
@@ -188,11 +193,12 @@ function CountBar({ value, min, max, hint }: { value: number; min: number; max: 
 
 // ---------- Component ----------
 
-export const SeoPanel: React.FC<SeoPanelProps> = ({ item, onChange, siteUrl, wordCount, onScore, onGeneration, modelPref }) => {
+export const SeoPanel: React.FC<SeoPanelProps> = ({ item, onChange, siteUrl, wordCount, onScore, onGeneration, modelPref, brand }) => {
   const [data, setData] = useState<SeoAnalyzeData | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [refining, setRefining] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [fixReport, setFixReport] = useState<string | null>(null);
   const [intent, setIntent] = useState<string>(() => INTENT_BY_CONTENT_TYPE[item.contentType || ''] || 'informational');
   const [showPassed, setShowPassed] = useState(false);
   // Advanced refine controls
@@ -305,6 +311,65 @@ export const SeoPanel: React.FC<SeoPanelProps> = ({ item, onChange, siteUrl, wor
       patch.metaTitle = titleTag.slice(0, 60);
     }
     if (Object.keys(patch).length > 0) onChange(patch);
+  };
+
+  // One-click "Fix with AI": audit → fix every failing check (best practices +
+  // AI rewrite) → humanise → re-test, then report the before/after score.
+  const handleFixAll = async () => {
+    if (refining) return;
+    setRefining(true);
+    setError(null);
+    setFixReport(null);
+    try {
+      const r = await runSeoFix({
+        title: item.title,
+        contentType: item.contentType,
+        slug: item.slug,
+        metaTitle: item.metaTitle,
+        metaDescription: item.metaDescription,
+        primaryKeyword: item.primaryKeyword,
+        secondaryKeywords: item.secondaryKeywords,
+        bodyHtml: item.bodyHtml,
+        targetWordCount: item.targetWordCount,
+        featuredImageUrl: item.featuredImageUrl,
+        brand,
+        siteUrl,
+        modelPref,
+        humanize: true,
+      });
+      if (!r.ok) throw new Error(r.message);
+      const { blocks, ...rest } = r.patch as any;
+      if (Object.keys(r.patch).length > 0) {
+        onChange({ ...rest, blocks });
+      }
+      setFixReport(r.message);
+      onGeneration?.({
+        at: new Date().toISOString(),
+        action: 'SEO Fix + Humanise',
+        provider: r.provider || modelPref?.provider || 'gemini',
+        model: r.model || modelPref?.model || 'unknown',
+        fallback: !!r.fallback,
+        ok: true,
+        insight: r.message,
+        seoBefore: r.before.pct,
+        seoAfter: r.after.pct,
+        humanized: r.humanized,
+        details: r.fixed?.length ? r.fixed : undefined,
+      });
+    } catch (e: any) {
+      setError(e?.message || 'Fix failed');
+      onGeneration?.({
+        at: new Date().toISOString(),
+        action: 'SEO Fix + Humanise',
+        provider: modelPref?.provider || 'gemini',
+        model: modelPref?.model || 'unknown',
+        ok: false,
+        error: (e?.message || 'Fix failed').slice(0, 200),
+        insight: 'Fix failed — see error',
+      });
+    } finally {
+      setRefining(false);
+    }
   };
 
   const handleRefine = async (mode?: string, focusChecks?: SeoCheckResult[]) => {
@@ -535,6 +600,34 @@ export const SeoPanel: React.FC<SeoPanelProps> = ({ item, onChange, siteUrl, wor
               ))}
             </div>
           )}
+        </div>
+      </div>
+
+      {/* One-click AI fix: audit → fix → humanise → re-test */}
+      <div className="rounded-xl border border-indigo-200 bg-indigo-50/60 p-3">
+        <div className="flex items-start gap-2.5">
+          <Wand2 className="w-4 h-4 text-indigo-500 shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-bold text-slate-800">Fix with AI + humanise</p>
+            <p className="text-[11px] text-slate-500 mt-0.5">
+              Audits the article against every noted issue, fixes them using best practices
+              (keyphrase, meta title, description, slug, content), humanises the result, then
+              re-tests and shows the new score — ready to publish to live or draft.
+            </p>
+            {fixReport && (
+              <p className="mt-1.5 text-[11px] font-semibold text-emerald-700">{fixReport}</p>
+            )}
+            {error && <p className="mt-1.5 text-[11px] font-semibold text-red-500">{error}</p>}
+          </div>
+          <button
+            onClick={() => void handleFixAll()}
+            disabled={refining || !item.title}
+            className="shrink-0 inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white text-[11px] font-bold transition"
+            title="Run the full SEO fix pipeline (audit → fix → humanise → re-test)"
+          >
+            <Sparkles className={`w-3.5 h-3.5 ${refining ? 'animate-pulse' : ''}`} />
+            {refining ? 'Fixing…' : 'Fix now'}
+          </button>
         </div>
       </div>
 

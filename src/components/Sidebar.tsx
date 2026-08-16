@@ -8,7 +8,8 @@ import {
   ChevronLeft,
   ChevronRight,
   Settings,
-  LayoutDashboard
+  LayoutDashboard,
+  Library
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -16,6 +17,7 @@ interface SidebarProps {
   onNavigateTab: (tab: string) => void;
   plannedCount: number;
   draftCount: number;
+  contentCount?: number;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
 }
@@ -25,6 +27,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onNavigateTab,
   plannedCount,
   draftCount,
+  contentCount = 0,
   collapsed = false,
   onToggleCollapse
 }) => {
@@ -51,6 +54,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
           label: 'Blog Editor',
           icon: FileEdit,
           description: 'Write, structure & SEO'
+        },
+        {
+          id: 'content-hub',
+          label: 'Blog Content',
+          icon: Library,
+          badge: contentCount > 0 ? contentCount : null,
+          description: 'Drafts, live posts & stats'
         },
         {
           id: 'nano-banana',

@@ -3,6 +3,7 @@ import { Navbar } from './components/Navbar';
 import { Sidebar } from './components/Sidebar';
 import { Dashboard } from './components/Dashboard';
 import { ZenEditor } from './components/ZenEditor';
+import { ContentHub } from './components/ContentHub';
 import { BrandManager } from './components/BrandManager';
 import { NanoBananaStudioModal } from './components/NanoBananaStudioModal';
 import { WorkspaceHub } from './components/WorkspaceHub';
@@ -338,6 +339,10 @@ export default function App() {
       userId: user.uid,
       brandId,
       title,
+      // The seed title is the *brief* — it must not become the article's
+      // headline (the theme renders the post title as an h1, so keeping the
+      // seed out of the title prevents the recurring duplicate-header issue).
+      initialPrompt: title,
       slug: title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, ''),
       contentType,
       wpTemplate: brand?.pageTemplates?.[0] || 'default',
@@ -378,46 +383,75 @@ export default function App() {
     setActiveTab('editor');
   };
 
-  const handleImportWPPost = async (post: any) => {
-    if (!user) return;
-    
-    const brand = brands.find(b => b.id === post.brandId) || brands[0];
-    
-    // Check if we already have it
-    let existingItem = items.find(i => (i as any).wpPostId === post.id && i.brandId === brand.id);
-    if (existingItem) {
-      handleEditItem(existingItem);
-      return;
-    }
-    
-    const newItemId = 'wp-item-' + Date.now();
-    const newItem: any = {
-      id: newItemId,
+  // Shared shape for importing a real WordPress post into the pipeline.
+  // Used by the Dashboard's single-post import AND the Content Hub's bulk pull,
+  // so both surfaces always mirror posts identically.
+  const buildImportedWpItem = (post: any, brand: Brand): ContentItem & { userId: string } => {
+    const now = new Date().toISOString();
+    const link = post.link || '';
+    return {
+      id: `wp-item-${Date.now()}-${post.id}`,
       brandId: brand.id,
       title: post.title?.rendered || 'Imported Post',
       slug: post.slug || '',
       contentType: post.type === 'page' ? 'page' : 'post',
       wpTemplate: 'default',
-      status: 'Published', // Since it came from live WP
+      status: post.status === 'publish' ? 'Published' : 'Draft_Ready',
       primaryKeyword: '',
       secondaryKeywords: [],
       seoBrief: '',
       bodyHtml: post.content?.rendered || '',
       blocks: [],
       wpPostId: post.id,
-      wpLiveUrl: post.link,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      userId: user.uid,
+      wpLiveUrl: post.status === 'publish' ? link : '',
+      wpPreviewUrl: link ? `${link}${link.includes('?') ? '&' : '?'}preview=true` : '',
+      createdAt: now,
+      updatedAt: now,
+      userId: user!.uid,
     };
-    
+  };
+
+  const handleImportWPPost = async (post: any) => {
+    if (!user) return;
+
+    const brand = brands.find(b => b.id === post.brandId) || brands[0];
+    if (!brand) return;
+
+    // Check if we already have it
+    let existingItem = items.find(i => i.wpPostId === post.id && i.brandId === brand.id);
+    if (existingItem) {
+      handleEditItem(existingItem);
+      return;
+    }
+
+    const newItem = buildImportedWpItem(post, brand);
+
     try {
-      await setDoc(doc(db, 'content_items', newItemId), newItem);
+      await setDoc(doc(db, 'content_items', newItem.id), newItem);
       setActiveItemId(newItem.id);
       setActiveTab('editor');
     } catch (err) {
       console.error('Failed to import post', err);
     }
+  };
+
+  // Bulk import for the Content Hub: mirrors historic WordPress posts (drafts
+  // and live ones) as pipeline items WITHOUT navigating — the hub stays put.
+  const handleImportWPPosts = async (posts: any[], brand: Brand): Promise<number> => {
+    if (!user) return 0;
+    let imported = 0;
+    for (const post of posts) {
+      const existing = items.find((i) => i.wpPostId === post.id && i.brandId === brand.id);
+      if (existing) continue;
+      const newItem = buildImportedWpItem(post, brand);
+      try {
+        await setDoc(doc(db, 'content_items', newItem.id), newItem);
+        imported++;
+      } catch (err) {
+        console.error('Failed to import post', err);
+      }
+    }
+    return imported;
   };
 
   // Find active item & active brand.
@@ -524,6 +558,7 @@ export default function App() {
               onNavigateTab={navigateTab}
               plannedCount={plannedCount}
               draftCount={draftCount}
+              contentCount={items.length}
               collapsed={sidebarCollapsed}
               onToggleCollapse={toggleSidebar}
             />
@@ -580,6 +615,21 @@ export default function App() {
 
             {activeTab === 'nano-banana' && (
               <NanoBananaStudioModal brands={brands} selectedBrandId={selectedBrandId} />
+            )}
+
+            {activeTab === 'content-hub' && (
+              <ContentHub
+                items={items}
+                brands={brands}
+                selectedBrandId={selectedBrandId}
+                onSelectBrand={setSelectedBrandId}
+                onEditItem={handleEditItem}
+                onSaveItem={handleSaveItem}
+                onCreateNewItem={handleCreateNewItem}
+                onDeleteItem={handleDeleteItem}
+                onImportWPPosts={handleImportWPPosts}
+                onNavigateTab={navigateTab}
+              />
             )}
 
             {activeTab === 'brands' && (
