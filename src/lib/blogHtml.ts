@@ -134,7 +134,7 @@ function chip(kit: BlogStyleKit, label?: string): string {
 }
 
 function h2(kit: BlogStyleKit, title?: string, extraStyle = ''): string {
-  return `<h2 style="margin:0 0 14px;font-family:${kit.headingFont};font-size:clamp(22px,3.2vw,30px);line-height:1.25;color:${kit.text};${extraStyle}">${txt(title)}</h2>`;
+  return `<h2 style="margin:32px 0 16px;font-family:${kit.headingFont};font-size:clamp(22px,3.2vw,30px);line-height:1.25;color:${kit.text};${extraStyle}">${txt(title)}</h2>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -192,12 +192,21 @@ function scopedStyles(scope: string, kit: BlogStyleKit): string {
 .fg-art-${scope} .fg-car-track::-webkit-scrollbar { height: 8px; }
 .fg-art-${scope} .fg-car-track::-webkit-scrollbar-track { background: transparent; }
 .fg-art-${scope} .fg-car-track::-webkit-scrollbar-thumb { background: ${kit.primary}55; border-radius: 999px; }
-@media (max-width: 640px) {
-  .fg-art-${scope} .fg-hero, .fg-art-${scope} .fg-pc-row { flex-direction: column; }
-  .fg-art-${scope} .fg-hero .fg-hero-media, .fg-art-${scope} .fg-pc-media { width: 100% !important; }
+@media (max-width: 768px) {
+  .fg-art-${scope} .fg-hero { min-height: 260px !important; }
+  .fg-art-${scope} .fg-pc-row { flex-direction: column; }
+  .fg-art-${scope} .fg-pc-media { width: 100% !important; max-width: 100% !important; }
+  .fg-art-${scope} .fg-cardgrid { grid-template-columns: 1fr !important; }
+  .fg-art-${scope} .fg-share { gap: 4px !important; }
+}
+@media (max-width: 480px) {
+  .fg-art-${scope} .fg-hero { min-height: 220px !important; border-radius: 0 !important; }
+  .fg-art-${scope} .fg-hero > div:last-child { padding: 18px !important; }
   .fg-art-${scope} .fg-img img { float: none !important; width: 100% !important; margin: 0 0 12px !important; }
   .fg-art-${scope} .fg-car-slide { flex-basis: 86%; }
   .fg-art-${scope} .fg-btn { width: 100%; box-sizing: border-box; text-align: center; }
+  .fg-art-${scope} .fg-frame-head > div { flex-direction: column; align-items: flex-start !important; }
+  .fg-art-${scope} .fg-related { grid-template-columns: 1fr !important; }
 }
 </style>`;
 }
@@ -207,20 +216,37 @@ function scopedStyles(scope: string, kit: BlogStyleKit): string {
 // ---------------------------------------------------------------------------
 function renderHero(block: VisualBlock, kit: BlogStyleKit): string {
   const hasMedia = !!(block.imageUrl || '').trim();
-  // NOTE: deliberately NO title heading here. The WordPress theme always
-  // renders the post title as its own <h1 class="entry-title"> above the
-  // content, so rendering the article title again inside the hero produced
-  // the recurring "two headers" on published pages (entry-title + giant hero
-  // h2). The single page header is the theme's entry-title; the hero band
-  // carries the badge, intro, CTA and image instead.
-  return `<section class="fg-hero" style="background:linear-gradient(135deg, ${kit.band}, ${shade(kit.band, 0.82)});color:#fff;border-radius:${kit.radius}px;padding:clamp(24px,5vw,56px);display:flex;flex-wrap:wrap;align-items:center;gap:clamp(16px,4vw,32px);margin:0 0 24px;">
-  <div style="flex:1 1 320px;min-width:0;">
-    ${chip(kit, block.badge)}
-    ${block.subtitle ? `<p style="margin:0 0 8px;font-size:clamp(15px,1.8vw,17px);line-height:1.7;color:rgba(255,255,255,.94);max-width:62ch;">${txt(block.subtitle)}</p>` : ''}
-    ${block.content ? `<p style="margin:0 0 20px;font-size:15.5px;line-height:1.7;color:rgba(255,255,255,.85);max-width:62ch;">${txt(block.content)}</p>` : ''}
-    ${bandBtn(kit, block.buttonText, block.buttonUrl)}
+  // Full-width hero image with dark gradient overlay and title text on top.
+  // The image stretches across the full article width; a gradient ensures
+  // text remains readable regardless of image brightness.
+  const badgeHtml = chip(kit, block.badge);
+  const subtitleHtml = block.subtitle
+    ? `<p style="margin:0 0 8px;font-size:clamp(15px,1.8vw,17px);line-height:1.7;color:rgba(255,255,255,.94);max-width:62ch;">${txt(block.subtitle)}</p>`
+    : '';
+  const contentHtml = block.content
+    ? `<p style="margin:0 0 20px;font-size:15.5px;line-height:1.7;color:rgba(255,255,255,.85);max-width:62ch;">${txt(block.content)}</p>`
+    : '';
+  const ctaHtml = bandBtn(kit, block.buttonText, block.buttonUrl);
+
+  if (hasMedia) {
+    // Image hero: full-bleed image with gradient overlay + text
+    return `<section class="fg-hero" style="position:relative;width:100%;min-height:clamp(280px,40vw,480px);display:flex;align-items:flex-end;border-radius:${kit.radius}px;overflow:hidden;margin:0 0 32px;">
+  <img src="${esc(block.imageUrl)}" alt="${esc(block.imageAlt) || 'Hero image'}" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;" loading="eager" />
+  <div style="position:absolute;inset:0;background:linear-gradient(to top, rgba(0,0,0,.72) 0%, rgba(0,0,0,.35) 50%, rgba(0,0,0,.12) 100%);"></div>
+  <div style="position:relative;z-index:1;padding:clamp(24px,5vw,48px);color:#fff;width:100%;">
+    ${badgeHtml}
+    ${subtitleHtml}
+    ${contentHtml}
+    ${ctaHtml}
   </div>
-  ${hasMedia ? `<div class="fg-hero-media" style="flex:1 1 260px;min-width:0;max-width:460px;"><img src="${esc(block.imageUrl)}" alt="${esc(block.imageAlt) || 'Hero image'}" style="display:block;width:100%;height:auto;border-radius:${kit.radius}px;box-shadow:0 18px 40px rgba(0,0,0,.3);object-fit:cover;" loading="lazy" /></div>` : ''}
+</section>`;
+  }
+  // No-image hero: gradient band (fallback)
+  return `<section class="fg-hero" style="background:linear-gradient(135deg, ${kit.band}, ${shade(kit.band, 0.82)});color:#fff;border-radius:${kit.radius}px;padding:clamp(24px,5vw,56px);margin:0 0 32px;">
+  ${badgeHtml}
+  ${subtitleHtml}
+  ${contentHtml}
+  ${ctaHtml}
 </section>`;
 }
 
@@ -338,7 +364,7 @@ function renderCarousel(block: VisualBlock, kit: BlogStyleKit): string {
 
 function renderProductCta(block: VisualBlock, kit: BlogStyleKit): string {
   const hasMedia = !!(block.imageUrl || '').trim();
-  return `<section class="fg-pc-row" style="display:flex;flex-wrap:wrap;align-items:center;gap:clamp(16px,4vw,32px);background:${kit.surface};border:1px solid ${tint(kit.primary, 0.78)};border-radius:${kit.radius}px;padding:clamp(20px,4vw,36px);margin:0 0 24px;box-shadow:0 4px 18px rgba(15,23,42,.06);">
+  return `<section class="fg-pc-row" style="display:flex;flex-wrap:wrap;align-items:center;gap:clamp(16px,4vw,32px);background:${kit.surface};border:1px solid ${tint(kit.primary, 0.78)};border-radius:${kit.radius}px;padding:clamp(20px,4vw,36px);margin:0 0 28px;box-shadow:0 4px 18px rgba(15,23,42,.06);">
   ${hasMedia ? `<div class="fg-pc-media" style="flex:1 1 240px;min-width:0;max-width:400px;"><img src="${esc(block.imageUrl)}" alt="${esc(block.imageAlt) || 'Product image'}" loading="lazy" style="display:block;width:100%;height:auto;border-radius:${kit.radius}px;object-fit:cover;" /></div>` : ''}
   <div style="flex:1 1 300px;min-width:0;">
     ${chip(kit, block.badge)}
@@ -346,6 +372,38 @@ function renderProductCta(block: VisualBlock, kit: BlogStyleKit): string {
     <p style="margin:0 0 18px;font-size:16px;line-height:1.7;color:${kit.text};">${txt(block.content)}</p>
     ${btn(kit, block.buttonText, block.buttonUrl)}
   </div>
+</section>`;
+}
+
+// ---------------------------------------------------------------------------
+// Daniel's Tip — branded callout box with accent border + subtle background.
+// The steak brand asset can be added later as a decorative element.
+// ---------------------------------------------------------------------------
+function renderDanielsTip(block: VisualBlock, kit: BlogStyleKit): string {
+  const content = (block.content || '').trim();
+  if (!content) return '';
+  return `<aside style="background:${softTint(kit.primary)};border-left:5px solid ${kit.primary};border-radius:${kit.radius}px;padding:clamp(18px,3vw,28px);margin:0 0 28px;position:relative;">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+    <span style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:999px;background:${kit.primary};color:#fff;font-size:14px;font-weight:800;">D</span>
+    <span style="font-family:${kit.headingFont};font-weight:800;font-size:17px;color:${kit.primary};letter-spacing:.01em;">Daniel's Tip</span>
+  </div>
+  <p style="margin:0;font-size:16px;line-height:1.75;color:${kit.text};">${txt(content)}</p>
+</aside>`;
+}
+
+// ---------------------------------------------------------------------------
+// Newsletter / email capture section. Styled section with MailerLite form
+// placeholder. The form action URL will be wired up once provided by the team.
+// ---------------------------------------------------------------------------
+function renderNewsletter(block: VisualBlock, kit: BlogStyleKit): string {
+  return `<section style="background:${softTint(kit.accent)};border:1px solid ${tint(kit.accent, 0.78)};border-radius:${kit.radius}px;padding:clamp(24px,5vw,40px);margin:0 0 28px;text-align:center;">
+  <h3 style="margin:0 0 6px;font-family:${kit.headingFont};font-size:clamp(19px,2.8vw,26px);line-height:1.25;color:${kit.text};">Stay in the Loop</h3>
+  <p style="margin:0 auto 20px;max-width:48ch;font-size:16px;line-height:1.7;color:${kit.muted};">Get the latest tips, guides and product news delivered to your inbox. No spam — just useful content for pet lovers.</p>
+  <form action="#" method="post" style="display:flex;gap:10px;max-width:420px;margin:0 auto;flex-wrap:wrap;justify-content:center;">
+    <input type="email" name="email" placeholder="Your email address" required style="flex:1 1 220px;padding:12px 16px;border:1px solid ${tint(kit.accent, 0.6)};border-radius:${kit.radius}px;font-size:15px;font-family:${kit.bodyFont};background:#fff;color:${kit.text};outline:none;" />
+    <button type="submit" style="display:inline-block;padding:12px 24px;border-radius:${kit.radius}px;font-weight:700;font-size:15px;line-height:1.4;text-decoration:none;background:${kit.accent};color:#fff;border:none;cursor:pointer;font-family:${kit.bodyFont};box-shadow:0 4px 14px ${shade(kit.accent, 0.5)}44;">Subscribe</button>
+  </form>
+  <p style="margin:12px auto 0;max-width:48ch;font-size:12.5px;color:${kit.muted};">By subscribing you agree to our privacy policy. Unsubscribe at any time.</p>
 </section>`;
 }
 
@@ -372,7 +430,7 @@ export interface ArticleFrameMeta {
   /** ISO date — formatted "August 15, 2026". */
   date?: string;
   /** Related posts strip. */
-  related?: Array<{ title: string; url: string }>;
+  related?: Array<{ title: string; url: string; imageUrl?: string }>;
 }
 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -405,20 +463,20 @@ function frameShareRow(kit: BlogStyleKit, meta: ArticleFrameMeta | undefined, co
   if (!url) return '';
   const enc = encodeURIComponent(url);
   const title = encodeURIComponent((meta?.title || '').slice(0, 120));
-  const base = `display:inline-block;padding:6px 12px;border-radius:999px;font-size:12.5px;font-weight:700;text-decoration:none;background:${softTint(kit.primary)};color:${kit.primary};border:1px solid ${tint(kit.primary, 0.78)};`;
-  const items: Array<[string, string]> = [
-    ['Facebook', `https://www.facebook.com/sharer/sharer.php?u=${enc}`],
-    ['X', `https://twitter.com/intent/tweet?url=${enc}${title ? `&text=${title}` : ''}`],
-    ['LinkedIn', `https://www.linkedin.com/sharing/share-offsite/?url=${enc}`],
-    ['WhatsApp', `https://wa.me/?text=${title ? `${title}%20${enc}` : enc}`],
-    ['Email', `mailto:?subject=${title}&body=${enc}`],
+  // Discreet icon-style share links — small, muted, never compete with content.
+  const iconStyle = `display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:999px;font-size:11px;font-weight:800;text-decoration:none;background:${softTint(kit.primary)};color:${kit.primary};border:1px solid ${tint(kit.primary, 0.78)};`;
+  const items: Array<[string, string, string]> = [
+    ['f', `https://www.facebook.com/sharer/sharer.php?u=${enc}`, 'Facebook'],
+    ['X', `https://twitter.com/intent/tweet?url=${enc}${title ? `&text=${title}` : ''}`, 'X'],
+    ['in', `https://www.linkedin.com/sharing/share-offsite/?url=${enc}`, 'LinkedIn'],
+    ['&#8205;', `https://wa.me/?text=${title ? `${title}%20${enc}` : enc}`, 'WhatsApp'],
+    ['&#9993;', `mailto:?subject=${title}&body=${enc}`, 'Email'],
   ];
-  const chips = items
-    .map(([label, href]) => `<a class="fg-share-btn" href="${esc(href)}" target="_blank" rel="noopener" style="${base}">${label}</a>`)
-    .join('\n  ');
-  return `<div class="fg-share" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;${compact ? 'margin-top:0' : 'margin-top:12px'};">
-  <span style="font-size:12.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:${kit.muted};">Share</span>
-  ${chips}
+  const icons = items
+    .map(([icon, href, label]) => `<a class="fg-share-btn" href="${esc(href)}" target="_blank" rel="noopener" title="Share on ${label}" style="${iconStyle}">${icon}</a>`)
+    .join('');
+  return `<div class="fg-share" style="display:inline-flex;align-items:center;gap:6px;${compact ? 'margin-top:0' : 'margin-top:8px'};">
+  ${icons}
 </div>`;
 }
 
@@ -431,9 +489,11 @@ function frameHead(kit: BlogStyleKit, meta: ArticleFrameMeta | undefined, readMi
   if (date) parts.push(date);
   parts.push(`${readMins} min read`);
   const share = frameShareRow(kit, meta);
-  return `<header class="fg-frame-head" style="margin:0 0 22px;padding-bottom:16px;border-bottom:1px solid ${tint(kit.primary, 0.85)};">
-  <p style="margin:0;font-size:13.5px;font-weight:600;letter-spacing:.02em;color:${kit.muted};">${esc(parts.join(' · '))}</p>
-  ${share}
+  return `<header class="fg-frame-head" style="margin:0 0 28px;padding-bottom:18px;border-bottom:1px solid ${tint(kit.primary, 0.85)};">
+  <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+    <p style="margin:0;font-size:13.5px;font-weight:600;letter-spacing:.02em;color:${kit.muted};">${esc(parts.join(' · '))}</p>
+    ${share}
+  </div>
 </header>`;
 }
 
@@ -441,16 +501,11 @@ function frameFoot(kit: BlogStyleKit, meta: ArticleFrameMeta | undefined): strin
   if (!meta) return '';
   const parts: string[] = [];
 
-  const share = frameShareRow(kit, meta, true);
-  if (share) {
-    parts.push(`<div style="display:flex;justify-content:center;margin:0 0 20px;">${share}</div>`);
-  }
-
   const brandName = (meta.brandName || '').trim();
   if (brandName) {
     const authorLine = (meta.author || '').trim() || `The ${brandName} Team`;
     const initial = brandName.charAt(0).toUpperCase();
-    parts.push(`<div class="fg-author" style="display:flex;align-items:center;gap:14px;background:${softTint(kit.primary)};border:1px solid ${tint(kit.primary, 0.82)};border-radius:${kit.radius}px;padding:16px 18px;margin:0 0 20px;">
+    parts.push(`<div class="fg-author" style="display:flex;align-items:center;gap:14px;background:${softTint(kit.primary)};border:1px solid ${tint(kit.primary, 0.82)};border-radius:${kit.radius}px;padding:16px 18px;margin:0 0 24px;">
   <span style="flex:0 0 auto;width:44px;height:44px;border-radius:999px;background:${kit.primary};color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800;font-family:${kit.headingFont};font-size:18px;">${esc(initial)}</span>
   <div>
     <p style="margin:0 0 2px;font-weight:800;font-size:15px;color:${kit.text};">${esc(authorLine)}</p>
@@ -459,9 +514,19 @@ function frameFoot(kit: BlogStyleKit, meta: ArticleFrameMeta | undefined): strin
 </div>`);
   }
 
+  // Newsletter capture — after the author box, before related articles
+  parts.push(`<section style="background:${softTint(kit.accent)};border:1px solid ${tint(kit.accent, 0.78)};border-radius:${kit.radius}px;padding:clamp(20px,4vw,36px);margin:0 0 24px;text-align:center;">
+  <h3 style="margin:0 0 6px;font-family:${kit.headingFont};font-size:clamp(18px,2.6vw,24px);line-height:1.25;color:${kit.text};">Stay in the Loop</h3>
+  <p style="margin:0 auto 18px;max-width:48ch;font-size:15.5px;line-height:1.7;color:${kit.muted};">Get the latest tips, guides and product news delivered to your inbox.</p>
+  <form action="#" method="post" style="display:flex;gap:10px;max-width:400px;margin:0 auto;flex-wrap:wrap;justify-content:center;">
+    <input type="email" name="email" placeholder="Your email address" required style="flex:1 1 200px;padding:11px 14px;border:1px solid ${tint(kit.accent, 0.6)};border-radius:${kit.radius}px;font-size:14.5px;font-family:${kit.bodyFont};background:#fff;color:${kit.text};outline:none;" />
+    <button type="submit" style="display:inline-block;padding:11px 22px;border-radius:${kit.radius}px;font-weight:700;font-size:14.5px;line-height:1.4;text-decoration:none;background:${kit.accent};color:#fff;border:none;cursor:pointer;font-family:${kit.bodyFont};">Subscribe</button>
+  </form>
+</section>`);
+
   const siteUrl = (meta.siteUrl || '').trim();
   if (brandName && siteUrl) {
-    parts.push(`<section class="fg-frame-cta" style="background:linear-gradient(120deg, ${kit.band}, ${shade(kit.band, 0.78)});border-radius:${kit.radius}px;padding:clamp(20px,4vw,36px);text-align:center;color:#fff;margin:0 0 20px;">
+    parts.push(`<section class="fg-frame-cta" style="background:linear-gradient(120deg, ${kit.band}, ${shade(kit.band, 0.78)});border-radius:${kit.radius}px;padding:clamp(20px,4vw,36px);text-align:center;color:#fff;margin:0 0 24px;">
   ${chip(kit, `More from ${esc(brandName)}`)}
   <h3 style="margin:0 auto 6px;font-family:${kit.headingFont};font-size:clamp(19px,2.8vw,26px);line-height:1.25;color:#fff;max-width:30ch;">Fresh ideas for you and your pet</h3>
   <p style="margin:0 auto 20px;max-width:50ch;color:rgba(255,255,255,.92);font-size:15px;line-height:1.7;">${esc(meta.title || 'Keep exploring')}</p>
@@ -472,15 +537,21 @@ function frameFoot(kit: BlogStyleKit, meta: ArticleFrameMeta | undefined): strin
   const related = (meta.related || []).filter((r) => r && r.url && r.title).slice(0, 3);
   if (related.length) {
     parts.push(`<aside class="fg-related" style="margin:0 0 4px;">
-  <h3 style="margin:0 0 12px;font-family:${kit.headingFont};font-size:18px;line-height:1.3;color:${kit.text};">Keep reading</h3>
-  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:10px;">
-  ${related.map((r) => `<a class="fg-related-link" href="${esc(r.url)}" style="display:block;background:${kit.surface};border:1px solid ${tint(kit.primary, 0.8)};border-radius:${kit.radius}px;padding:12px 14px;text-decoration:none;color:${kit.text};font-weight:700;font-size:14.5px;line-height:1.45;">${txt(r.title)}<span style="color:${kit.primary};margin-left:4px;">&#8594;</span></a>`).join('\n')}
+  <h3 style="margin:0 0 14px;font-family:${kit.headingFont};font-size:19px;line-height:1.3;color:${kit.text};">Keep reading</h3>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:12px;">
+  ${related.map((r) => `<a class="fg-related-link" href="${esc(r.url)}" style="display:block;background:${kit.surface};border:1px solid ${tint(kit.primary, 0.8)};border-radius:${kit.radius}px;overflow:hidden;text-decoration:none;color:${kit.text};transition:border-color .2s,box-shadow .2s;">
+    ${r.imageUrl ? `<img src="${esc(r.imageUrl)}" alt="" loading="lazy" style="display:block;width:100%;height:140px;object-fit:cover;" />` : `<div style="height:8px;background:${kit.primary};"></div>`}
+    <div style="padding:12px 14px 14px;">
+      <span style="display:block;font-weight:700;font-size:14.5px;line-height:1.45;color:${kit.text};">${txt(r.title)}</span>
+      <span style="color:${kit.primary};font-size:13px;margin-top:6px;display:inline-block;">Read more &#8594;</span>
+    </div>
+  </a>`).join('\n')}
   </div>
 </aside>`);
   }
 
   if (!parts.length) return '';
-  return `<footer class="fg-frame-foot" style="margin:26px 0 0;padding-top:18px;border-top:1px solid ${tint(kit.primary, 0.85)};">
+  return `<footer class="fg-frame-foot" style="margin:28px 0 0;padding-top:20px;border-top:1px solid ${tint(kit.primary, 0.85)};">
 ${parts.join('\n')}
 </footer>`;
 }
@@ -500,6 +571,8 @@ function renderBlock(block: VisualBlock, kit: BlogStyleKit): string {
     case 'carousel': return renderCarousel(block, kit);
     case 'product_cta': return renderProductCta(block, kit);
     case 'image_banner': return figureHtmlFor(block, kit.radius);
+    case 'daniels_tip': return renderDanielsTip(block, kit);
+    case 'newsletter': return renderNewsletter(block, kit);
     case 'paragraph':
     default: return renderParagraph(block, kit);
   }
@@ -551,7 +624,7 @@ export function blocksToHtml(
   return `<div class="fg-art fg-art-${scope}" style="font-family:${kit.bodyFont};color:${kit.text};line-height:1.7;max-width:860px;margin:0 auto;">
 ${scopedStyles(scope, kit)}
 ${head}
-${list.map((b) => renderBlock(b, kit)).join('\n')}
+${list.map((b) => renderBlock(b, kit)).join('\n\n')}
 ${foot}
 </div>`;
 }

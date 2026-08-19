@@ -30,6 +30,12 @@ export interface Brand {
    * generates for every live post. Falls back to per-brand defaults derived
    * from `primaryColor` when absent. */
   blogStyle?: Partial<BlogStyleKit>;
+  /** WooCommerce REST API credentials — enables authenticated access to
+   * products, orders, customers, coupons and other WC endpoints beyond the
+   * public Store API.  When absent, the public `/wc/store/v1/` endpoint is
+   * used for product listings. */
+  wcConsumerKey?: string;
+  wcConsumerSecret?: string;
 }
 
 /** Per-brand blog visual identity. Every field is optional at the Brand level;
@@ -71,7 +77,9 @@ export type VisualBlockType =
   | 'cards'
   | 'quote'
   | 'cta_band'
-  | 'carousel';
+  | 'carousel'
+  | 'daniels_tip'
+  | 'newsletter';
 
 /** One card inside a `cards` grid block. */
 export interface CardItem {
@@ -191,6 +199,10 @@ export interface ContentItem {
   wpLiveUrl?: string;
   lastSyncedAt?: string;
   generationLog?: GenerationLogEntry[];
+  /** The original article HTML/text before enhancement (Enhance Existing mode). */
+  originalHtml?: string;
+  /** The original article title before enhancement. */
+  originalTitle?: string;
   createdAt: string;
   updatedAt: string;
 }

@@ -103,6 +103,70 @@ async function buildFrameMeta(
   return meta;
 }
 
+/** A product CTA URL that still points at a placeholder (no real product). */
+const isPlaceholderUrl = (u?: string) =>
+  !u || /^(#|#\w*|\/shop\/?|\/products?\/?)$/i.test(String(u).trim());
+
+/** Decode WooCommerce HTML entities (e.g. "Daniel&#8217;s" -> "Daniel's"). */
+const decodeEntities = (s: string) => {
+  if (typeof document !== 'undefined') {
+    const ta = document.createElement('textarea');
+    ta.innerHTML = s;
+    return ta.value;
+  }
+  return s
+    .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(Number(d)))
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+};
+
+/**
+ * Auto-fill product CTA links at publish time: any product_cta block still
+ * pointing at a placeholder URL gets a real WooCommerce product link (matched
+ * by name when possible, else the first product), plus the product image when
+ * the block has none. Runs right before the body is serialised, so every
+ * pushed article ships with working product suggestions instead of "#".
+ */
+async function autofillProductLinks(
+  brand: Brand | undefined | null,
+  item: ContentItem,
+): Promise<ContentItem> {
+  const blocks = item.blocks || [];
+  const needsFill = blocks.some((b) => b.type === 'product_cta' && isPlaceholderUrl(b.buttonUrl));
+  if (!needsFill || !brand?.wpUrl) return item;
+  try {
+    const res = await fetch(`/api/wp/products?wpUrl=${encodeURIComponent(brand.wpUrl)}`);
+    const data = await res.json();
+    const products: Array<{ name: string; permalink: string; image?: string }> = data?.products || [];
+    if (!products.length) return item;
+    const patched = blocks.map((b) => {
+      if (b.type !== 'product_cta' || !isPlaceholderUrl(b.buttonUrl)) return b;
+      const title = String(b.title || '').toLowerCase().trim();
+      const match = title
+        ? products.find((p) => {
+            const pn = decodeEntities(String(p.name || '')).toLowerCase();
+            return pn.includes(title) || title.includes(pn);
+          })
+        : undefined;
+      const pick = match || products[0];
+      return {
+        ...b,
+        title: b.title || decodeEntities(pick.name),
+        imageUrl: b.imageUrl || pick.image || '',
+        buttonText: b.buttonText || 'View Product',
+        buttonUrl: pick.permalink || b.buttonUrl,
+      };
+    });
+    return { ...item, blocks: patched };
+  } catch (err: any) {
+    console.warn('[wpSync] product autofill skipped:', String(err?.message || err).slice(0, 140));
+    return item;
+  }
+}
+
 /** Push an item to WordPress as LIVE ('publish') or a hidden draft ('draft'). */
 export async function syncItemToWp(
   brand: Brand | undefined | null,
@@ -110,7 +174,10 @@ export async function syncItemToWp(
   statusTarget: 'publish' | 'draft',
 ): Promise<WpSyncResult> {
   try {
-    const frameMeta = await buildFrameMeta(brand, item);
+    // Fill placeholder product links with real shop products BEFORE the body
+    // is serialised, so the pushed HTML carries working product suggestions.
+    const itemWithProducts = await autofillProductLinks(brand, item);
+    const frameMeta = await buildFrameMeta(brand, itemWithProducts);
     // Send the user's BYOK keys so sync-time image generation (the 2-image
     // guarantee) uses their PAID Nano Banana / OpenRouter keys, not the
     // server env key alone.
@@ -120,7 +187,7 @@ export async function syncItemToWp(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         brand,
-        contentItem: { ...item, bodyHtml: prepareWpBody(item, brand, frameMeta) },
+        contentItem: { ...itemWithProducts, bodyHtml: prepareWpBody(itemWithProducts, brand, frameMeta) },
         byokKeys,
         ...(statusTarget === 'draft' ? { status: 'draft' } : {}),
       }),

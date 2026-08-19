@@ -182,6 +182,15 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
   // persisted to localStorage so it applies instantly across the editor.
   const [aiPref, setAiPrefState] = useState<AiModelPref>(() => fetchAiPref());
   const setAiPref = (p: AiModelPref) => { saveAiPref(p); setAiPrefState(p); };
+  // --- Enhance Existing mode: toggle between Generate New and Enhance Existing
+  const [editorMode, setEditorMode] = useState<'generate' | 'enhance'>('generate');
+  // Product picker: live WooCommerce products for product_cta blocks.
+  const [shopProducts, setShopProducts] = useState<any[] | null>(null);
+  const [productPickerFor, setProductPickerFor] = useState<number | null>(null);
+  const [isLoadingProducts, setIsLoadingProducts] = useState(false);
+  const [enhanceUrl, setEnhanceUrl] = useState('');
+  const [enhanceUrlLoading, setEnhanceUrlLoading] = useState(false);
+  const [enhanceUrlError, setEnhanceUrlError] = useState('');
   // Generation history: timestamped, model-attributed record of every AI action.
   const logGeneration = (entry: GenerationLogEntry) => {
     setEditingItem((prev) => ({
@@ -688,6 +697,152 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
     }
   };
 
+  // Auto SEO keyword suggestion — suggests primary + secondary keywords from the topic.
+  const [kwSuggesting, setKwSuggesting] = useState(false);
+  const handleSuggestKeywords = async () => {
+    const title = (editingItem?.title || '').trim();
+    if (!title) return;
+    setKwSuggesting(true);
+    try {
+      const byokKeys = await fetchGlobalKeys().catch(() => ({}));
+      const res = await fetch('/api/ai/suggest-keywords', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, brand, byokKeys, modelPref: aiPref }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setEditingItem({
+          ...editingItem,
+          primaryKeyword: data.primaryKeyword || editingItem.primaryKeyword,
+          secondaryKeywords: data.secondaryKeywords || editingItem.secondaryKeywords,
+          seoBrief: data.seoBrief || editingItem.seoBrief,
+        });
+      }
+    } catch { /* silent */ }
+     setKwSuggesting(false);
+  };
+
+  // --- Enhance Existing: fetch URL content and populate the editor ---------
+  const handleFetchUrl = async () => {
+    const url = enhanceUrl.trim();
+    if (!url) return;
+    setEnhanceUrlLoading(true);
+    setEnhanceUrlError('');
+    try {
+      const res = await fetch('/api/ai/fetch-url-content', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message || 'Failed to fetch URL');
+      setEditingItem({
+        ...editingItem,
+        title: data.title || editingItem.title,
+        originalHtml: data.html || data.text,
+        originalTitle: data.title,
+        bodyHtml: data.html || editingItem.bodyHtml,
+      });
+    } catch (err: any) {
+      setEnhanceUrlError(err.message || 'Failed to fetch URL');
+    }
+    setEnhanceUrlLoading(false);
+  };
+
+  // --- Enhance Existing: run the enhancement pipeline ----------------------
+  const handleEnhanceArticle = async () => {
+    const originalHtml = editingItem.originalHtml || editingItem.bodyHtml || '';
+    if (!originalHtml.trim()) return;
+    setIsGeneratingAi(true);
+    setAiError(null);
+    lastUpdateRef.current = Date.now();
+    setGenState({ phase: 'Connecting…', percent: 2, words: 0, text: '', elapsed: 0, lastUpdate: Date.now(), stalled: false });
+    const abort = new AbortController();
+    abortRef.current = abort;
+    const byokKeys = await fetchGlobalKeys();
+    try {
+      const res = await fetch('/api/ai/enhance-article', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          originalHtml,
+          originalTitle: editingItem.originalTitle || editingItem.title,
+          title: editingItem.title,
+          primaryKeyword: editingItem.primaryKeyword,
+          secondaryKeywords: editingItem.secondaryKeywords,
+          seoBrief: editingItem.seoBrief,
+          brand,
+          byokKeys,
+          targetWordCount: editingItem.targetWordCount,
+          modelPref: aiPref,
+        }),
+        signal: abort.signal,
+      });
+      if (!res.ok || !res.body) {
+        const errText = await res.text().catch(() => '');
+        throw new Error(errText?.slice(0, 200) || `Enhancement failed (HTTP ${res.status}).`);
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      let streamedText = '';
+      let completed = false;
+      let streamError: string | null = null;
+
+      const handleEvent = (evt: any) => {
+        if (evt.type === 'status') {
+          lastUpdateRef.current = Date.now();
+          setGenState((prev) => ({ ...(prev || { phase: '', percent: 0, words: 0, text: '', elapsed: 0, lastUpdate: Date.now(), stalled: false }), phase: evt.message || evt.phase || '', percent: evt.percent ?? prev?.percent ?? 0, stalled: false }));
+        } else if (evt.type === 'stream') {
+          lastUpdateRef.current = Date.now();
+          streamedText += evt.text || '';
+          setGenState((prev) => ({ ...(prev || { phase: '', percent: 0, words: 0, text: '', elapsed: 0, lastUpdate: Date.now(), stalled: false }), phase: evt.phase || prev?.phase || 'Enhancing…', percent: evt.percent ?? prev?.percent ?? 0, words: evt.words ?? countWords(streamedText), text: streamedText, stalled: false }));
+        } else if (evt.type === 'heartbeat') {
+          lastUpdateRef.current = Date.now();
+          setGenState((prev) => (prev ? { ...prev, elapsed: evt.elapsed ?? prev.elapsed, stalled: false } : prev));
+        } else if (evt.type === 'image') {
+          lastUpdateRef.current = Date.now();
+          const img = evt as any;
+          if (img.role === 'hero') {
+            setEditingItem((prev) => ({ ...prev, featuredImageUrl: img.url || prev?.featuredImageUrl, featuredMediaId: typeof img.mediaId === 'number' ? img.mediaId : prev?.featuredMediaId, nanoBananaPrompt: img.prompt || prev?.nanoBananaPrompt, updatedAt: new Date().toISOString() }));
+          } else if (img.role === 'secondary') {
+            setEditingItem((prev) => ({ ...prev, secondaryImageUrl: img.url || prev?.secondaryImageUrl, updatedAt: new Date().toISOString() }));
+          }
+          setGenState((prev) => (prev ? { ...prev, phase: img.role === 'hero' ? 'Hero image ready…' : 'Both images ready.', percent: img.role === 'hero' ? 90 : 92, stalled: false } : prev));
+        } else if (evt.type === 'imageWarning') {
+          lastUpdateRef.current = Date.now();
+        } else if (evt.type === 'error') {
+          streamError = evt.error || 'Enhancement failed.';
+        } else if (evt.type === 'done') {
+          completed = true;
+          applyGeneratedArticle(evt.data || {});
+          const d = evt.data || {};
+          logGeneration({ at: new Date().toISOString(), action: 'Enhance', provider: d.provider || 'gemini', model: d.model || aiPref.model, fallback: !!d.fallback, words: d.wordCount, durationMs: d.latencyMs, ok: true });
+        }
+      };
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          try { handleEvent(JSON.parse(line)); } catch { /* skip */ }
+        }
+      }
+      if (streamError) throw new Error(streamError);
+      if (!completed) throw new Error('Enhancement ended without completing.');
+    } catch (err: any) {
+      if (err.name === 'AbortError') { /* cancelled */ }
+      else setAiError(err.message?.slice(0, 300) || 'Enhancement failed.');
+    }
+    setIsGeneratingAi(false);
+    setGenState(null);
+  };
+
   // Topic context prepended to every image render so the generated image
   // always matches the blog topic, even for short or generic prompts.
   const imageTopicContext = useMemo(() => {
@@ -947,9 +1102,9 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
     const newBlock: VisualBlock = {
       id: `block-${uid()}`,
       type,
-      title: type === 'hero' ? 'New Hero Heading' : type === 'faq' ? 'FAQ Section' : type === 'image_banner' ? '' : type === 'cta_band' ? 'Ready to make a change?' : type === 'quote' ? '' : type === 'cards' ? 'Why choose us' : type === 'carousel' ? 'Explore the range' : type === 'paragraph' ? '' : 'Section Title',
-      subtitle: type === 'cta_band' ? 'No-pressure, expert-led guidance' : 'Section Subtitle',
-      content: type === 'image_banner' ? '' : type === 'quote' ? 'A powerful sentence worth quoting…' : type === 'cta_band' ? 'A short, warm call to action that invites the reader to take the next step.' : 'Write content here...',
+      title: type === 'hero' ? 'New Hero Heading' : type === 'faq' ? 'FAQ Section' : type === 'image_banner' ? '' : type === 'cta_band' ? 'Ready to make a change?' : type === 'quote' ? '' : type === 'cards' ? 'Why choose us' : type === 'carousel' ? 'Explore the range' : type === 'daniels_tip' ? "Daniel's Tip" : type === 'newsletter' ? 'Stay in the Loop' : type === 'paragraph' ? '' : 'Section Title',
+      subtitle: type === 'cta_band' ? 'No-pressure, expert-led guidance' : type === 'newsletter' ? 'Get the latest tips delivered to your inbox.' : 'Section Subtitle',
+      content: type === 'image_banner' ? '' : type === 'quote' ? 'A powerful sentence worth quoting…' : type === 'cta_band' ? 'A short, warm call to action that invites the reader to take the next step.' : type === 'daniels_tip' ? 'A practical, actionable tip that benefits from being highlighted.' : type === 'newsletter' ? '' : 'Write content here...',
       buttonText: 'Learn More',
       buttonUrl: '#',
       keywords: '',
@@ -1016,6 +1171,39 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
   };
 
   const patchBlock = (idx: number, patch: Partial<VisualBlock>) => mutateBlock(idx, (b) => ({ ...b, ...patch }));
+
+  // --- Product picker (product_cta blocks) ----------------------------------
+  // Fetches the brand's live WooCommerce products and lets the user attach a
+  // real product to a CTA block (title, image, button text, product URL).
+  const decodeEntities = (s: string) => {
+    const ta = document.createElement('textarea');
+    ta.innerHTML = s;
+    return ta.value;
+  };
+  const loadShopProducts = async () => {
+    if (!brand?.wpUrl) return;
+    setIsLoadingProducts(true);
+    try {
+      const res = await fetch(`/api/wp/products?wpUrl=${encodeURIComponent(brand.wpUrl)}`);
+      const data = await res.json();
+      setShopProducts(data?.products || []);
+    } catch {
+      setShopProducts([]);
+    } finally {
+      setIsLoadingProducts(false);
+    }
+  };
+  const applyShopProduct = (idx: number, p: any) => {
+    patchBlock(idx, {
+      title: decodeEntities(p.name || ''),
+      imageUrl: p.image || '',
+      buttonText: 'View Product',
+      buttonUrl: p.permalink || '#',
+    });
+    setProductPickerFor(null);
+  };
+  const currencySymbol = (code?: string) =>
+    code === 'GBP' ? '£' : code === 'USD' ? '$' : code === 'EUR' ? '€' : code ? `${code} ` : '';
 
   // Single functional primitive for all block mutations — safe against rapid
   // successive clicks in the same render tick (stale-closure collapse).
@@ -1640,7 +1828,16 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
               </div>
             </div>
             <div>
-              <label className="block text-sm font-semibold text-slate-700 mb-1.5">Focus Keyphrase</label>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-sm font-semibold text-slate-700">Focus Keyphrase</label>
+                <button
+                  onClick={handleSuggestKeywords}
+                  disabled={kwSuggesting || !(editingItem?.title || '').trim()}
+                  className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-800 disabled:opacity-40 disabled:cursor-not-allowed transition"
+                >
+                  {kwSuggesting ? 'Suggesting…' : '✨ Suggest Keywords'}
+                </button>
+              </div>
               <input
                 type="text"
                 value={editingItem.primaryKeyword || ''}
@@ -1743,8 +1940,84 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
       {/* Step: Write — content creation */}
       {stepTab === 'write' && (
         <div className="space-y-4">
-          {/* Write controls */}
-          <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm flex flex-wrap items-center gap-3">
+          {/* Mode toggle: Generate New vs Enhance Existing */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-3 shadow-sm">
+            <div className="bg-slate-100 p-1 rounded-xl flex gap-1">
+              <button
+                onClick={() => setEditorMode('generate')}
+                className={`flex-1 px-4 py-2.5 rounded-lg text-sm font-semibold flex items-center justify-center gap-2 transition whitespace-nowrap ${editorMode === 'generate' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                <Sparkles className="w-4 h-4" /> Generate New
+              </button>
+              <button
+                onClick={() => setEditorMode('enhance')}
+                className={`flex-1 px-4 py-2.5 rounded-lg text-sm font-semibold flex items-center justify-center gap-2 transition whitespace-nowrap ${editorMode === 'enhance' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                <Wand2 className="w-4 h-4" /> Enhance Existing
+              </button>
+            </div>
+          </div>
+
+          {/* Enhance Existing panel — URL input + paste area */}
+          {editorMode === 'enhance' && (
+            <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm space-y-3">
+              <p className="text-xs text-slate-500 font-medium">Paste your existing article text or enter a URL to fetch it automatically.</p>
+              <div className="flex items-center gap-2">
+                <input
+                  type="url"
+                  value={enhanceUrl}
+                  onChange={(e) => setEnhanceUrl(e.target.value)}
+                  placeholder="https://example.com/my-existing-article"
+                  className="flex-1 px-4 py-2.5 rounded-xl border border-slate-200 text-sm focus:outline-none focus:border-slate-400 bg-slate-50"
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleFetchUrl(); }}
+                />
+                <button
+                  onClick={handleFetchUrl}
+                  disabled={enhanceUrlLoading || !enhanceUrl.trim()}
+                  className="px-4 py-2.5 rounded-xl bg-slate-100 text-slate-700 text-sm font-semibold hover:bg-slate-200 transition disabled:opacity-50 whitespace-nowrap"
+                >
+                  {enhanceUrlLoading ? 'Fetching…' : 'Fetch URL'}
+                </button>
+              </div>
+              {enhanceUrlError && (
+                <p className="text-xs text-rose-600 font-medium">{enhanceUrlError}</p>
+              )}
+              {editingItem.originalHtml && (
+                <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-xs text-emerald-700 font-medium flex items-center gap-2">
+                  <span>✓</span>
+                  <span>Article loaded — {countWords(editingItem.originalHtml).toLocaleString()} words. Click "Enhance Article" below to improve it.</span>
+                </div>
+              )}
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1.5">Or paste article text directly:</label>
+                <textarea
+                  value={editingItem.originalHtml || ''}
+                  onChange={(e) => setEditingItem({ ...editingItem, originalHtml: e.target.value, originalTitle: editingItem.originalTitle || editingItem.title })}
+                  placeholder="Paste your existing blog article HTML or plain text here…"
+                  rows={8}
+                  className="w-full px-4 py-3 rounded-xl border border-slate-200 text-sm focus:outline-none focus:border-slate-400 bg-slate-50 resize-y font-mono leading-relaxed"
+                />
+              </div>
+              <button
+                onClick={handleEnhanceArticle}
+                disabled={isGeneratingAi || !((editingItem.originalHtml || '').trim())}
+                className="flex items-center justify-center gap-2 px-5 py-2.5 text-white rounded-xl text-sm font-semibold hover:brightness-110 transition disabled:opacity-70 shadow-sm w-full"
+                style={{ backgroundColor: brandColor(brand) }}
+              >
+                {isGeneratingAi ? (
+                  <RefreshCw className="w-4 h-4 animate-spin text-white/80" />
+                ) : (
+                  <Wand2 className="w-4 h-4 text-white/90" />
+                )}
+                {isGeneratingAi
+                  ? `Enhancing… ${genState?.percent ?? 0}%`
+                  : 'Enhance Article'}
+              </button>
+            </div>
+          )}
+
+          {/* Write controls (generate mode) */}
+          {editorMode === 'generate' && <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm flex flex-wrap items-center gap-3">
             <div className="bg-slate-100 p-1 rounded-xl flex gap-1">
               <button
                 onClick={() => setWriteMode('visual')}
@@ -1838,7 +2111,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                   : 'Auto-Write'}
               </button>
             </div>
-          </div>
+          </div>}
 
           {/* Interactive humanisation: before/after compare + choice */}
           {isHumanizing && (
@@ -2250,6 +2523,56 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                             </div>
                           </div>
                         )}
+                        {block.type === 'product_cta' && (
+                          <div>
+                            <button
+                              onClick={() => {
+                                if (productPickerFor === idx) {
+                                  setProductPickerFor(null);
+                                } else {
+                                  if (!shopProducts) loadShopProducts();
+                                  setProductPickerFor(idx);
+                                }
+                              }}
+                              className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg px-2 py-1 transition"
+                            >
+                              {productPickerFor === idx ? 'Close product picker' : 'Pick from shop'}
+                            </button>
+                            {productPickerFor === idx && (
+                              <div className="mt-2 max-h-48 overflow-y-auto rounded-lg border border-slate-200 bg-white divide-y divide-slate-100">
+                                {isLoadingProducts && (
+                                  <div className="p-3 text-xs text-slate-500">Loading products…</div>
+                                )}
+                                {!isLoadingProducts && (!shopProducts || shopProducts.length === 0) && (
+                                  <div className="p-3 text-xs text-slate-500">
+                                    No products found — check the brand's WordPress URL.
+                                  </div>
+                                )}
+                                {(shopProducts || []).map((p) => (
+                                  <button
+                                    key={p.id}
+                                    onClick={() => applyShopProduct(idx, p)}
+                                    className="w-full flex items-center gap-2 px-2.5 py-2 text-left hover:bg-emerald-50 transition"
+                                  >
+                                    {p.image ? (
+                                      <img src={p.image} alt="" className="w-8 h-8 rounded object-cover shrink-0" />
+                                    ) : (
+                                      <div className="w-8 h-8 rounded bg-slate-100 shrink-0" />
+                                    )}
+                                    <span className="flex-1 min-w-0">
+                                      <span className="block text-xs font-semibold text-slate-700 truncate">
+                                        {decodeEntities(p.name || '')}
+                                      </span>
+                                      <span className="block text-[10px] text-slate-400">
+                                        {p.price ? `${currencySymbol(p.currency)}${p.price}` : ''}
+                                      </span>
+                                    </span>
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
                         {block.type === 'cards' && (
                           <div className="space-y-2">
                             <div className="flex items-center justify-between">
@@ -2488,6 +2811,8 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                 <button onClick={() => handleAddBlock('quote')} className="px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-xl text-sm font-semibold transition shadow-sm">+ Quote</button>
                 <button onClick={() => handleAddBlock('cta_band')} className="px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-xl text-sm font-semibold transition shadow-sm">+ CTA Band</button>
                 <button onClick={() => handleAddBlock('carousel')} className="px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-xl text-sm font-semibold transition shadow-sm">+ Carousel</button>
+                <button onClick={() => handleAddBlock('daniels_tip')} className="px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-xl text-sm font-semibold transition shadow-sm">+ Daniel's Tip</button>
+                <button onClick={() => handleAddBlock('newsletter')} className="px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-xl text-sm font-semibold transition shadow-sm">+ Newsletter</button>
               </div>
             </div>
           )}

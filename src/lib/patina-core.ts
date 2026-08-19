@@ -12,7 +12,7 @@ export class Humanizer {
   }
 
   async rewriteHtml(html: string, aiKey?: string, model?: string): Promise<string> {
-    const aiApiKey = aiKey || process.env.GEMINI_API_KEY;
+    const aiApiKey = aiKey || process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
     if (!aiApiKey) return html;
     
     try {
@@ -29,7 +29,7 @@ export class Humanizer {
    * instead of silently keeping the original draft.
    */
   async rewriteHtmlOrThrow(html: string, aiKey?: string, model?: string): Promise<string> {
-    const aiApiKey = aiKey || process.env.GEMINI_API_KEY;
+    const aiApiKey = aiKey || process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
     if (!aiApiKey) throw new Error('No Gemini API key is configured. Add one in Settings > AI Models.');
     return this.callHumanizer(html, aiApiKey, model);
   }

@@ -216,6 +216,15 @@ export const SeoPanel: React.FC<SeoPanelProps> = ({ item, onChange, siteUrl, wor
 
   // Keep the latest payload in a ref so the debounced fetch always uses fresh data.
   const baseUrl = normalizeUrl(siteUrl);
+  const authorObj = brand?.name
+    ? {
+        name: brand.name,
+        jobTitle: 'Editorial Team',
+        bio: `The editorial team at ${brand.name} writes practical, expert guidance for our readers.`,
+        url: baseUrl ? `${baseUrl.replace(/\/+$/, '')}/about` : undefined,
+        worksFor: { name: brand.name },
+      }
+    : undefined;
   payloadRef.current = {
     title: item.metaTitle || item.title,
     metaDescription: item.metaDescription || '',
@@ -229,6 +238,7 @@ export const SeoPanel: React.FC<SeoPanelProps> = ({ item, onChange, siteUrl, wor
     images: item.featuredImageUrl
       ? [{ src: item.featuredImageUrl, alt: `${item.primaryKeyword || 'featured'} image` }]
       : [],
+    author: authorObj,
   };
 
   const runAnalysis = useCallback(async () => {

@@ -11,7 +11,7 @@ export const INITIAL_BRANDS: Brand[] = [
     voiceGuidelines: 'Daniel\'s Tasty Petfoods — transparent nutrition, quality ingredients and the deep emotional bond between owners and pets. Educate first, be honest and confident, never sales-driven or fear-based. British English. Trust, integrity, kindness, practical solutions, quality before quantity. Never invent statistics or exaggerate benefits; where uncertainty exists, say so. Leave readers feeling "I can trust these people."',
     bannedWords: ['cheap', 'filler', 'artificial', 'junk', 'chemical'],
     primaryColor: '#10b981', // Emerald Green
-    pageTemplates: ['default', 'template-full-width.php', 'template-pet-landing.php'],
+    pageTemplates: ['default', 'elementor_canvas', 'elementor_header_footer'],
     defaultStatus: 'draft',
     createdAt: new Date().toISOString(),
   },
@@ -25,7 +25,7 @@ export const INITIAL_BRANDS: Brand[] = [
     voiceGuidelines: 'Organised and Clean — calm, reassuring, encouraging, never judgmental. Organisation supports wellbeing, reduces stress and brings pride and contentment. Speak with warmth, understanding and practical expertise; advice is always respectful, achievable and free from criticism. Celebrate progress rather than perfection. A comfortable home helps people live happier, healthier, less stressful lives.',
     bannedWords: ['cluttered', 'dirty', 'messy', 'overwhelming', 'harsh bleach'],
     primaryColor: '#06b6d4', // Cyan
-    pageTemplates: ['default', 'template-clean-guide.php', 'page-wide.php'],
+    pageTemplates: ['default', 'elementor_canvas', 'elementor_header_footer'],
     defaultStatus: 'draft',
     createdAt: new Date().toISOString(),
   },
@@ -39,7 +39,7 @@ export const INITIAL_BRANDS: Brand[] = [
     voiceGuidelines: 'Home at Peace — compassionate, reassuring, deeply person-centred. Every individual deserves dignity, respect and genuine kindness. Communicate with warmth, empathy and quiet confidence; provide comfort, clarity and reassurance, never fear, pressure or guilt. Empower families with honest information, thoughtful guidance and practical support. Promote independence, choice and self-esteem. Professional excellence delivered with humanity.',
     bannedWords: ['stressful', 'alone', 'neglected', 'institutional'],
     primaryColor: '#8b5cf6', // Violet
-    pageTemplates: ['default', 'template-community-care.php'],
+    pageTemplates: ['default', 'elementor_canvas'],
     defaultStatus: 'draft',
     createdAt: new Date().toISOString(),
   },
@@ -53,7 +53,7 @@ export const INITIAL_BRANDS: Brand[] = [
     voiceGuidelines: 'Fresh Green Classics — warm, imaginative, inspiring. Invite readers into a world of wonder, curiosity and discovery. Books shape young minds, strengthen family bonds and inspire a lifelong love of learning. Write with warmth, heart and authenticity; never talk down to children. Encourage questions, imagination and fresh eyes. Celebrate hope, friendship, courage and the simple joys of everyday life. Premium, trusted, timeless — like Penguin Books.',
     bannedWords: ['processed', 'synthetic', 'mass-produced'],
     primaryColor: '#059669', // Rich Emerald
-    pageTemplates: ['default', 'template-recipe.php', 'template-full-width.php'],
+    pageTemplates: ['default', 'elementor_canvas', 'elementor_header_footer'],
     defaultStatus: 'draft',
     createdAt: new Date().toISOString(),
   }
@@ -155,7 +155,7 @@ export const INITIAL_CONTENT: ContentItem[] = [
     title: 'The 15-Minute Scandi Morning Routine for a Clutter-Free Kitchen',
     slug: '15-minute-scandi-morning-routine-clutter-free-kitchen',
     contentType: 'page',
-    wpTemplate: 'template-clean-guide.php',
+    wpTemplate: 'elementor_canvas',
     status: 'Draft_Ready',
     primaryKeyword: 'morning kitchen cleaning routine',
     secondaryKeywords: ['declutter kitchen counter', 'scandinavian cleaning tips', 'eco friendly kitchen spray'],
@@ -218,7 +218,7 @@ export const INITIAL_CONTENT: ContentItem[] = [
     title: 'Seasonal Organic Spring Produce Guide & Artisan Table Pairings',
     slug: 'seasonal-organic-spring-produce-guide-artisan-pairings',
     contentType: 'post',
-    wpTemplate: 'template-recipe.php',
+    wpTemplate: 'elementor_canvas',
     status: 'Published',
     primaryKeyword: 'organic spring produce guide',
     secondaryKeywords: ['seasonal eating UK', 'farm to table recipes', 'artisanal kitchen ingredients'],

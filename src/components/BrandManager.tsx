@@ -52,7 +52,7 @@ export const BrandManager: React.FC<BrandManagerProps> = ({
       voiceGuidelines: 'Friendly, helpful, authoritative, human-centric',
       bannedWords: ['cheap', 'spam'],
       primaryColor: '#3b82f6',
-      pageTemplates: ['default', 'template-full-width.php'],
+      pageTemplates: ['default', 'elementor_canvas'],
       defaultStatus: 'draft',
       createdAt: new Date().toISOString(),
     };
@@ -474,6 +474,46 @@ export const BrandManager: React.FC<BrandManagerProps> = ({
               </div>
             </div>
 
+            {/* Section 2.5: WooCommerce REST API Credentials */}
+            <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-4">
+              <div className="flex items-center space-x-2 text-slate-900 font-semibold text-sm">
+                <Key className="w-4 h-4 text-violet-600" />
+                <span>WooCommerce REST API (Optional — Product & Order Access)</span>
+              </div>
+              <p className="text-[11px] text-slate-500 leading-relaxed -mt-2">
+                Add your WooCommerce Consumer Key and Secret to enable authenticated access to products, orders, customers, and coupons — beyond the public Store API. Generate keys in <strong>WooCommerce ➔ Settings ➔ Advanced ➔ REST API</strong>.
+              </p>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Consumer Key</label>
+                  <input
+                    type="text"
+                    value={editingBrand.wcConsumerKey || ''}
+                    onChange={(e) => setEditingBrand({ ...editingBrand, wcConsumerKey: e.target.value })}
+                    placeholder="ck_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm font-mono focus:ring-2 focus:ring-violet-500 focus:outline-none bg-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Consumer Secret</label>
+                  <input
+                    type="password"
+                    value={editingBrand.wcConsumerSecret || ''}
+                    onChange={(e) => setEditingBrand({ ...editingBrand, wcConsumerSecret: e.target.value })}
+                    placeholder="cs_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm font-mono focus:ring-2 focus:ring-violet-500 focus:outline-none bg-white"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 p-2.5 rounded-lg bg-violet-50 border border-violet-200">
+                <span className="text-[11px] text-violet-700">
+                    <strong>Tip:</strong> Use <code className="bg-violet-100 px-1 rounded">Read</code> permissions when generating keys — the app only reads data, never writes orders or products.
+                </span>
+              </div>
+            </div>
+
             {/* Section 3: AI Gemini Tone of Voice Guidelines */}
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center justify-between">
@@ -545,7 +585,7 @@ export const BrandManager: React.FC<BrandManagerProps> = ({
                   value={newTemplateSlug}
                   onChange={(e) => setNewTemplateSlug(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), handleAddTemplateSlug())}
-                  placeholder="e.g. template-full-width.php or landing-page.php"
+                  placeholder="e.g. elementor_canvas or elementor_header_footer"
                   className="flex-1 px-3 py-1.5 rounded-xl border border-slate-300 text-sm font-mono focus:ring-2 focus:ring-emerald-500 focus:outline-none"
                 />
                 <button
