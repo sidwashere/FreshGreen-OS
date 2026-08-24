@@ -28,7 +28,7 @@ if (USE_EMULATORS) {
 // Usernames are mapped to a fixed local email domain so Firebase's
 // email/password provider can back the login — no Google sign-in needed.
 export const usernameToEmail = (username: string): string =>
-  `${username.trim().toLowerCase().replace(/[^a-z0-9._-]/g, '')}@greenops.local`;
+  `${username.trim().toLowerCase().replace(/[^a-z0-9._-]/g, '')}@fgos.local`;
 
 export const isValidUsername = (username: string): boolean =>
   /^[a-zA-Z0-9._-]{3,24}$/.test(username.trim());

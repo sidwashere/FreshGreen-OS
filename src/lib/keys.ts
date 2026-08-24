@@ -12,7 +12,7 @@ export const fetchGlobalKeys = async () => {
   } catch (err) {
     console.debug("Skipped fetching global keys from cloud due to network or permissions.", err);
   }
-  return JSON.parse(localStorage.getItem('greenops_byok_keys') || '{}');
+  return JSON.parse(localStorage.getItem('fgos_byok_keys') || '{}');
 };
 
 export const DEFAULT_AI_PREF: AiModelPref = {
@@ -44,7 +44,7 @@ const isValidPref = (p: any): boolean =>
 /** Lightweight runtime pref: which provider/model runs every AI action (localStorage, instant). */
 export const fetchAiPref = (): AiModelPref => {
   try {
-    const raw = localStorage.getItem('greenops_ai_pref');
+    const raw = localStorage.getItem('fgos_ai_pref');
     if (raw) {
       const parsed = JSON.parse(raw);
       if (isValidPref(parsed)) {
@@ -63,5 +63,5 @@ export const fetchAiPref = (): AiModelPref => {
 };
 
 export const saveAiPref = (pref: AiModelPref) => {
-  localStorage.setItem('greenops_ai_pref', JSON.stringify(pref));
+  localStorage.setItem('fgos_ai_pref', JSON.stringify(pref));
 };

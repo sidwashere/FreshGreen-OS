@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# FreshGreenOps local emulators (Firestore + Auth).
+# FreshGreen local emulators (Firestore + Auth).
 # - Firestore emulator runs in-memory only (firebase-tools has no disk
 #   persistence for it): it OOM'd after ~22h in Aug 2026 and lost the working
 #   DB. Give the JVM a big heap, and snapshot data with:

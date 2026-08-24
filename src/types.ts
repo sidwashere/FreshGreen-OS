@@ -205,6 +205,112 @@ export interface ContentItem {
   originalTitle?: string;
   createdAt: string;
   updatedAt: string;
+
+  // ── AutoBlog: Google Sheet → Generate → Schedule → Publish ──────────
+  /** ISO timestamp: when this item should be auto-published to WordPress. */
+  scheduledPublishAt?: string;
+  /** The Google Sheet ID this item was imported from. */
+  sourceSheetId?: string;
+  /** The row number in the source sheet (1-indexed, excluding header). */
+  sourceRow?: number;
+  /** The raw sheet tab name the row came from. */
+  sourceSheetName?: string;
+  /** Rich context from the Google Sheet row — every column is preserved here
+   *  so the AI generation prompt can use search intent, FAQ questions,
+   *  longtail keywords, CTA text, internal links, and more. */
+  sheetContext?: SheetRowContext;
+  /** Per-item overrides for the AI generation pipeline. */
+  autoBlogOverrides?: AutoBlogOverrides;
+  /** ISO timestamp of the last successful auto-publish attempt. */
+  lastAutoPublishedAt?: string;
+  /** Error message from the most recent auto-publish attempt. */
+  lastAutoPublishError?: string;
+}
+
+/** Complete context from a single Google Sheet row. Every field maps to a
+ *  column in the OC Blog Strategy sheet and is fed into the AI prompt
+ *  to produce richer, more SEO-targeted articles. */
+export interface SheetRowContext {
+  /** Column A: Supporting Advice Blogs category/ID. */
+  categoryId?: string;
+  /** Column B: Tip number within the category. */
+  tipNo?: number;
+  /** Column C: Blog title / working title. */
+  blogTitle?: string;
+  /** Column D: One-line summary of the article. */
+  oneLineSummary?: string;
+  /** Column E: Current status in the sheet (Planned, Published, etc.). */
+  sheetStatus?: string;
+  /** Column F: Primary target keyword. */
+  primaryKeyword?: string;
+  /** Column G: Secondary/LSI keywords (comma-separated). */
+  secondaryKeywords?: string;
+  /** Column H: Suggested internal links to other articles on the site. */
+  internalLinks?: string;
+  /** Column I: Search intent description — what the reader wants. */
+  searchIntent?: string;
+  /** Column J: Call to action text for the article. */
+  callToAction?: string;
+  /** Column K: Questions People Also Ask (semicolon-separated). */
+  questionsPeopleAlsoAsk?: string;
+  /** Column L: General keyword targets. */
+  keywords?: string;
+  /** Column M: Longtail keyword phrases (semicolon-separated). */
+  longtailKeywords?: string;
+}
+
+/** Per-item overrides that customise how the AI generates the article
+ * when it is pulled from a Google Sheet row. Every field is optional —
+ * missing fields fall back to the brand defaults or global config. */
+export interface AutoBlogOverrides {
+  /** Override the article tone for this specific post. */
+  tone?: 'professional' | 'warm' | 'playful' | 'formal' | 'casual' | 'brand';
+  /** Override target word count. */
+  wordCount?: number;
+  /** Override the target brand (brandId). */
+  brandId?: string;
+  /** Extra instructions fed to the AI as a suffix to the system prompt. */
+  customInstructions?: string;
+  /** Override the publish template. */
+  wpTemplate?: string;
+  /** Override the default status on WP (draft vs publish). */
+  wpStatus?: 'draft' | 'publish';
+  /** Whether to generate AI images for this post. */
+  generateImages?: boolean;
+  /** Whether to run SEO analysis after generation. */
+  runSeoAnalysis?: boolean;
+  /** Whether to humanize the draft after generation. */
+  humanize?: boolean;
+}
+
+/** Global AutoBlog configuration stored per-brand or app-wide. */
+export interface AutoBlogConfig {
+  /** Google Sheet URL or ID to sync from. */
+  sheetUrl: string;
+  /** Tab/sheet names to import from (empty = all tabs). */
+  sheetTabs: string[];
+  /** How many days between scheduling each imported post. */
+  publishingCadenceDays: number;
+  /** The starting date for the first scheduled post. */
+  publishingStartDate: string;
+  /** Default brand for imported posts. */
+  defaultBrandId: string;
+  /** Default article tone. */
+  defaultTone: 'professional' | 'warm' | 'playful' | 'formal' | 'casual' | 'brand';
+  /** Default target word count. */
+  defaultWordCount: number;
+  /** Whether to auto-generate images. */
+  autoGenerateImages: boolean;
+  /** Whether to auto-run SEO analysis. */
+  autoSeoAnalysis: boolean;
+  /** Whether to auto-humanize drafts. */
+  autoHumanize: boolean;
+  /** Whether to auto-publish when the scheduled date arrives. */
+  autoPublishEnabled: boolean;
+  /** The WordPress template for auto-generated posts. */
+  defaultWpTemplate: string;
+  /** Default WordPress status for scheduled posts. */
+  defaultWpStatus: 'draft' | 'publish';
 }
 
 export interface NanoBananaPromptOption {

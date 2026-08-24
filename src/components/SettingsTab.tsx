@@ -34,14 +34,14 @@ const ApiKeysTab: React.FC = () => {
           setKeys(docSnap.data().apiKeys);
         } else {
           // Fallback to local storage if present
-          const stored = localStorage.getItem('greenops_byok_keys');
+          const stored = localStorage.getItem('fgos_byok_keys');
           if (stored) {
             setKeys(JSON.parse(stored));
           }
         }
       } catch (err) {
         console.debug('Skipped loading keys from cloud due to network or permissions.', err);
-        const stored = localStorage.getItem('greenops_byok_keys');
+        const stored = localStorage.getItem('fgos_byok_keys');
         if (stored) {
           setKeys(JSON.parse(stored));
         }
@@ -54,7 +54,7 @@ const ApiKeysTab: React.FC = () => {
 
   const handleSave = async () => {
     try {
-      localStorage.setItem('greenops_byok_keys', JSON.stringify(keys)); // keep local backup
+      localStorage.setItem('fgos_byok_keys', JSON.stringify(keys)); // keep local backup
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
       await setDoc(doc(db, 'settings', 'global'), { apiKeys: keys }, { merge: true });
@@ -450,11 +450,11 @@ const AiModelsTab: React.FC = () => {
         if (docSnap.exists() && docSnap.data().apiKeys) {
           setKeys(docSnap.data().apiKeys);
         } else {
-          setKeys(JSON.parse(localStorage.getItem('greenops_byok_keys') || '{}'));
+          setKeys(JSON.parse(localStorage.getItem('fgos_byok_keys') || '{}'));
         }
       } catch (err) {
         console.debug('Skipped loading keys from cloud due to network or permissions.', err);
-        setKeys(JSON.parse(localStorage.getItem('greenops_byok_keys') || '{}'));
+        setKeys(JSON.parse(localStorage.getItem('fgos_byok_keys') || '{}'));
       } finally {
         setIsLoading(false);
       }
@@ -469,7 +469,7 @@ const AiModelsTab: React.FC = () => {
 
   const handleSave = async () => {
     saveAiPref(pref);
-    localStorage.setItem('greenops_byok_keys', JSON.stringify(keys));
+    localStorage.setItem('fgos_byok_keys', JSON.stringify(keys));
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
     try {

@@ -9,7 +9,8 @@ import {
   ChevronRight,
   Settings,
   LayoutDashboard,
-  Library
+  Library,
+  CalendarClock
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -76,6 +77,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
       label: 'Distribution',
       items: [
         {
+          id: 'autoblog',
+          label: 'AutoBlog Scheduler',
+          icon: CalendarClock,
+          badge: 'Auto',
+          badgeColor: 'bg-violet-500/20 text-violet-300 border-violet-500/30',
+          description: 'Sheet → Generate → Schedule → Publish'
+        },
+        {
           id: 'workspace',
           label: 'Workspace Hub',
           icon: Cloud,
@@ -124,7 +133,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <Sparkles className="w-5 h-5 text-white" />
           </div>
           <span className={`text-xl font-bold tracking-tight text-slate-900 whitespace-nowrap ${collapsed ? 'md:hidden' : ''}`}>
-            FreshGreenOps
+            FGOS
           </span>
         </div>
 

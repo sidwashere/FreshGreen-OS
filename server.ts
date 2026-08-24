@@ -83,6 +83,8 @@ const WP_TEMPLATE_MAP: Record<string, string> = {
   'template-community-care.php': 'elementor_canvas',
   'template-recipe.php':         'elementor_canvas',
   'page-wide.php':               'elementor_header_footer',
+  'single-dtp-blog.php':         'elementor_header_footer',
+  'dtp-blog-template':           'elementor_header_footer',
 };
 function mapWpTemplate(slug: string): string {
   if (!slug || slug === 'default') return slug;
@@ -593,7 +595,10 @@ function parseHtmlIntoBlocks(html: string, title?: string, keyword?: string): an
   // walked headings only, silently dropping every <img> the model wrote.
   // data: URIs are skipped — they are base64 blobs that bloat Firestore and get
   // stripped by WordPress's allowed-protocol filter; real https URLs are kept.
+  // DEDUPLICATION: only one image per unique URL, hero image is excluded from
+  // image_banner blocks, and at most 1 in-article image block is kept.
   const imgRe = /<img\b[^>]*>/gi;
+  const seenSrcs = new Set<string>();
   const imgBlocks: any[] = [];
   let heroImg: { src: string; alt: string } | null = null;
   let imgMatch: RegExpExecArray | null;
@@ -602,7 +607,11 @@ function parseHtmlIntoBlocks(html: string, title?: string, keyword?: string): an
     const src = tag.match(/src\s*=\s*["']([^"']+)["']/i)?.[1] || '';
     if (!src || src.startsWith('data:')) continue;
     const alt = tag.match(/alt\s*=\s*["']([^"']*)["']/i)?.[1] || '';
-    if (!heroImg) heroImg = { src, alt };
+    // First valid image becomes the hero image — skip it for image_banner blocks.
+    if (!heroImg) { heroImg = { src, alt }; continue; }
+    // Deduplicate: skip if we already have this URL.
+    if (seenSrcs.has(src)) continue;
+    seenSrcs.add(src);
     imgBlocks.push({
       id: `block-${Date.now()}-img${imgBlocks.length}`,
       type: 'image_banner',
@@ -624,7 +633,11 @@ function parseHtmlIntoBlocks(html: string, title?: string, keyword?: string): an
     blocks[0].imageAlt = heroImg.alt || blocks[0].title || 'Article image';
   }
 
-  blocks.push(...imgBlocks.slice(0, 2));
+  // Insert ONE image right after the hero — never at the bottom.
+  const inArticleImg = imgBlocks.slice(0, 1);
+  if (inArticleImg.length && blocks.length > 0) {
+    blocks.splice(1, 0, ...inArticleImg);
+  }
 
   return blocks.slice(0, 10);
 }
@@ -780,7 +793,7 @@ app.post('/api/ai/generate-article', async (req, res) => {
     'X-Accel-Buffering': 'no',
   });
 
-  const { title, contentType, primaryKeyword, secondaryKeywords, seoBrief, brand, byokKeys, applyHumanization, targetWordCount, modelPref } = req.body;
+  const { title, contentType, primaryKeyword, secondaryKeywords, seoBrief, brand, byokKeys, applyHumanization, targetWordCount, modelPref, sheetContext } = req.body;
 
   const aiApiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || byokKeys?.gemini;
   let ai = aiApiKey ? new GoogleGenAI({ apiKey: aiApiKey }) : null;
@@ -860,7 +873,7 @@ SEO requirements (scored by an automated SEO analyzer, follow precisely):
 - Keep paragraphs short (under 150 words each) and sentences readable: NO sentence longer than 25 words, average under 20 words. Use transition words so every paragraph hands off to the next.
 - DIRECT ANSWER OPENING: Open the article with a definition-style sentence that answers the core question immediately, e.g. "[Primary keyword] is…" or "[Primary keyword] refers to…". This makes the article eligible for featured snippets and AI answer engines.
 - TL;DR SUMMARY: Immediately after the opening paragraph, add a short "Key takeaways" or "TL;DR" section as a <ul> with 3-5 bullet points summarising the article's main answers. This is scored by the analyzer.
-- Use at least TWO <img> tags with descriptive alt attributes containing the primary keyword (featured placeholder, e.g. <img src="https://placehold.co/1200x800?text=Alt" alt="...keyword...">). One near the top, one in the middle.
+- Use exactly ONE <img> tag with a descriptive alt attribute containing the primary keyword (e.g. <img src="https://placehold.co/1200x800?text=Alt" alt="...keyword...">). Place it near the top of the article, after the intro paragraph. Do NOT add more than one image — duplicates are stripped.
 - STRICT IMAGE RULE: never embed base64 / data:image URLs (huge, broken on WordPress). Use ONLY plain https:// image URLs — the placehold.co placeholder is ideal.
 - INTERNAL LINK RULE: Include at least ONE internal link (<a href="/blog/...">) referencing a topic the brand genuinely covers. Use generic, plausible link paths that match the brand's blog structure (e.g. /blog/benefits-of-natural-pet-treats, /blog/how-to-choose-the-right-pet-food). Never invent specific article titles or claim a linked page exists. Use descriptive anchor text that naturally fits the sentence.
 - EXTERNAL LINK RULE: Include at least TWO external links to authoritative, reputable sources that genuinely support your claims (e.g. RSPCA, PDSA, DEFRA, veterinary associations, peer-reviewed studies, government health bodies). Use <a href="https://www.rspca.org.uk/..."> with descriptive anchor text. Never link to spammy or low-quality sites. External links to trusted authorities are scored heavily.
@@ -875,13 +888,56 @@ SEO requirements (scored by an automated SEO analyzer, follow precisely):
     emit({ type: 'status', message: 'Connecting to the model…', percent: 4 });
     emit({ type: 'status', message: 'Analysing brief, keywords & brand voice…', percent: 8 });
 
+    // ── Build rich prompt from sheet context (if available) ──────────────
+    const sc = sheetContext && typeof sheetContext === 'object' ? sheetContext : null;
+
+    // Search intent — use the sheet's actual intent, not a generic fallback
+    const searchIntentText = sc?.searchIntent
+      ? `SEARCH INTENT: ${sc.searchIntent}`
+      : `SEARCH INTENT: This article targets an informational search query. Structure it as a complete, authoritative guide that directly answers the reader's question in the opening, then covers every related sub-topic with depth. Include a clear conclusion that summarises the key points.`;
+
+    // Longtail keywords — weave into subheadings and body
+    const longtailText = sc?.longtailKeywords
+      ? `\nLONGTAIL KEYWORDS TO INCLUDE NATURALLY: ${sc.longtailKeywords}. Use these as inspiration for subheadings (h2/h3) and weave them naturally into body paragraphs. Do NOT stuff them — each longtail should appear once or twice in context.`
+      : '';
+
+    // Additional keyword targets
+    const extraKeywordsText = sc?.keywords
+      ? `\nADDITIONAL KEYWORD TARGETS: ${sc.keywords}. These should also appear naturally throughout the article where they fit, supplementing the primary and secondary keywords.`
+      : '';
+
+    // Internal links — tell the AI exactly which articles to link to
+    const internalLinksText = sc?.internalLinks
+      ? `\nINTERNAL LINKS TO INCLUDE: The article must include natural internal links to these existing articles on the site: ${sc.internalLinks}. Use descriptive anchor text and link to plausible /blog/ paths (e.g. /blog/[slugified-title]). Each link should fit naturally in context — do not force them.`
+      : '';
+
+    // FAQ questions — the AI must answer these exact questions
+    const faqText = sc?.questionsPeopleAlsoAsk
+      ? `\nFAQ SECTION (MANDATORY): Include an FAQ section at the end of the article using an <h2> "Frequently Asked Questions" followed by <h3> for each question. You MUST answer these exact questions from the research data:\n${sc.questionsPeopleAlsoAsk.split(/[;\n]/).map((q: string) => `- ${q.trim()}`).filter(Boolean).join('\n')}\nEach answer must be a direct, concise 1-3 sentence response. The FAQ must flow naturally from the preceding content — not feel bolted on.`
+      : '';
+
+    // Call to action — where and how to convert readers
+    const ctaText = sc?.callToAction
+      ? `\nCALL TO ACTION: Near the end of the article (before the FAQ), include a natural, compelling call-to-action section. Use this CTA text as guidance: "${sc.callToAction}". Wrap it in a styled div or integrate it naturally into the closing paragraphs.`
+      : '';
+
+    // One-line summary — as additional brief context
+    const summaryText = sc?.oneLineSummary
+      ? `\nARTICLE SUMMARY: ${sc.oneLineSummary}`
+      : '';
+
     const prompt = `Write a comprehensive, highly engaging, human-sounding ${contentType === 'page' ? 'Landing Page' : 'Blog Article'}.
 Topic (the brief): "${title}"
+${summaryText}
 Target Primary Keyword: "${primaryKeyword || title}"
 Secondary Keywords: ${Array.isArray(secondaryKeywords) ? secondaryKeywords.join(', ') : secondaryKeywords || 'None'}
 Additional Context / Brief: "${seoBrief || 'Focus on high value, reader satisfaction, and conversion.'}"
-
-SEARCH INTENT: This article targets an informational search query. Structure it as a complete, authoritative guide that directly answers the reader's question in the opening, then covers every related sub-topic with depth. Include a clear conclusion that summarises the key points.
+${searchIntentText}
+${longtailText}
+${extraKeywordsText}
+${internalLinksText}
+${faqText}
+${ctaText}
 
 Headline: craft your own fresh article title as the single <h1> — do not repeat the topic text above verbatim as the headline.`;
 
@@ -3364,7 +3420,7 @@ app.post('/api/wp/test-connection', async (req, res) => {
         method: 'GET',
         headers: {
           'Authorization': authHeader,
-          'User-Agent': 'GreenOpsContentStudio/1.0',
+          'User-Agent': 'FGOS/1.0',
           'Accept': 'application/json'
         },
         signal: controller.signal
@@ -3645,7 +3701,7 @@ app.post('/api/wp/sync-content', async (req, res) => {
       if (!targetId && contentItem.slug) {
         const searchUrl = `${cleanUrl}${endpoint}?slug=${encodeURIComponent(contentItem.slug)}&status=any`;
         const searchRes = await fetch(searchUrl, {
-          headers: { "Authorization": authHeader, "User-Agent": "GreenOpsContentStudio/1.0" }
+          headers: { "Authorization": authHeader, "User-Agent": "FGOS/1.0" }
         });
         if (searchRes.ok) {
           const matches = await searchRes.json();
@@ -3662,7 +3718,7 @@ app.post('/api/wp/sync-content', async (req, res) => {
         // (or belongs to another site). Probe first so publish never dies on a
         // dead id — fall back to creating a fresh post instead.
         const probe = await fetch(`${cleanUrl}${endpoint}/${targetId}?context=edit`, {
-          headers: { "Authorization": authHeader, "User-Agent": "GreenOpsContentStudio/1.0" }
+          headers: { "Authorization": authHeader, "User-Agent": "FGOS/1.0" }
         });
         if (probe.status === 404) {
           targetId = undefined;
@@ -3675,7 +3731,7 @@ app.post('/api/wp/sync-content', async (req, res) => {
         headers: {
           "Authorization": authHeader,
           "Content-Type": "application/json",
-          "User-Agent": "GreenOpsContentStudio/1.0"
+          "User-Agent": "FGOS/1.0"
         },
         body: JSON.stringify(payload)
       });
@@ -3739,7 +3795,7 @@ app.post('/api/wp/get-post', async (req, res) => {
       headers: {
         'Authorization': authHeader,
         'Content-Type': 'application/json',
-        'User-Agent': 'GreenOpsContentStudio/1.0'
+        'User-Agent': 'FGOS/1.0'
       }
     });
     if (!wpRes.ok) {
@@ -3767,7 +3823,7 @@ app.post('/api/wp/list-posts', async (req, res) => {
     const wpRes = await fetch(
       `${cleanUrl}/wp-json/wp/v2/posts?per_page=${n}&status=publish&orderby=date&order=desc&_fields=id,title,link,slug,_embedded&_embed=wp:featuredmedia`,
       {
-        headers: { 'Authorization': authHeader, 'Content-Type': 'application/json', 'User-Agent': 'GreenOpsContentStudio/1.0' },
+        headers: { 'Authorization': authHeader, 'Content-Type': 'application/json', 'User-Agent': 'FGOS/1.0' },
       },
     );
     if (!wpRes.ok) {
@@ -3814,7 +3870,7 @@ app.get('/api/wp/products', async (req, res) => {
       return res.json({ success: true, products: cached.data, cached: true });
     }
     const wcRes = await fetch(`${cleanUrl}/wp-json/wc/store/v1/products?per_page=20&status=publish`, {
-      headers: { 'User-Agent': 'GreenOpsContentStudio/1.0' },
+      headers: { 'User-Agent': 'FGOS/1.0' },
     });
     if (!wcRes.ok) {
       return res.status(wcRes.status).json({ success: false, message: `WooCommerce API Error (${wcRes.status})` });
@@ -3868,7 +3924,7 @@ app.get('/api/wc/products', async (req, res) => {
     if (search) url.searchParams.set('search', search);
 
     const wcRes = await fetch(url.toString(), {
-      headers: { 'User-Agent': 'GreenOpsContentStudio/1.0' },
+      headers: { 'User-Agent': 'FGOS/1.0' },
     });
     if (!wcRes.ok) {
       const body = await wcRes.text();
@@ -3922,7 +3978,7 @@ app.get('/api/wc/orders', async (req, res) => {
     const url = wcAuthUrl(wpUrl, key, secret, `/orders?per_page=${perPage}&page=${page}&orderby=date&order=desc`);
 
     const wcRes = await fetch(url, {
-      headers: { 'User-Agent': 'GreenOpsContentStudio/1.0' },
+      headers: { 'User-Agent': 'FGOS/1.0' },
     });
     if (!wcRes.ok) {
       const body = await wcRes.text();
@@ -3966,13 +4022,13 @@ app.get('/api/wc/reports', async (req, res) => {
 
     const [salesRes, ordersRes, customersRes] = await Promise.all([
       fetch(wcAuthUrl(wpUrl, key, secret, '/reports/sales'), {
-        headers: { 'User-Agent': 'GreenOpsContentStudio/1.0' },
+        headers: { 'User-Agent': 'FGOS/1.0' },
       }),
       fetch(wcAuthUrl(wpUrl, key, secret, '/reports/orders/totals'), {
-        headers: { 'User-Agent': 'GreenOpsContentStudio/1.0' },
+        headers: { 'User-Agent': 'FGOS/1.0' },
       }),
       fetch(wcAuthUrl(wpUrl, key, secret, '/reports/customers/totals'), {
-        headers: { 'User-Agent': 'GreenOpsContentStudio/1.0' },
+        headers: { 'User-Agent': 'FGOS/1.0' },
       }),
     ]);
 
@@ -4003,7 +4059,7 @@ app.get('/api/wc/categories', async (req, res) => {
     const url = wcAuthUrl(wpUrl, key, secret, '/products/categories?per_page=100');
 
     const wcRes = await fetch(url, {
-      headers: { 'User-Agent': 'GreenOpsContentStudio/1.0' },
+      headers: { 'User-Agent': 'FGOS/1.0' },
     });
     if (!wcRes.ok) {
       const body = await wcRes.text();
@@ -4036,7 +4092,7 @@ app.get('/api/wc/test', async (req, res) => {
     }
 
     const wcRes = await fetch(wcAuthUrl(wpUrl, key, secret, '/system_status'), {
-      headers: { 'User-Agent': 'GreenOpsContentStudio/1.0' },
+      headers: { 'User-Agent': 'FGOS/1.0' },
     });
 
     if (wcRes.ok) {
@@ -4079,7 +4135,7 @@ app.post('/api/wp/delete-post', async (req, res) => {
         headers: {
           'Authorization': authHeader,
           'Content-Type': 'application/json',
-          'User-Agent': 'GreenOpsContentStudio/1.0'
+          'User-Agent': 'FGOS/1.0'
         }
       });
 
@@ -4237,7 +4293,7 @@ async function uploadImageToWp(
       'Authorization': authHeader,
       'Content-Disposition': `attachment; filename="${fileExt}.${(fileMime.split('/')[1] || 'jpg').replace('jpeg', 'jpg')}"`,
       'Content-Type': fileMime,
-      'User-Agent': 'GreenOpsContentStudio/1.0'
+      'User-Agent': 'FGOS/1.0'
     },
     body: imageBuffer
   });
@@ -4279,6 +4335,161 @@ app.post('/api/wp/upload-media', async (req, res) => {
         message: `Failed to upload image to WordPress: ${uploadErr.message}`
       });
     }
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ==========================================
+// 2b. CODE SNIPPETS — Push FGOS style preserver to WordPress
+// ==========================================
+// Installs the "FGOS Style Preserver" snippet via the Code Snippets plugin
+// REST API. Idempotent: if the snippet already exists, it updates it; otherwise
+// it creates and activates it. This is the single fix that makes published
+// articles retain their <style> blocks, inline styles, and HTML structure.
+const FGOS_SNIPPET_CODE = `/**
+ * FGOS (Fresh Green Operating System) — WordPress Styling Preserver
+ *
+ * Allows <style> tags and HTML5 elements in post content,
+ * disables wpautop so structured HTML is preserved exactly.
+ */
+
+// Allow <style> + HTML5 tags in KSES filter
+add_filter( 'wp_kses_allowed_html', function ( $allowed, $context ) {
+    if ( $context === 'post' || $context === 'data' ) {
+        $allowed['style'] = array();
+        foreach ( array( 'section', 'header', 'footer', 'aside', 'figure' ) as $tag ) {
+            $allowed[ $tag ] = array( 'class' => true, 'style' => true, 'id' => true );
+        }
+        $allowed['figcaption'] = array( 'class' => true, 'style' => true );
+        $allowed['details'] = array( 'class' => true, 'style' => true, 'open' => true );
+        $allowed['summary'] = array( 'class' => true, 'style' => true );
+        foreach ( array( 'div', 'span', 'p', 'a', 'img', 'ul', 'ol', 'li',
+                         'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+                         'blockquote', 'strong', 'em', 'br', 'hr',
+                         'input', 'button', 'form', 'label' ) as $tag ) {
+            if ( ! isset( $allowed[ $tag ] ) ) $allowed[ $tag ] = array();
+            foreach ( array( 'style', 'class', 'id', 'href', 'src', 'alt',
+                             'title', 'loading', 'target', 'rel', 'placeholder',
+                             'required', 'type', 'name', 'value', 'method',
+                             'action', 'width', 'height' ) as $attr ) {
+                $allowed[ $tag ][ $attr ] = true;
+            }
+        }
+    }
+    return $allowed;
+}, 10, 2 );
+
+// Disable wpautop for post content
+remove_filter( 'the_content', 'wpautop', 10 );
+remove_filter( 'the_excerpt', 'wpautop', 10 );
+`;
+
+app.post('/api/wp/install-snippet', async (req, res) => {
+  try {
+    const { brand } = req.body;
+    if (!brand?.wpUrl || !brand?.wpUsername || !brand?.wpAppPassword) {
+      return res.status(400).json({ success: false, message: 'Brand WP credentials required.' });
+    }
+    const cleanUrl = brand.wpUrl.replace(/\/+$/, '');
+    const authHeader = 'Basic ' + Buffer.from(`${brand.wpUsername}:${brand.wpAppPassword}`).toString('base64');
+    const headers = { 'Authorization': authHeader, 'Content-Type': 'application/json', 'User-Agent': 'FGOS/1.0' };
+    const snippetName = 'FGOS Style Preserver';
+    const snippetDescription = 'Allows <style> tags, HTML5 elements, and disables wpautop for article content from FGOS (Fresh Green Operating System).';
+
+    // 1. Check if snippet already exists
+    let existingId: number | null = null;
+    try {
+      const listRes = await fetch(`${cleanUrl}/wp-json/code-snippets/v1/snippets?search=${encodeURIComponent(snippetName)}`, { headers, signal: AbortSignal.timeout(10000) });
+      if (listRes.ok) {
+        const snippets = await listRes.json();
+        if (Array.isArray(snippets) && snippets.length) {
+          existingId = snippets[0].id;
+        }
+      }
+    } catch { /* snippet API may not be available */ }
+
+    const body = JSON.stringify({
+      name: snippetName,
+      description: snippetDescription,
+      code: FGOS_SNIPPET_CODE,
+      scope: 'global',       // run everywhere (front-end + admin)
+      active: true,           // activate immediately
+      priority: 10,
+    });
+
+    let result: any;
+    if (existingId) {
+      // Update existing snippet
+      const updateRes = await fetch(`${cleanUrl}/wp-json/code-snippets/v1/snippets/${existingId}`, { method: 'POST', headers, body, signal: AbortSignal.timeout(15000) });
+      if (!updateRes.ok) {
+        const errText = await updateRes.text();
+        return res.status(updateRes.status).json({ success: false, message: `Failed to update snippet: ${errText}` });
+      }
+      result = await updateRes.json();
+      return res.json({ success: true, message: `Snippet updated and activated on ${brand.name || cleanUrl}`, snippetId: result.id || existingId, action: 'updated' });
+    } else {
+      // Create new snippet
+      const createRes = await fetch(`${cleanUrl}/wp-json/code-snippets/v1/snippets`, { method: 'POST', headers, body, signal: AbortSignal.timeout(15000) });
+      if (!createRes.ok) {
+        const errText = await createRes.text();
+        return res.status(createRes.status).json({ success: false, message: `Failed to create snippet: ${errText}` });
+      }
+      result = await createRes.json();
+      return res.json({ success: true, message: `Snippet installed and activated on ${brand.name || cleanUrl}`, snippetId: result.id, action: 'created' });
+    }
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Snippet install failed' });
+  }
+});
+
+// Batch install snippet to ALL brands
+app.post('/api/wp/install-snippet-all', async (req, res) => {
+  try {
+    const { brands } = req.body;
+    if (!Array.isArray(brands) || !brands.length) {
+      return res.status(400).json({ success: false, message: 'brands array required.' });
+    }
+    const results: Array<{ brand: string; url: string; ok: boolean; message: string }> = [];
+    for (const brand of brands) {
+      if (!brand?.wpUrl || !brand?.wpUsername || !brand?.wpAppPassword) {
+        results.push({ brand: brand?.name || 'unknown', url: brand?.wpUrl || '', ok: false, message: 'Missing WP credentials' });
+        continue;
+      }
+      try {
+        const cleanUrl = brand.wpUrl.replace(/\/+$/, '');
+        const authHeader = 'Basic ' + Buffer.from(`${brand.wpUsername}:${brand.wpAppPassword}`).toString('base64');
+        const headers = { 'Authorization': authHeader, 'Content-Type': 'application/json', 'User-Agent': 'FGOS/1.0' };
+        const snippetName = 'FGOS Style Preserver';
+
+        let existingId: number | null = null;
+        try {
+          const listRes = await fetch(`${cleanUrl}/wp-json/code-snippets/v1/snippets?search=${encodeURIComponent(snippetName)}`, { headers, signal: AbortSignal.timeout(10000) });
+          if (listRes.ok) {
+            const snippets = await listRes.json();
+            if (Array.isArray(snippets) && snippets.length) existingId = snippets[0].id;
+          }
+        } catch { /* ok */ }
+
+        const body = JSON.stringify({ name: snippetName, description: 'Allows <style> tags, HTML5 elements, and disables wpautop for article content.', code: FGOS_SNIPPET_CODE, scope: 'global', active: true, priority: 10 });
+        let action = 'created';
+        if (existingId) {
+          const updateRes = await fetch(`${cleanUrl}/wp-json/code-snippets/v1/snippets/${existingId}`, { method: 'POST', headers, body, signal: AbortSignal.timeout(15000) });
+          if (!updateRes.ok) { results.push({ brand: brand.name, url: cleanUrl, ok: false, message: `Update failed: ${updateRes.status}` }); continue; }
+          await updateRes.json();
+          action = 'updated';
+        } else {
+          const createRes = await fetch(`${cleanUrl}/wp-json/code-snippets/v1/snippets`, { method: 'POST', headers, body, signal: AbortSignal.timeout(15000) });
+          if (!createRes.ok) { results.push({ brand: brand.name, url: cleanUrl, ok: false, message: `Create failed: ${createRes.status}` }); continue; }
+          await createRes.json();
+        }
+        results.push({ brand: brand.name, url: cleanUrl, ok: true, message: `Snippet ${action} and activated` });
+      } catch (e: any) {
+        results.push({ brand: brand.name, url: brand.wpUrl, ok: false, message: e.message || 'Failed' });
+      }
+    }
+    const allOk = results.every((r) => r.ok);
+    return res.json({ success: allOk, results });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err.message });
   }
@@ -4549,7 +4760,7 @@ app.post('/api/wp/preview', async (req, res) => {
       try {
         const endpoint = contentItem.contentType === 'page' ? 'pages' : 'posts';
         const wpRes = await fetch(`${baseUrl}/wp-json/wp/v2/${endpoint}/${contentItem.wpPostId}?context=view`, {
-          headers: { 'Authorization': authHeader, 'User-Agent': 'GreenOpsContentStudio/1.0' },
+          headers: { 'Authorization': authHeader, 'User-Agent': 'FGOS/1.0' },
           signal: AbortSignal.timeout(15000),
         });
         if (wpRes.ok) {
@@ -4646,7 +4857,7 @@ const WP_OVERVIEW_CACHE_TTL = 20 * 1000; // 20s so 60s polling stays live
 function wpAuthHeaders(username?: string, appPassword?: string): Record<string, string> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'User-Agent': 'GreenOpsContentStudio/1.0',
+    'User-Agent': 'FGOS/1.0',
   };
   if (username && appPassword) {
     headers['Authorization'] = 'Basic ' + Buffer.from(`${username}:${appPassword}`).toString('base64');
@@ -5019,9 +5230,362 @@ app.post('/api/wp/site-perf', async (req, res) => {
   }
 });
 
+// ══════════════════════════════════════════════════════════════════════════════
+// AUTOBLOG — Google Sheet → AI Generate → Schedule → Publish
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Parse a Google Sheet URL into its spreadsheet ID and optional GID.
+ * Accepts:
+ *   https://docs.google.com/spreadsheets/d/{ID}/edit#gid={GID}
+ *   https://docs.google.com/spreadsheets/d/{ID}/edit
+ *   https://docs.google.com/spreadsheets/d/{ID}/gviz/tq
+ *   Just the spreadsheet ID itself
+ */
+function parseSheetUrl(url: string): { spreadsheetId: string; gid: string | null } {
+  const trimmed = url.trim();
+  // Direct ID (no slashes, reasonable length)
+  if (/^[a-zA-Z0-9_-]{20,}$/.test(trimmed) && !trimmed.includes('/')) {
+    return { spreadsheetId: trimmed, gid: null };
+  }
+  const idMatch = trimmed.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+  if (!idMatch) throw new Error('Could not extract a Google Sheet ID from the URL');
+  const gidMatch = trimmed.match(/[#&?]gid=(\d+)/);
+  return { spreadsheetId: idMatch[1], gid: gidMatch ? gidMatch[1] : null };
+}
+
+/**
+ * Fetch a Google Sheet via the gviz/tq endpoint and parse its JSON response.
+ * Returns { headers, rows, tabNames } for the default tab (GID 0).
+ * The sheet must be publicly accessible (Anyone with the link can view).
+ */
+async function fetchSheetGviz(spreadsheetId: string, gid: string = '0'): Promise<{ headers: string[]; rows: Record<string, string>[]; tabName: string }> {
+  const url = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/gviz/tq?tqx=out:json&gid=${gid}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15_000);
+  let resp: Response;
+  try {
+    resp = await fetch(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+  if (!resp.ok) throw new Error(`Google Sheet fetch failed (HTTP ${resp.status}). Is the sheet publicly shared?`);
+  const text = await resp.text();
+
+  // Response format: /*O_o*/\ngoogle.visualization.Query.setResponse({...});
+  // Strip the XSSI prefix and trailing paren/semicolon
+  const jsonStart = text.indexOf('{');
+  const jsonEnd = text.lastIndexOf('}');
+  if (jsonStart === -1 || jsonEnd === -1) {
+    throw new Error('Could not parse Google Sheet response — no JSON found');
+  }
+  const jsonStr = text.slice(jsonStart, jsonEnd + 1);
+
+  let data: any;
+  try {
+    data = JSON.parse(jsonStr);
+  } catch {
+    throw new Error('Could not parse Google Sheet JSON response');
+  }
+
+  if (data?.status === 'error') {
+    throw new Error(data?.errors?.[0]?.message || 'Google Sheet returned an error');
+  }
+
+  const table = data?.table;
+  if (!table?.cols || !table?.rows) {
+    throw new Error('No tabular data found in the Google Sheet response');
+  }
+
+  // Extract headers from cols
+  const headers: string[] = table.cols.map((col: any) => (col.label || col.id || '').trim()).filter(Boolean);
+
+  // Extract rows from rows[].c[] (cells)
+  const rows: Record<string, string>[] = [];
+  for (const row of table.rows) {
+    if (!row?.c) continue;
+    const record: Record<string, string> = {};
+    let hasData = false;
+    for (let j = 0; j < headers.length; j++) {
+      const cell = row.c[j];
+      const val = cell?.v != null ? String(cell.v) : (cell?.f || '');
+      record[headers[j]] = val.trim();
+      if (val.trim()) hasData = true;
+    }
+    if (hasData) rows.push(record);
+  }
+
+  return { headers, rows, tabName: data?.reqs?.[0]?.wrappers?.[0]?.tab?.label || 'Sheet1' };
+}
+
+/** Map a spreadsheet row (from the OC Blog Strategy schema) to a content item shape. */
+function mapSheetRowToContentItem(
+  row: Record<string, string>,
+  brandId: string,
+  sheetId: string,
+  sheetName: string,
+  rowIndex: number,
+): {
+  title: string;
+  initialPrompt: string;
+  primaryKeyword: string;
+  secondaryKeywords: string[];
+  seoBrief: string;
+  searchIntent: string;
+  cta: string;
+  internalLinks: string[];
+  questionsPeopleAlsoAsk: string[];
+  longtailKeywords: string[];
+  sourceRow: number;
+  sheetContext: Record<string, string>;
+} {
+  // Flexible column matching: try exact headers, then fuzzy contains
+  const get = (keys: string[]): string => {
+    for (const k of keys) {
+      const match = Object.keys(row).find((h) => h.toLowerCase().includes(k.toLowerCase()));
+      if (match && row[match]) return row[match];
+    }
+    return '';
+  };
+
+  const title = get(['Blog Title', 'Title', 'Headline']) || 'Untitled Blog Post';
+  const summary = get(['One Line Summary', 'Summary', 'Description', 'Brief']);
+  const primaryKeyword = get(['Primary Keyword', 'Primary', 'Focus Keyword', 'Keyword']);
+  const secondaryKeywordsRaw = get(['Secondary Keywords', 'Secondary', 'LSI Keywords']);
+  const intent = get(['Search Intent', 'Intent', 'User Intent']);
+  const cta = get(['Call to Action', 'CTA']);
+  const internalLinksRaw = get(['Internal Links', 'Links']);
+  const questionsRaw = get(['Questions People Also Ask', 'Questions', 'FAQ']);
+  const keywordsRaw = get(['Keywords', 'Keywords (All)']);
+  const longtailRaw = get(['Longtail Keywords', 'Longtail', 'Long-tail']);
+  const categoryId = get(['Supporting Advice Blogs', 'Category', 'Category ID']);
+  const tipNoRaw = get(['Tip No.', 'Tip No', 'Tip', 'Number']);
+  const sheetStatus = get(['Status']);
+
+  // Build the full sheet context — every column is preserved
+  const sheetContext: Record<string, string> = {
+    categoryId,
+    tipNo: tipNoRaw,
+    blogTitle: title,
+    oneLineSummary: summary,
+    sheetStatus,
+    primaryKeyword,
+    secondaryKeywords: secondaryKeywordsRaw,
+    internalLinks: internalLinksRaw,
+    searchIntent: intent,
+    callToAction: cta,
+    questionsPeopleAlsoAsk: questionsRaw,
+    keywords: keywordsRaw,
+    longtailKeywords: longtailRaw,
+  };
+
+  return {
+    title,
+    initialPrompt: summary || title,
+    primaryKeyword,
+    secondaryKeywords: secondaryKeywordsRaw ? secondaryKeywordsRaw.split(/[,;|]/).map((s) => s.trim()).filter(Boolean) : [],
+    seoBrief: intent || summary || `Informational article about ${title}`,
+    searchIntent: intent,
+    cta,
+    internalLinks: internalLinksRaw ? internalLinksRaw.split(/[,;|]/).map((s) => s.trim()).filter(Boolean) : [],
+    questionsPeopleAlsoAsk: questionsRaw ? questionsRaw.split(/[;\n]/).map((s) => s.trim()).filter(Boolean) : [],
+    longtailKeywords: longtailRaw ? longtailRaw.split(/[;\n]/).map((s) => s.trim()).filter(Boolean) : [],
+    sourceRow: rowIndex,
+    sheetContext,
+  };
+}
+
+// ── AutoBlog API Endpoints ──────────────────────────────────────────────────
+
+/** List tabs in a publicly shared Google Sheet by probing GIDs. */
+app.post('/api/autoblog/list-tabs', async (req, res) => {
+  try {
+    const { sheetUrl } = req.body;
+    if (!sheetUrl) return res.status(400).json({ error: 'sheetUrl is required' });
+    const { spreadsheetId } = parseSheetUrl(sheetUrl);
+
+    // Probe GIDs 0–9, then known large GIDs. Stop after 3 consecutive empty results.
+    const candidateGids = ['0','1','2','3','4','5','6','7','8','9','102378141','1594914000','383449943'];
+    const tabs: { name: string; gid: string; rowCount: number; firstCol: string }[] = [];
+    let misses = 0;
+
+    for (const gid of candidateGids) {
+      if (misses >= 3 && gid.length <= 2) continue; // skip low GIDs after 3 misses but still try known ones
+      try {
+        const result = await fetchSheetGviz(spreadsheetId, gid);
+        if (result.rows.length > 0) {
+          const tabName = result.headers[0] || `Sheet (GID ${gid})`;
+          tabs.push({ name: tabName, gid, rowCount: result.rows.length, firstCol: result.headers[0] || '' });
+          misses = 0;
+        } else {
+          misses++;
+        }
+      } catch {
+        misses++;
+      }
+    }
+
+    // Deduplicate by name (GID 0 often aliases to the first real tab)
+    const seen = new Set<string>();
+    const deduped = tabs.filter((t) => {
+      if (seen.has(t.name)) return false;
+      seen.add(t.name);
+      return true;
+    });
+
+    if (deduped.length === 0) {
+      deduped.push({ name: 'Sheet1', gid: '0', rowCount: 0, firstCol: '' });
+    }
+
+    return res.json({ tabs: deduped });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to list sheet tabs' });
+  }
+});
+
+/** Fetch and parse a Google Sheet, returning structured rows. */
+app.post('/api/autoblog/fetch-sheet', async (req, res) => {
+  try {
+    const { sheetUrl, gid } = req.body;
+    if (!sheetUrl) return res.status(400).json({ error: 'sheetUrl is required' });
+    const { spreadsheetId, gid: defaultGid } = parseSheetUrl(sheetUrl);
+    const targetGid = gid || defaultGid || '0';
+
+    const result = await fetchSheetGviz(spreadsheetId, targetGid);
+
+    return res.json({
+      spreadsheetId,
+      gid: targetGid,
+      rowCount: result.rows.length,
+      headers: result.headers,
+      rows: result.rows,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to fetch sheet data' });
+  }
+});
+
+/** Import sheet rows as Planned content items into Firestore. */
+app.post('/api/autoblog/import', async (req, res) => {
+  try {
+    const { rows, brandId, sheetId, sheetName, existingItems } = req.body;
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return res.status(400).json({ error: 'rows array is required and must not be empty' });
+    }
+
+    const imported: any[] = [];
+    const skipped: number[] = [];
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const sourceRow = i + 2; // +2 because row 1 is header, 0-indexed loop
+      const mapped = mapSheetRowToContentItem(row, brandId, sheetId || '', sheetName || '', sourceRow);
+
+      // Skip if title is empty or "Untitled"
+      if (!mapped.title || mapped.title === 'Untitled Blog Post') {
+        skipped.push(sourceRow);
+        continue;
+      }
+
+      // Skip duplicates by title
+      if (Array.isArray(existingItems) && existingItems.some((e: any) => e?.title === mapped.title)) {
+        skipped.push(sourceRow);
+        continue;
+      }
+
+      imported.push({
+        ...mapped,
+        sourceRow,
+        sheetName: sheetName || 'Sheet1',
+      });
+    }
+
+    return res.json({ imported, skipped, total: rows.length });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to import sheet rows' });
+  }
+});
+
+/** Auto-publish endpoint — called by the client on an interval to check for due items. */
+app.post('/api/autoblog/check-publish', async (req, res) => {
+  try {
+    const { dueItems, brands } = req.body;
+    if (!Array.isArray(dueItems) || dueItems.length === 0) {
+      return res.json({ published: 0, errors: [] });
+    }
+
+    const results: { itemId: string; success: boolean; message: string; wpPostId?: number }[] = [];
+
+    for (const item of dueItems) {
+      const brand = brands?.find((b: any) => b.id === (item.autoBlogOverrides?.brandId || item.brandId));
+      if (!brand || !brand.wpUrl || !brand.wpUsername) {
+        results.push({ itemId: item.id, success: false, message: 'No valid brand connection' });
+        continue;
+      }
+
+      try {
+        const cleanUrl = brand.wpUrl.replace(/\/+$/, '');
+        const authHeader = 'Basic ' + Buffer.from(`${brand.wpUsername}:${brand.wpAppPassword || ''}`).toString('base64');
+        const wpStatus = item.autoBlogOverrides?.wpStatus || 'publish';
+        const wpTemplate = item.autoBlogOverrides?.wpTemplate || 'elementor_header_footer';
+
+        const payload: any = {
+          title: item.title,
+          content: item.bodyHtml,
+          status: wpStatus,
+          slug: item.slug || undefined,
+          template: wpTemplate !== 'default' ? mapWpTemplate(wpTemplate) : undefined,
+        };
+
+        if (item.featuredMediaId) {
+          payload.featured_media = item.featuredMediaId;
+        }
+
+        const isUpdate = item.wpPostId;
+        const endpoint = isUpdate
+          ? `${cleanUrl}/wp-json/wp/v2/posts/${item.wpPostId}`
+          : `${cleanUrl}/wp-json/wp/v2/posts`;
+
+        const resp = await fetch(endpoint, {
+          method: isUpdate ? 'POST' : 'POST',
+          headers: { 'Authorization': authHeader, 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        if (!resp.ok) {
+          const errBody = await resp.text();
+          throw new Error(`WordPress API ${resp.status}: ${errBody.slice(0, 200)}`);
+        }
+
+        const wpPost = await resp.json();
+        results.push({
+          itemId: item.id,
+          success: true,
+          message: `Published as ${wpStatus}`,
+          wpPostId: wpPost.id,
+        });
+      } catch (err: any) {
+        results.push({
+          itemId: item.id,
+          success: false,
+          message: err?.message || 'Publish failed',
+        });
+      }
+    }
+
+    return res.json({
+      published: results.filter((r) => r.success).length,
+      errors: results.filter((r) => !r.success),
+      results,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to check auto-publish queue' });
+  }
+});
+
 app.get('/api/export/sql', (req, res) => {
-  const sql = `-- GreenOps Content Studio - MySQL Schema for Hostinger / cPanel
--- Database: greenops_studio
+  const sql = `-- FGOS (Fresh Green Operating System) - MySQL Schema for Hostinger / cPanel
+-- Database: fgos_studio
 
 CREATE TABLE IF NOT EXISTS \`brands\` (
   \`id\` INT AUTO_INCREMENT PRIMARY KEY,
@@ -5063,7 +5627,7 @@ CREATE TABLE IF NOT EXISTS \`content_items\` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 `;
   res.setHeader('Content-Type', 'text/plain');
-  res.setHeader('Content-Disposition', 'attachment; filename="greenops_studio_schema.sql"');
+  res.setHeader('Content-Disposition', 'attachment; filename="fgos_studio_schema.sql"');
   return res.send(sql);
 });
 
@@ -5076,7 +5640,7 @@ use Illuminate\\Support\\Facades\\Http;
 use Illuminate\\Support\\Facades\\Log;
 
 /**
- * GreenOps Content Studio - WordPress REST API Service Connector
+ * FGOS (Fresh Green Operating System) - WordPress REST API Service Connector
  * Optimized for Laravel 11 on Hostinger / cPanel
  */
 class WordPressConnector
@@ -5243,8 +5807,16 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`GreenOps Content Studio running on http://0.0.0.0:${PORT}`);
+    console.log(`FGOS (Fresh Green Operating System) running on http://0.0.0.0:${PORT}`);
   });
 }
+
+// Prevent the server from crashing on unhandled rejections
+process.on('unhandledRejection', (err) => {
+  console.error('Unhandled rejection:', err);
+});
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err);
+});
 
 startServer();

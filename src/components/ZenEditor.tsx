@@ -508,27 +508,8 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
       }
       return b;
     });
-    if (
-      secondaryImg?.url &&
-      !remappedBlocks.some((b: any) => b.type === 'image_banner' && b.imageUrl === secondaryImg.url) &&
-      !remappedBlocks.some((b: any) => b.type === 'hero' && b.imageUrl === secondaryImg.url)
-    ) {
-      remappedBlocks.push({
-        id: `block-img-${Date.now()}`,
-        type: 'image_banner',
-        title: '',
-        subtitle: '',
-        content: '',
-        buttonText: '',
-        buttonUrl: '#',
-        badge: '',
-        keywords: '',
-        imageLayout: 'full',
-        imageUrl: secondaryImg.url,
-        imageAlt: 'Article image',
-      });
-    }
-
+    // Secondary image block removed — only the hero image is shown, at the top.
+    // No image is ever appended at the bottom of the article.
     setEditingItem((prev) => ({
       ...prev,
       // The AI's crafted h1 becomes the article's real title (the seed stays

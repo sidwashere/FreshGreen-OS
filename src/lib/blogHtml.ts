@@ -18,6 +18,8 @@ export const FONT_STACKS: Record<string, string> = {
   helvetica: "'Helvetica Neue', Arial, sans-serif",
   verdana: 'Verdana, Geneva, Tahoma, sans-serif',
   jost: "'Jost', 'Helvetica Neue', Arial, sans-serif",
+  cormorant: "'Cormorant Garamond', 'Palatino Linotype', Palatino, Georgia, serif",
+  roboto: "'Roboto', 'Helvetica Neue', Arial, sans-serif",
   mono: "'SF Mono', Menlo, Consolas, 'Courier New', monospace",
 };
 
@@ -28,8 +30,22 @@ export const FONT_STACK_LABELS: Record<string, string> = {
   helvetica: 'Helvetica (editorial sans)',
   verdana: 'Verdana (wide, readable)',
   jost: 'Jost (brand signature sans)',
+  cormorant: 'Cormorant Garamond (editorial display)',
+  roboto: 'Roboto (clean body sans)',
   mono: 'Monospace (technical)',
 };
+
+/**
+ * Google Fonts required by the article renderer. Each entry is a
+ * `family=<Name>:wght@...` query fragment for the Fonts API. The scoped
+ * `<style>` block injects an `@import` so fonts load once per article,
+ * matching the site's own Google Fonts (Jost, Cormorant Garamond, Roboto).
+ */
+export const GOOGLE_FONT_IMPORTS = [
+  'Jost:wght@400;500;600;700;800',
+  'Cormorant+Garamond:wght@400;500;600;700',
+  'Roboto:wght@400;500;700',
+];
 
 export const ART_REGION_START = '<!--fg-art:start-->';
 export const ART_REGION_END = '<!--fg-art:end-->';
@@ -68,22 +84,25 @@ export const softTint = (hex: string) => tint(hex, 0.92);
 // ---------------------------------------------------------------------------
 export function resolveBlogStyle(brand?: Pick<Brand, 'primaryColor' | 'blogStyle'> | null): BlogStyleKit {
   const raw = brand?.primaryColor || '';
-  const primary = /^#[0-9a-fA-F]{3,8}$/.test(raw) ? raw : '#10b981';
+  // Default to DTP's dark forest green when no brand colour is set.
+  const primary = /^#[0-9a-fA-F]{3,8}$/.test(raw) ? raw : '#203B32';
   const s = brand?.blogStyle || {};
-  const headingKey = s.headingFont && FONT_STACKS[s.headingFont] ? s.headingFont : 'georgia';
-  const bodyKey = s.bodyFont && FONT_STACKS[s.bodyFont] ? s.bodyFont : 'system';
+  // Match the DTP site: Jost for headings, Roboto for body.
+  const headingKey = s.headingFont && FONT_STACKS[s.headingFont] ? s.headingFont : 'jost';
+  const bodyKey = s.bodyFont && FONT_STACKS[s.bodyFont] ? s.bodyFont : 'roboto';
   return {
     primary,
     secondary: s.secondary || tint(primary, 0.88),
-    accent: s.accent || '#f59e0b',
+    // DTP gold accent — matches the site's C9A24A.
+    accent: s.accent || '#C9A24A',
     surface: s.surface || '#ffffff',
-    band: s.band || shade(primary, 0.32),
-    text: s.text || '#1f2937',
-    muted: s.muted || '#64748b',
+    band: s.band || '#203B32',
+    text: s.text || '#2D3748',
+    muted: s.muted || '#718096',
     headingFont: FONT_STACKS[headingKey],
     bodyFont: FONT_STACKS[bodyKey],
-    radius: typeof s.radius === 'number' ? Math.min(32, Math.max(0, Math.round(s.radius))) : 14,
-    buttonStyle: s.buttonStyle || 'solid',
+    radius: typeof s.radius === 'number' ? Math.min(32, Math.max(0, Math.round(s.radius))) : 8,
+    buttonStyle: s.buttonStyle || 'outline',
   };
 }
 
@@ -179,9 +198,100 @@ export function figureHtmlFor(block: Pick<VisualBlock, 'id' | 'imageUrl' | 'imag
 // enhancements are lost.
 // ---------------------------------------------------------------------------
 function scopedStyles(scope: string, kit: BlogStyleKit): string {
+  const fontImport = GOOGLE_FONT_IMPORTS.map((f) => `family=${f}`).join('&');
   return `<style>
+/* === Google Fonts (matches the site's Jost + Cormorant Garamond + Roboto) === */
+@import url('https://fonts.googleapis.com/css2?${fontImport}&display=swap');
+
+/* === Box-sizing reset === */
 .fg-art-${scope} { box-sizing: border-box; }
 .fg-art-${scope} *, .fg-art-${scope} *::before, .fg-art-${scope} *::after { box-sizing: border-box; }
+
+/* === Theme CSS override — nuclear specificity: :is() boosts specificity,
+     all:unset !important wipes any elementor/theme rule, then we re-set
+     every property we care about with !important. Works regardless of whether
+     the content sits inside .entry-content, .post-content, article, or is
+     rendered directly by Elementor's elementor_header_footer template. ========== */
+:is(.fg-art-${scope}) h2,
+:is(.entry-content, .post-content, article) .fg-art-${scope} h2 {
+  all: unset !important; display: block !important; box-sizing: border-box !important;
+  margin: 32px 0 16px !important;
+  font-family: ${kit.headingFont} !important;
+  font-size: clamp(22px,3.2vw,30px) !important;
+  line-height: 1.25 !important;
+  color: ${kit.text} !important;
+  font-weight: 700 !important;
+}
+:is(.fg-art-${scope}) h3,
+:is(.entry-content, .post-content, article) .fg-art-${scope} h3 {
+  all: unset !important; display: block !important; box-sizing: border-box !important;
+  margin: 24px 0 12px !important;
+  font-family: ${kit.headingFont} !important;
+  font-size: clamp(18px,2.6vw,24px) !important;
+  line-height: 1.3 !important;
+  color: ${kit.text} !important;
+  font-weight: 700 !important;
+}
+:is(.fg-art-${scope}) p,
+:is(.entry-content, .post-content, article) .fg-art-${scope} p {
+  all: unset !important; display: block !important; box-sizing: border-box !important;
+  margin: 0 0 20px !important;
+  font-size: 17px !important;
+  line-height: 1.75 !important;
+  color: ${kit.text} !important;
+}
+:is(.fg-art-${scope}) a,
+:is(.entry-content, .post-content, article) .fg-art-${scope} a {
+  color: ${kit.primary} !important;
+  text-decoration: underline !important;
+}
+:is(.fg-art-${scope}) img,
+:is(.entry-content, .post-content, article) .fg-art-${scope} img {
+  max-width: 100% !important;
+  height: auto !important;
+}
+:is(.fg-art-${scope}) ul,
+:is(.fg-art-${scope}) ol,
+:is(.entry-content, .post-content, article) .fg-art-${scope} ul,
+:is(.entry-content, .post-content, article) .fg-art-${scope} ol {
+  margin: 0 0 22px !important;
+  padding-left: 1.4em !important;
+}
+:is(.fg-art-${scope}) figure,
+:is(.entry-content, .post-content, article) .fg-art-${scope} figure {
+  all: unset !important; display: block !important; box-sizing: border-box !important;
+  margin: 1.5em 0 !important;
+  text-align: center !important;
+}
+:is(.fg-art-${scope}) blockquote,
+:is(.entry-content, .post-content, article) .fg-art-${scope} blockquote {
+  all: unset !important; display: block !important; box-sizing: border-box !important;
+  margin: 0 !important;
+  font-family: ${kit.headingFont} !important;
+  font-style: italic !important;
+}
+:is(.fg-art-${scope}) section,
+:is(.fg-art-${scope}) aside,
+:is(.entry-content, .post-content, article) .fg-art-${scope} section,
+:is(.entry-content, .post-content, article) .fg-art-${scope} aside {
+  all: unset !important; display: block !important; box-sizing: border-box !important;
+}
+:is(.fg-art-${scope}) details > summary,
+:is(.entry-content, .post-content, article) .fg-art-${scope} details > summary {
+  all: unset !important; display: flex !important; box-sizing: border-box !important;
+  cursor: pointer !important; list-style: none !important;
+  padding: 15px 18px !important; font-weight: 700 !important;
+  font-family: ${kit.headingFont} !important; font-size: 16px !important;
+  color: ${kit.text} !important;
+  justify-content: space-between !important; align-items: center !important;
+}
+/* Kill any theme margin/padding/width on our wrapper */
+:is(.fg-art-${scope}) {
+  margin: 0 !important; padding: 0 !important; max-width: none !important;
+  width: auto !important; float: none !important; clear: none !important;
+}
+
+/* === Interactive enhancements === */
 .fg-art-${scope} a.fg-btn:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(15,23,42,.16); }
 .fg-art-${scope} .fg-share-btn:hover { background: ${kit.primary} !important; color: #fff !important; border-color: ${kit.primary} !important; }
 .fg-art-${scope} .fg-related-link:hover { border-color: ${kit.primary} !important; box-shadow: 0 4px 14px rgba(15,23,42,.08); }
@@ -192,9 +302,11 @@ function scopedStyles(scope: string, kit: BlogStyleKit): string {
 .fg-art-${scope} .fg-car-track::-webkit-scrollbar { height: 8px; }
 .fg-art-${scope} .fg-car-track::-webkit-scrollbar-track { background: transparent; }
 .fg-art-${scope} .fg-car-track::-webkit-scrollbar-thumb { background: ${kit.primary}55; border-radius: 999px; }
+
+/* === Mobile responsive === */
 @media (max-width: 768px) {
   .fg-art-${scope} .fg-hero { min-height: 260px !important; }
-  .fg-art-${scope} .fg-pc-row { flex-direction: column; }
+  .fg-art-${scope} .fg-pc-row { flex-direction: column !important; }
   .fg-art-${scope} .fg-pc-media { width: 100% !important; max-width: 100% !important; }
   .fg-art-${scope} .fg-cardgrid { grid-template-columns: 1fr !important; }
   .fg-art-${scope} .fg-share { gap: 4px !important; }
@@ -204,8 +316,8 @@ function scopedStyles(scope: string, kit: BlogStyleKit): string {
   .fg-art-${scope} .fg-hero > div:last-child { padding: 18px !important; }
   .fg-art-${scope} .fg-img img { float: none !important; width: 100% !important; margin: 0 0 12px !important; }
   .fg-art-${scope} .fg-car-slide { flex-basis: 86%; }
-  .fg-art-${scope} .fg-btn { width: 100%; box-sizing: border-box; text-align: center; }
-  .fg-art-${scope} .fg-frame-head > div { flex-direction: column; align-items: flex-start !important; }
+  .fg-art-${scope} .fg-btn { width: 100% !important; box-sizing: border-box !important; text-align: center !important; }
+  .fg-art-${scope} .fg-frame-head > div { flex-direction: column !important; align-items: flex-start !important; }
   .fg-art-${scope} .fg-related { grid-template-columns: 1fr !important; }
 }
 </style>`;
@@ -501,59 +613,39 @@ function frameFoot(kit: BlogStyleKit, meta: ArticleFrameMeta | undefined): strin
   if (!meta) return '';
   const parts: string[] = [];
 
-  const brandName = (meta.brandName || '').trim();
-  if (brandName) {
-    const authorLine = (meta.author || '').trim() || `The ${brandName} Team`;
-    const initial = brandName.charAt(0).toUpperCase();
-    parts.push(`<div class="fg-author" style="display:flex;align-items:center;gap:14px;background:${softTint(kit.primary)};border:1px solid ${tint(kit.primary, 0.82)};border-radius:${kit.radius}px;padding:16px 18px;margin:0 0 24px;">
-  <span style="flex:0 0 auto;width:44px;height:44px;border-radius:999px;background:${kit.primary};color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800;font-family:${kit.headingFont};font-size:18px;">${esc(initial)}</span>
-  <div>
-    <p style="margin:0 0 2px;font-weight:800;font-size:15px;color:${kit.text};">${esc(authorLine)}</p>
-    <p style="margin:0;font-size:13.5px;line-height:1.6;color:${kit.muted};">Fresh content, tips and stories from the ${esc(brandName)} team.</p>
-  </div>
-</div>`);
-  }
-
-  // Newsletter capture — after the author box, before related articles
-  parts.push(`<section style="background:${softTint(kit.accent)};border:1px solid ${tint(kit.accent, 0.78)};border-radius:${kit.radius}px;padding:clamp(20px,4vw,36px);margin:0 0 24px;text-align:center;">
-  <h3 style="margin:0 0 6px;font-family:${kit.headingFont};font-size:clamp(18px,2.6vw,24px);line-height:1.25;color:${kit.text};">Stay in the Loop</h3>
-  <p style="margin:0 auto 18px;max-width:48ch;font-size:15.5px;line-height:1.7;color:${kit.muted};">Get the latest tips, guides and product news delivered to your inbox.</p>
-  <form action="#" method="post" style="display:flex;gap:10px;max-width:400px;margin:0 auto;flex-wrap:wrap;justify-content:center;">
-    <input type="email" name="email" placeholder="Your email address" required style="flex:1 1 200px;padding:11px 14px;border:1px solid ${tint(kit.accent, 0.6)};border-radius:${kit.radius}px;font-size:14.5px;font-family:${kit.bodyFont};background:#fff;color:${kit.text};outline:none;" />
-    <button type="submit" style="display:inline-block;padding:11px 22px;border-radius:${kit.radius}px;font-weight:700;font-size:14.5px;line-height:1.4;text-decoration:none;background:${kit.accent};color:#fff;border:none;cursor:pointer;font-family:${kit.bodyFont};">Subscribe</button>
-  </form>
-</section>`);
-
-  const siteUrl = (meta.siteUrl || '').trim();
-  if (brandName && siteUrl) {
-    parts.push(`<section class="fg-frame-cta" style="background:linear-gradient(120deg, ${kit.band}, ${shade(kit.band, 0.78)});border-radius:${kit.radius}px;padding:clamp(20px,4vw,36px);text-align:center;color:#fff;margin:0 0 24px;">
-  ${chip(kit, `More from ${esc(brandName)}`)}
-  <h3 style="margin:0 auto 6px;font-family:${kit.headingFont};font-size:clamp(19px,2.8vw,26px);line-height:1.25;color:#fff;max-width:30ch;">Fresh ideas for you and your pet</h3>
-  <p style="margin:0 auto 20px;max-width:50ch;color:rgba(255,255,255,.92);font-size:15px;line-height:1.7;">${esc(meta.title || 'Keep exploring')}</p>
-  <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center;">${bandBtn(kit, `Visit ${esc(brandName)}`, siteUrl)}</div>
-</section>`);
-  }
-
-  const related = (meta.related || []).filter((r) => r && r.url && r.title).slice(0, 3);
+  // --- "Keep Reading" related posts strip --------------------------------
+  const related = meta.related || [];
   if (related.length) {
-    parts.push(`<aside class="fg-related" style="margin:0 0 4px;">
-  <h3 style="margin:0 0 14px;font-family:${kit.headingFont};font-size:19px;line-height:1.3;color:${kit.text};">Keep reading</h3>
-  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:12px;">
-  ${related.map((r) => `<a class="fg-related-link" href="${esc(r.url)}" style="display:block;background:${kit.surface};border:1px solid ${tint(kit.primary, 0.8)};border-radius:${kit.radius}px;overflow:hidden;text-decoration:none;color:${kit.text};transition:border-color .2s,box-shadow .2s;">
-    ${r.imageUrl ? `<img src="${esc(r.imageUrl)}" alt="" loading="lazy" style="display:block;width:100%;height:140px;object-fit:cover;" />` : `<div style="height:8px;background:${kit.primary};"></div>`}
-    <div style="padding:12px 14px 14px;">
-      <span style="display:block;font-weight:700;font-size:14.5px;line-height:1.45;color:${kit.text};">${txt(r.title)}</span>
-      <span style="color:${kit.primary};font-size:13px;margin-top:6px;display:inline-block;">Read more &#8594;</span>
-    </div>
-  </a>`).join('\n')}
+    const cards = related.map((r) => {
+      const img = r.imageUrl
+        ? `<img src="${esc(r.imageUrl)}" alt="${esc(r.title)}" loading="lazy" style="display:block;width:100%;height:160px;object-fit:cover;border-radius:${Math.max(6, kit.radius - 4)}px;" />`
+        : `<div style="height:160px;background:linear-gradient(135deg, ${softTint(kit.primary)}, ${tint(kit.primary, 0.82)});border-radius:${Math.max(6, kit.radius - 4)}px;display:flex;align-items:center;justify-content:center;"><span style="font-family:${kit.headingFont};font-weight:700;font-size:14px;color:${kit.primary};text-align:center;padding:12px;">${txt(r.title)}</span></div>`;
+      return `<a class="fg-related-link" href="${esc(r.url)}" target="_blank" rel="noopener" style="display:block;text-decoration:none;background:${kit.surface};border:1px solid ${tint(kit.primary, 0.82)};border-radius:${kit.radius}px;overflow:hidden;transition:box-shadow .2s;">
+  ${img}
+  <div style="padding:14px 16px;">
+    <span style="font-family:${kit.headingFont};font-weight:700;font-size:15px;line-height:1.35;color:${kit.text};display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${txt(r.title)}</span>
   </div>
-</aside>`);
+</a>`;
+    });
+
+    parts.push(`<section class="fg-related" style="margin:40px 0 0;padding-top:28px;border-top:2px solid ${tint(kit.primary, 0.82)};">
+  <h3 style="margin:0 0 18px;font-family:${kit.headingFont};font-size:clamp(18px,2.6vw,22px);font-weight:700;color:${kit.text};">Keep Reading</h3>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:16px;">
+  ${cards.join('\n')}
+  </div>
+</section>`);
   }
 
-  if (!parts.length) return '';
-  return `<footer class="fg-frame-foot" style="margin:28px 0 0;padding-top:20px;border-top:1px solid ${tint(kit.primary, 0.85)};">
-${parts.join('\n')}
-</footer>`;
+  // --- Brand CTA bar ----------------------------------------------------
+  const siteUrl = meta.siteUrl ? String(meta.siteUrl).replace(/\/+$/, '') : '';
+  if (siteUrl) {
+    parts.push(`<section style="margin:36px 0 0;padding:clamp(20px,4vw,32px);background:linear-gradient(135deg, ${kit.band}, ${shade(kit.band, 0.82)});border-radius:${kit.radius}px;text-align:center;">
+  <p style="margin:0 0 14px;font-family:${kit.headingFont};font-size:clamp(17px,2.4vw,22px);font-weight:700;color:#fff;">Explore more from ${esc(meta.brandName || '')}</p>
+  <a href="${esc(siteUrl)}" target="_blank" rel="noopener" class="fg-btn" style="display:inline-block;padding:12px 28px;border-radius:${kit.radius}px;font-family:${kit.headingFont};font-weight:700;font-size:15px;text-decoration:none;background:#fff;color:${kit.band};box-shadow:0 4px 14px rgba(0,0,0,.15);">Visit Our Shop</a>
+</section>`);
+  }
+
+  return parts.length ? `\n${parts.join('\n')}\n` : '';
 }
 
 // ---------------------------------------------------------------------------
@@ -572,7 +664,7 @@ function renderBlock(block: VisualBlock, kit: BlogStyleKit): string {
     case 'product_cta': return renderProductCta(block, kit);
     case 'image_banner': return figureHtmlFor(block, kit.radius);
     case 'daniels_tip': return renderDanielsTip(block, kit);
-    case 'newsletter': return renderNewsletter(block, kit);
+    case 'newsletter': return ''; // Newsletter block removed — no longer rendered
     case 'paragraph':
     default: return renderParagraph(block, kit);
   }
@@ -621,7 +713,7 @@ export function blocksToHtml(
   const scope = stableScope(list, kit);
   const head = frameHead(kit, meta, estimateReadMins(list));
   const foot = frameFoot(kit, meta);
-  return `<div class="fg-art fg-art-${scope}" style="font-family:${kit.bodyFont};color:${kit.text};line-height:1.7;max-width:860px;margin:0 auto;">
+  return `<div class="fg-art fg-art-${scope}" style="font-family:${kit.bodyFont} !important;color:${kit.text} !important;line-height:1.7 !important;max-width:800px !important;margin:0 auto !important;padding:0 !important;box-sizing:border-box !important;background:transparent !important;">
 ${scopedStyles(scope, kit)}
 ${head}
 ${list.map((b) => renderBlock(b, kit)).join('\n\n')}

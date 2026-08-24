@@ -7,6 +7,7 @@ import { ContentHub } from './components/ContentHub';
 import { BrandManager } from './components/BrandManager';
 import { NanoBananaStudioModal } from './components/NanoBananaStudioModal';
 import { WorkspaceHub } from './components/WorkspaceHub';
+import { AutoBlogScheduler } from './components/AutoBlogScheduler';
 import { SettingsTab } from './components/SettingsTab';
 import { INITIAL_BRANDS, INITIAL_CONTENT } from './data/initialData';
 import { Brand, ContentItem, PipelineStatus, AppUser } from './types';
@@ -25,7 +26,7 @@ export default function App() {
   // Sidebar state: desktop collapse (persisted) + mobile drawer
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     try {
-      return localStorage.getItem('greenops_sidebar_collapsed') === '1';
+      return localStorage.getItem('fgos_sidebar_collapsed') === '1';
     } catch {
       return false;
     }
@@ -36,7 +37,7 @@ export default function App() {
     setSidebarCollapsed((prev) => {
       const next = !prev;
       try {
-        localStorage.setItem('greenops_sidebar_collapsed', next ? '1' : '0');
+        localStorage.setItem('fgos_sidebar_collapsed', next ? '1' : '0');
       } catch {
         // ignore storage errors (private mode etc.)
       }
@@ -119,7 +120,7 @@ export default function App() {
     
     // One-time check for new user seeding
     const checkAndSeed = async () => {
-      const storageKey = `greenops_seeded_${user.uid}`;
+      const storageKey = `fgos_seeded_${user.uid}`;
       if (localStorage.getItem(storageKey)) return;
 
       try {
@@ -259,7 +260,7 @@ export default function App() {
     title: string,
     brandId: string,
     contentType: 'post' | 'page',
-    opts?: { primaryKeyword?: string; secondaryKeywords?: string[] }
+    opts?: { primaryKeyword?: string; secondaryKeywords?: string[]; sheetContext?: any; seoBrief?: string; initialPrompt?: string }
   ) => {
     if (!user) return;
     const brand = brands.find((b) => b.id === brandId) || brands[0];
@@ -272,14 +273,15 @@ export default function App() {
       // The seed title is the *brief* — it must not become the article's
       // headline (the theme renders the post title as an h1, so keeping the
       // seed out of the title prevents the recurring duplicate-header issue).
-      initialPrompt: title,
+      initialPrompt: opts?.initialPrompt || title,
       slug: title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, ''),
       contentType,
       wpTemplate: brand?.pageTemplates?.[0] || 'default',
       status: 'Planned',
       primaryKeyword: opts?.primaryKeyword || title.split(' ').slice(0, 4).join(' '),
       secondaryKeywords: opts?.secondaryKeywords || [],
-      seoBrief: 'Target audience interest and organic search ranking.',
+      seoBrief: opts?.seoBrief || 'Target audience interest and organic search ranking.',
+      sheetContext: opts?.sheetContext || undefined,
       bodyHtml: `<h2>${title}</h2><p>Article introduction content generated for ${brand?.name || 'Brand'}.</p>`,
       blocks: [],
       createdAt: new Date().toISOString(),
@@ -560,6 +562,18 @@ export default function App() {
                 onSaveBrand={handleSaveBrand}
                 onDeleteBrand={handleDeleteBrand}
                 onSelectBrand={setSelectedBrandId}
+              />
+            )}
+
+            {activeTab === 'autoblog' && (
+              <AutoBlogScheduler
+                items={items}
+                brands={brands}
+                selectedBrandId={selectedBrandId}
+                onSaveItem={handleSaveItem}
+                onCreateNewItem={handleCreateNewItem}
+                onDeleteItem={handleDeleteItem}
+                onEditItem={handleEditItem}
               />
             )}
 

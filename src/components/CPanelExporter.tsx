@@ -4,8 +4,8 @@ import { Server, Download, Code, FileText, Check, Copy, ExternalLink, Terminal }
 export const CPanelExporter: React.FC = () => {
   const [copiedEnv, setCopiedEnv] = useState(false);
 
-  const envText = `# FreshGreenOps Content Studio - Hostinger / cPanel .env
-APP_NAME="FreshGreenOps Studio"
+  const envText = `# FGOS (Fresh Green Operating System) - Hostinger / cPanel .env
+APP_NAME="FGOS"
 APP_ENV=production
 APP_KEY=base64:Xxxxx
 APP_DEBUG=false
@@ -14,8 +14,8 @@ APP_URL=https://studio.yourdomain.com
 DB_CONNECTION=mysql
 DB_HOST=127.0.0.1
 DB_PORT=3306
-DB_DATABASE=greenops_studio
-DB_USERNAME=greenops_user
+DB_DATABASE=fgos_studio
+DB_USERNAME=fgos_user
 DB_PASSWORD=your_secure_password
 
 GEMINI_API_KEY="YOUR_GEMINI_API_KEY"
@@ -49,7 +49,7 @@ GEMINI_API_KEY="YOUR_GEMINI_API_KEY"
             {/* Download MySQL Schema SQL */}
             <a
               href="/api/export/sql"
-              download="greenops_studio_schema.sql"
+              download="fgos_studio_schema.sql"
               className="flex items-center justify-between p-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white transition group shadow-sm"
             >
               <div className="flex items-center space-x-3">
@@ -116,7 +116,7 @@ GEMINI_API_KEY="YOUR_GEMINI_API_KEY"
 
             <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
               <span className="font-bold text-slate-900 text-xs block">Step 2: MySQL Database Import</span>
-              <p>Open <strong>phpMyAdmin</strong>, create a database named <code className="bg-slate-200 px-1 rounded">freshgreenops_studio</code>, and import the downloaded <code className="bg-slate-200 px-1 rounded">greenops_studio_schema.sql</code> file.</p>
+              <p>Open <strong>phpMyAdmin</strong>, create a database named <code className="bg-slate-200 px-1 rounded">fgos_studio</code>, and import the downloaded <code className="bg-slate-200 px-1 rounded">fgos_studio_schema.sql</code> file.</p>
             </div>
 
             <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
