@@ -4,7 +4,6 @@ import {
   FileEdit, 
   Sparkles, 
   Building2, 
-  Cloud,
   ChevronLeft,
   ChevronRight,
   Settings,
@@ -65,7 +64,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         },
         {
           id: 'nano-banana',
-          label: 'Nano Banana Studio',
+          label: 'AI Image Generator',
           icon: Sparkles,
           badge: 'Visuals',
           badgeColor: 'bg-yellow-400/20 text-yellow-300 border-yellow-500/30',
@@ -83,14 +82,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
           badge: 'Auto',
           badgeColor: 'bg-violet-500/20 text-violet-300 border-violet-500/30',
           description: 'Sheet → Generate → Schedule → Publish'
-        },
-        {
-          id: 'workspace',
-          label: 'Workspace Hub',
-          icon: Cloud,
-          badge: 'Google',
-          badgeColor: 'bg-blue-500/20 text-blue-300 border-blue-500/30',
-          description: 'Sheets, Gmail & Calendar'
         }
       ]
     },

@@ -134,7 +134,7 @@ export const NanoBananaStudioModal: React.FC<NanoBananaStudioModalProps> = ({
       <div className="pb-4 border-b border-slate-200">
         <h1 className="text-2xl font-bold text-slate-900 tracking-tight flex items-center gap-2">
           <Wand2 className="w-6 h-6 text-amber-500" />
-          Nano Banana AI Image Studio
+          AI Image Generator
         </h1>
         <p className="text-sm text-slate-500 mt-1">
           Architect high-impact AI visual prompts and generate brand-tailored featured images for WordPress.

@@ -897,23 +897,28 @@ SEO requirements (scored by an automated SEO analyzer, follow precisely):
       : `SEARCH INTENT: This article targets an informational search query. Structure it as a complete, authoritative guide that directly answers the reader's question in the opening, then covers every related sub-topic with depth. Include a clear conclusion that summarises the key points.`;
 
     // Longtail keywords — weave into subheadings and body
-    const longtailText = sc?.longtailKeywords
-      ? `\nLONGTAIL KEYWORDS TO INCLUDE NATURALLY: ${sc.longtailKeywords}. Use these as inspiration for subheadings (h2/h3) and weave them naturally into body paragraphs. Do NOT stuff them — each longtail should appear once or twice in context.`
+    // Normalize: handle both string and array (from Firestore deserialization)
+    const longtailVal = Array.isArray(sc?.longtailKeywords) ? sc.longtailKeywords.join(', ') : sc?.longtailKeywords;
+    const longtailText = longtailVal
+      ? `\nLONGTAIL KEYWORDS TO INCLUDE NATURALLY: ${longtailVal}. Use these as inspiration for subheadings (h2/h3) and weave them naturally into body paragraphs. Do NOT stuff them — each longtail should appear once or twice in context.`
       : '';
 
     // Additional keyword targets
-    const extraKeywordsText = sc?.keywords
-      ? `\nADDITIONAL KEYWORD TARGETS: ${sc.keywords}. These should also appear naturally throughout the article where they fit, supplementing the primary and secondary keywords.`
+    const extraKeywordsVal = Array.isArray(sc?.keywords) ? sc.keywords.join(', ') : sc?.keywords;
+    const extraKeywordsText = extraKeywordsVal
+      ? `\nADDITIONAL KEYWORD TARGETS: ${extraKeywordsVal}. These should also appear naturally throughout the article where they fit, supplementing the primary and secondary keywords.`
       : '';
 
     // Internal links — tell the AI exactly which articles to link to
-    const internalLinksText = sc?.internalLinks
-      ? `\nINTERNAL LINKS TO INCLUDE: The article must include natural internal links to these existing articles on the site: ${sc.internalLinks}. Use descriptive anchor text and link to plausible /blog/ paths (e.g. /blog/[slugified-title]). Each link should fit naturally in context — do not force them.`
+    const internalLinksVal = Array.isArray(sc?.internalLinks) ? sc.internalLinks.join(', ') : sc?.internalLinks;
+    const internalLinksText = internalLinksVal
+      ? `\nINTERNAL LINKS TO INCLUDE: The article must include natural internal links to these existing articles on the site: ${internalLinksVal}. Use descriptive anchor text and link to plausible /blog/ paths (e.g. /blog/[slugified-title]). Each link should fit naturally in context — do not force them.`
       : '';
 
     // FAQ questions — the AI must answer these exact questions
-    const faqText = sc?.questionsPeopleAlsoAsk
-      ? `\nFAQ SECTION (MANDATORY): Include an FAQ section at the end of the article using an <h2> "Frequently Asked Questions" followed by <h3> for each question. You MUST answer these exact questions from the research data:\n${sc.questionsPeopleAlsoAsk.split(/[;\n]/).map((q: string) => `- ${q.trim()}`).filter(Boolean).join('\n')}\nEach answer must be a direct, concise 1-3 sentence response. The FAQ must flow naturally from the preceding content — not feel bolted on.`
+    const faqVal = Array.isArray(sc?.questionsPeopleAlsoAsk) ? sc.questionsPeopleAlsoAsk.join('\n') : sc?.questionsPeopleAlsoAsk;
+    const faqText = faqVal
+      ? `\nFAQ SECTION (MANDATORY): Include an FAQ section at the end of the article using an <h2> "Frequently Asked Questions" followed by <h3> for each question. You MUST answer these exact questions from the research data:\n${faqVal.split(/[;\n,]+/).map((q: string) => `- ${q.trim()}`).filter(Boolean).join('\n')}\nEach answer must be a direct, concise 1-3 sentence response. The FAQ must flow naturally from the preceding content — not feel bolted on.`
       : '';
 
     // Call to action — where and how to convert readers
@@ -5256,20 +5261,46 @@ function parseSheetUrl(url: string): { spreadsheetId: string; gid: string | null
 
 /**
  * Fetch a Google Sheet via the gviz/tq endpoint and parse its JSON response.
- * Returns { headers, rows, tabNames } for the default tab (GID 0).
+ * Returns { headers, rows, tabName } for the requested tab.
  * The sheet must be publicly accessible (Anyone with the link can view).
+ * Includes automatic retry with exponential backoff (up to 3 attempts).
  */
-async function fetchSheetGviz(spreadsheetId: string, gid: string = '0'): Promise<{ headers: string[]; rows: Record<string, string>[]; tabName: string }> {
+async function fetchSheetGviz(spreadsheetId: string, gid: string = '0', attempt: number = 0): Promise<{ headers: string[]; rows: Record<string, string>[]; tabName: string }> {
   const url = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/gviz/tq?tqx=out:json&gid=${gid}`;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15_000);
+  const timeoutMs = 15_000 + (attempt * 5_000); // 15s, 20s, 25s
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let resp: Response;
   try {
     resp = await fetch(url, { signal: controller.signal });
+  } catch (err: any) {
+    clearTimeout(timeout);
+    // Retry on network/abort errors (up to 3 attempts)
+    if (attempt < 2 && (err?.name === 'AbortError' || err?.code === 'UND_ERR_CONNECT_TIMEOUT' || err?.message?.includes('fetch'))) {
+      const delay = Math.pow(2, attempt) * 1000; // 1s, 2s
+      console.log(`[FGOS] Sheet fetch retry ${attempt + 1}/3 for gid=${gid} after ${delay}ms (was ${err?.name || err?.message})`);
+      await new Promise((r) => setTimeout(r, delay));
+      return fetchSheetGviz(spreadsheetId, gid, attempt + 1);
+    }
+    throw err;
   } finally {
     clearTimeout(timeout);
   }
-  if (!resp.ok) throw new Error(`Google Sheet fetch failed (HTTP ${resp.status}). Is the sheet publicly shared?`);
+
+  // Retry on 429/503 from Google (rate limited or overloaded)
+  if ((resp.status === 429 || resp.status === 503) && attempt < 2) {
+    const delay = Math.pow(2, attempt) * 1500; // 1.5s, 3s
+    const retryAfter = resp.headers.get('Retry-After');
+    const waitMs = retryAfter ? Math.min(parseInt(retryAfter, 10) * 1000, 10000) : delay;
+    console.log(`[FGOS] Sheet fetch retry ${attempt + 1}/3 for gid=${gid} — HTTP ${resp.status}, waiting ${waitMs}ms`);
+    await new Promise((r) => setTimeout(r, waitMs));
+    return fetchSheetGviz(spreadsheetId, gid, attempt + 1);
+  }
+
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => '');
+    throw new Error(`Google Sheet fetch failed (HTTP ${resp.status}${body.includes(' PERMISSION_DENIED') ? ' — sheet is not publicly shared' : ''}). Is the sheet publicly shared?`);
+  }
   const text = await resp.text();
 
   // Response format: /*O_o*/\ngoogle.visualization.Query.setResponse({...});
@@ -5397,31 +5428,70 @@ function mapSheetRowToContentItem(
 
 // ── AutoBlog API Endpoints ──────────────────────────────────────────────────
 
-/** List tabs in a publicly shared Google Sheet by probing GIDs. */
+/** Quick health check: can we reach the Google Sheet? Returns connection status + latency. */
+app.post('/api/autoblog/ping-sheet', async (req, res) => {
+  try {
+    const { sheetUrl } = req.body;
+    if (!sheetUrl) return res.status(400).json({ ok: false, error: 'sheetUrl is required' });
+    const { spreadsheetId } = parseSheetUrl(sheetUrl);
+
+    const start = Date.now();
+    try {
+      const result = await fetchSheetGviz(spreadsheetId, '0');
+      return res.json({
+        ok: true,
+        latencyMs: Date.now() - start,
+        rowCount: result.rows.length,
+        headers: result.headers.slice(0, 5),
+        message: `Connected — ${result.rows.length} rows, ${result.headers.length} columns`,
+      });
+    } catch (err: any) {
+      return res.json({
+        ok: false,
+        latencyMs: Date.now() - start,
+        error: err?.message || 'Connection failed',
+        message: /PERMISSION_DENIED|403/i.test(err?.message)
+          ? 'Sheet is not publicly shared — set it to "Anyone with the link can view"'
+          : /timeout|abort/i.test(err?.message)
+            ? 'Connection timed out — check your network and try again'
+            : err?.message || 'Connection failed',
+      });
+    }
+  } catch (err: any) {
+    return res.status(500).json({ ok: false, error: err?.message || 'Ping failed' });
+  }
+});
+
+/** List tabs in a publicly shared Google Sheet by probing GIDs. Probes in parallel batches for speed. */
 app.post('/api/autoblog/list-tabs', async (req, res) => {
   try {
     const { sheetUrl } = req.body;
     if (!sheetUrl) return res.status(400).json({ error: 'sheetUrl is required' });
     const { spreadsheetId } = parseSheetUrl(sheetUrl);
 
-    // Probe GIDs 0–9, then known large GIDs. Stop after 3 consecutive empty results.
+    // Probe GIDs 0–9, then known large GIDs. Probe in parallel batches of 4.
     const candidateGids = ['0','1','2','3','4','5','6','7','8','9','102378141','1594914000','383449943'];
+    const BATCH = 4;
     const tabs: { name: string; gid: string; rowCount: number; firstCol: string }[] = [];
     let misses = 0;
 
-    for (const gid of candidateGids) {
-      if (misses >= 3 && gid.length <= 2) continue; // skip low GIDs after 3 misses but still try known ones
-      try {
-        const result = await fetchSheetGviz(spreadsheetId, gid);
-        if (result.rows.length > 0) {
-          const tabName = result.headers[0] || `Sheet (GID ${gid})`;
-          tabs.push({ name: tabName, gid, rowCount: result.rows.length, firstCol: result.headers[0] || '' });
+    for (let i = 0; i < candidateGids.length; i += BATCH) {
+      if (misses >= 6) break; // too many consecutive empty/error GIDs — stop
+      const batch = candidateGids.slice(i, i + BATCH);
+      const results = await Promise.allSettled(
+        batch.map(async (gid) => {
+          const result = await fetchSheetGviz(spreadsheetId, gid);
+          return { gid, ...result };
+        })
+      );
+      for (const r of results) {
+        if (r.status === 'fulfilled' && r.value.rows.length > 0) {
+          const tabName = r.value.headers[0] || `Sheet (GID ${r.value.gid})`;
+          tabs.push({ name: tabName, gid: r.value.gid, rowCount: r.value.rows.length, firstCol: r.value.headers[0] || '' });
           misses = 0;
         } else {
           misses++;
         }
-      } catch {
-        misses++;
       }
     }
 
@@ -5503,6 +5573,54 @@ app.post('/api/autoblog/import', async (req, res) => {
     return res.json({ imported, skipped, total: rows.length });
   } catch (err: any) {
     return res.status(500).json({ error: err?.message || 'Failed to import sheet rows' });
+  }
+});
+
+/** Re-sync: compare current sheet rows against existing items and return what's new/changed/removed. */
+app.post('/api/autoblog/resync', async (req, res) => {
+  try {
+    const { rows, existingItems } = req.body;
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return res.status(400).json({ error: 'rows array required' });
+    }
+
+    const existingTitles = new Set(
+      (Array.isArray(existingItems) ? existingItems : []).map((e: any) => e?.title?.trim().toLowerCase()).filter(Boolean)
+    );
+
+    const newRows: any[] = [];
+    const changedRows: { row: any; existingTitle: string }[] = [];
+    const total = rows.length;
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const title = (row['Blog Title'] || row['Title'] || row['Headline'] || '').trim();
+      if (!title) continue;
+
+      const slug = title.toLowerCase();
+      if (existingTitles.has(slug)) {
+        // Check if the summary or keywords have changed
+        const existing = (Array.isArray(existingItems) ? existingItems : []).find(
+          (e: any) => e?.title?.trim().toLowerCase() === slug
+        );
+        if (existing) {
+          const sheetSummary = row['One Line Summary'] || row['Summary'] || '';
+          const sheetKeyword = row['Primary Keyword'] || row['Primary'] || '';
+          const changed =
+            existing.seoBrief !== sheetSummary ||
+            existing.primaryKeyword !== sheetKeyword;
+          if (changed) {
+            changedRows.push({ row, existingTitle: title });
+          }
+        }
+      } else {
+        newRows.push(row);
+      }
+    }
+
+    return res.json({ newRows, changedRows, total, existingCount: existingTitles.size });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Re-sync failed' });
   }
 });
 

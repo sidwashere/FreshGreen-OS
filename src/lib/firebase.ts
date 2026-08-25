@@ -23,6 +23,41 @@ export const USE_EMULATORS = import.meta.env.VITE_USE_EMULATORS === 'true';
 if (USE_EMULATORS) {
   connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true });
   connectFirestoreEmulator(db, '127.0.0.1', 8080);
+
+  // Prove emulators are reachable — this prevents the silent "auto-login
+  // failed" loop that happens when emulators aren't running.
+  checkEmulators().catch(() => {});
+}
+
+async function checkEmulators(): Promise<void> {
+  const checks = [
+    { name: 'Auth', url: 'http://127.0.0.1:9099' },
+    { name: 'Firestore', url: 'http://127.0.0.1:8080' },
+  ];
+  const results = await Promise.allSettled(
+    checks.map(async (c) => {
+      try {
+        const r = await fetch(c.url, { method: 'HEAD', signal: AbortSignal.timeout(3000) });
+        return { name: c.name, ok: r.ok || r.status === 404 }; // 404 is fine — means the process is listening
+      } catch {
+        return { name: c.name, ok: false };
+      }
+    })
+  );
+  const failed: string[] = [];
+  for (const r of results) {
+    if (r.status === 'fulfilled' && !r.value.ok) {
+      failed.push(r.value.name);
+    }
+  }
+  if (failed.length > 0) {
+    console.error(
+      `[FGOS] ⚠️  Firebase emulator${failed.length > 1 ? 's' : ''} not reachable: ${failed.join(', ')}. ` +
+      `Auto-login will fail. Start emulators with: npx firebase emulators:start`
+    );
+  } else {
+    console.log('[FGOS] ✅ Firebase emulators reachable (Auth + Firestore)');
+  }
 }
 
 // Usernames are mapped to a fixed local email domain so Firebase's

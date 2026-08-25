@@ -14,6 +14,7 @@ import {
   Globe,
   Eye,
   Clock,
+  Calendar,
   Download,
   AlertTriangle,
   CheckCircle2,
@@ -516,6 +517,35 @@ export const ContentHub: React.FC<ContentHubProps> = ({
                     <div className="mt-1 flex items-center gap-3 text-[11px] text-slate-400 flex-wrap">
                       <span className="inline-flex items-center gap-1"><PenLine className="w-3 h-3" /> {countWords(item.bodyHtml || '').toLocaleString()} words</span>
                       <span className="inline-flex items-center gap-1"><Clock className="w-3 h-3" /> synced {timeAgo(item.lastSyncedAt)}</span>
+                      {/* Inline publish date picker — works at any stage */}
+                      {item.status !== 'Published' && (
+                        <span className="inline-flex items-center gap-1">
+                          <Calendar className="w-3 h-3" />
+                          <input
+                            type="date"
+                            defaultValue={item.scheduledPublishAt ? new Date(item.scheduledPublishAt).toISOString().split('T')[0] : ''}
+                            onChange={(e) => {
+                              if (e.target.value) {
+                                const time = item.scheduledPublishAt
+                                  ? new Date(item.scheduledPublishAt).toTimeString().slice(0, 5)
+                                  : '09:00';
+                                onSaveItem({ ...item, scheduledPublishAt: new Date(`${e.target.value}T${time}:00`).toISOString(), updatedAt: new Date().toISOString() });
+                              }
+                            }}
+                            className="px-1 py-0.5 border border-slate-200 rounded text-[10px] focus:ring-2 focus:ring-violet-500 outline-none bg-white"
+                            title="Set publish date"
+                          />
+                        </span>
+                      )}
+                      {item.scheduledPublishAt && item.status !== 'Published' && (
+                        <button
+                          onClick={() => onSaveItem({ ...item, scheduledPublishAt: undefined, updatedAt: new Date().toISOString() })}
+                          className="text-[10px] text-slate-400 hover:text-red-500 transition"
+                          title="Clear publish date"
+                        >
+                          ✕
+                        </button>
+                      )}
                       {item.slug && <span className="hidden md:inline truncate max-w-[240px]">/{item.slug}</span>}
                     </div>
                   </div>

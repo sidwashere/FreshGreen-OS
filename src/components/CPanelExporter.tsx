@@ -134,7 +134,7 @@ GEMINI_API_KEY="YOUR_GEMINI_API_KEY"
 
             <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
               <span className="font-bold text-slate-900 text-xs block">Step 5: Storage Symlink</span>
-              <p>Run <code className="bg-slate-200 px-1 rounded font-mono">php artisan storage:link</code> via cPanel Terminal or SSH so generated Nano Banana images are viewable publicly.</p>
+              <p>Run <code className="bg-slate-200 px-1 rounded font-mono">php artisan storage:link</code> via cPanel Terminal or SSH so generated AI images are viewable publicly.</p>
             </div>
           </div>
         </div>

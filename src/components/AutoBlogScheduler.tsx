@@ -70,15 +70,24 @@ interface CalendarGridProps {
   items: ContentItem[];
   onEditItem: (item: ContentItem) => void;
   onGenerate: (item: ContentItem) => void;
+  onScheduleItem: (item: ContentItem, date: string, time: string) => void;
   generating: Set<string>;
   brands: Brand[];
 }
 
+// green = published, orange = scheduled, red = draft/planned
+const calStatusColor = (item: ContentItem) => {
+  if (item.status === 'Published') return { bg: 'bg-emerald-50 border-emerald-200', dot: 'bg-emerald-500', text: 'text-emerald-800' };
+  if (item.scheduledPublishAt) return { bg: 'bg-orange-50 border-orange-200', dot: 'bg-orange-500', text: 'text-orange-800' };
+  return { bg: 'bg-red-50 border-red-200', dot: 'bg-red-400', text: 'text-red-800' };
+};
+
 const CalendarGrid: React.FC<CalendarGridProps> = ({
-  year, month, items, onEditItem, onGenerate, generating, brands,
+  year, month, items, onEditItem, onGenerate, onScheduleItem, generating, brands,
 }) => {
   const today = new Date();
   const todayStr = today.toISOString().split('T')[0];
+  const [expandedDays, setExpandedDays] = useState<Set<string>>(new Set());
 
   // Build the calendar days for the month
   const firstDay = new Date(year, month, 1);
@@ -100,6 +109,9 @@ const CalendarGrid: React.FC<CalendarGridProps> = ({
     return map;
   }, [items]);
 
+  // Unscheduled items — shown below calendar
+  const unscheduledItems = useMemo(() => items.filter((i) => !i.scheduledPublishAt), [items]);
+
   const cells: { day: number | null; key: string }[] = [];
   for (let i = 0; i < startDow; i++) cells.push({ day: null, key: `empty-${i}` });
   for (let d = 1; d <= daysInMonth; d++) {
@@ -110,15 +122,18 @@ const CalendarGrid: React.FC<CalendarGridProps> = ({
   while (cells.length % 7 !== 0) cells.push({ day: null, key: `end-${cells.length}` });
 
   return (
+    <div className="space-y-4">
     <div className="grid grid-cols-7 gap-1">
-      {cells.map((cell) => {
+      {cells.map((cell, cellIdx) => {
         if (!cell.day) {
           return <div key={cell.key} className="min-h-[90px] bg-slate-50/50 rounded-xl" />;
         }
 
         const isToday = cell.key === todayStr;
         const dayItems = itemsByDate[cell.key] || [];
-        const isWeekend = (cells.indexOf(cell) % 7) >= 5;
+        const isWeekend = (cellIdx % 7) >= 5;
+        const isExpanded = expandedDays.has(cell.key);
+        const visibleItems = isExpanded ? dayItems : dayItems.slice(0, 4);
 
         return (
           <div
@@ -128,63 +143,103 @@ const CalendarGrid: React.FC<CalendarGridProps> = ({
                 ? 'border-violet-400 bg-violet-50/50 ring-2 ring-violet-200'
                 : isWeekend
                   ? 'border-slate-100 bg-slate-50/30'
-                  : 'border-slate-150 bg-white hover:border-slate-300'
+                  : 'border-slate-200 bg-white hover:border-slate-300'
             }`}
           >
             <div className={`text-[11px] font-bold mb-1 ${isToday ? 'text-violet-600' : 'text-slate-500'}`}>
               {cell.day}
             </div>
-            <div className="space-y-1">
-              {dayItems.slice(0, 3).map((item) => {
+            <div className="space-y-0.5">
+              {visibleItems.map((item) => {
+                const colors = calStatusColor(item);
                 const isGen = generating.has(item.id);
-                const isPublished = item.status === 'Published';
                 return (
                   <div
                     key={item.id}
                     onClick={() => onEditItem(item)}
-                    className={`group relative rounded-lg px-1.5 py-1 cursor-pointer transition ${
-                      isPublished
-                        ? 'bg-emerald-50 border border-emerald-200 hover:border-emerald-300'
-                        : 'bg-sky-50 border border-sky-200 hover:border-sky-300'
-                    }`}
-                    title={item.title}
+                    className={`group relative rounded-md px-1.5 py-0.5 cursor-pointer transition border ${colors.bg}`}
+                    title={`${item.title} — ${item.status.replace('_', ' ')}`}
                   >
                     <div className="flex items-center gap-1">
-                      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                        isPublished ? 'bg-emerald-500' : 'bg-sky-500'
-                      }`} />
-                      <span className="text-[10px] font-semibold text-slate-700 truncate leading-tight">
+                      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${colors.dot}`} />
+                      <span className={`text-[9px] font-semibold truncate leading-tight ${colors.text}`}>
                         {item.title}
                       </span>
                     </div>
-                    {item.primaryKeyword && (
-                      <div className="text-[8px] text-slate-400 truncate mt-0.5 leading-tight">
-                        🔑 {item.primaryKeyword}
-                      </div>
-                    )}
-                    {/* Write Article button on hover */}
-                    {!isPublished && item.status === 'Planned' && (
+                    {item.status === 'Planned' && (
                       <button
                         onClick={(e) => { e.stopPropagation(); onGenerate(item); }}
                         disabled={isGen}
-                        className="absolute -bottom-1 -right-1 w-5 h-5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition shadow-sm disabled:opacity-50"
+                        className="absolute -bottom-0.5 -right-0.5 w-4 h-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition shadow-sm disabled:opacity-50"
                         title="Write Article"
                       >
-                        {isGen ? <Loader2 className="w-2.5 h-2.5 animate-spin" /> : <Sparkles className="w-2.5 h-2.5" />}
+                        {isGen ? <Loader2 className="w-2 h-2 animate-spin" /> : <Sparkles className="w-2 h-2" />}
                       </button>
                     )}
                   </div>
                 );
               })}
-              {dayItems.length > 3 && (
-                <div className="text-[9px] text-slate-400 text-center font-medium">
-                  +{dayItems.length - 3} more
-                </div>
+              {dayItems.length > 4 && (
+                <button
+                  onClick={() => setExpandedDays((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(cell.key)) next.delete(cell.key);
+                    else next.add(cell.key);
+                    return next;
+                  })}
+                  className="w-full text-[8px] text-violet-500 font-semibold hover:text-violet-700 transition cursor-pointer"
+                >
+                  {isExpanded ? 'Show less' : `+${dayItems.length - 4} more`}
+                </button>
               )}
             </div>
           </div>
         );
       })}
+    </div>
+
+    {/* Unscheduled items — inline date picker to place on calendar */}
+    {unscheduledItems.length > 0 && (
+      <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+        <h3 className="font-bold text-slate-900 text-sm mb-3 flex items-center gap-2">
+          <Clock className="w-4 h-4 text-slate-400" />
+          Unscheduled ({unscheduledItems.length})
+          <span className="text-[11px] font-normal text-slate-400 ml-1">— set a publish date to place on calendar</span>
+        </h3>
+        <div className="space-y-1.5">
+          {unscheduledItems.map((item) => {
+            const isGen = generating.has(item.id);
+            const colors = calStatusColor(item);
+            return (
+              <div key={item.id} className="flex items-center gap-2 p-2 rounded-xl bg-slate-50 border border-slate-100">
+                <span className={`w-2 h-2 rounded-full shrink-0 ${colors.dot}`} />
+                <span className={`flex-1 text-sm font-medium truncate ${colors.text}`}>{item.title}</span>
+                {item.primaryKeyword && (
+                  <span className="text-[10px] text-slate-400 hidden md:block">🔑 {item.primaryKeyword}</span>
+                )}
+                <input
+                  type="date"
+                  className="px-2 py-1 border border-slate-200 rounded-lg text-xs focus:ring-2 focus:ring-violet-500 outline-none"
+                  defaultValue={new Date().toISOString().split('T')[0]}
+                  onChange={(e) => {
+                    if (e.target.value) onScheduleItem(item, e.target.value, '09:00');
+                  }}
+                />
+                {item.status === 'Planned' && (
+                  <button
+                    onClick={() => onGenerate(item)}
+                    disabled={isGen}
+                    className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 disabled:opacity-50"
+                  >
+                    {isGen ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    )}
     </div>
   );
 };
@@ -199,8 +254,10 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
   onEditItem,
 }) => {
   // ── Sheet connection state ──────────────────────────────────────────
+  // Sheet URL is per-brand to prevent cross-brand leakage
+  const sheetUrlKey = `fgos_autoblog_sheet_url_${selectedBrandId || 'none'}`;
   const [sheetUrl, setSheetUrl] = useState(() => {
-    try { return localStorage.getItem('fgos_autoblog_sheet_url') || ''; } catch { return ''; }
+    try { return localStorage.getItem(sheetUrlKey) || ''; } catch { return ''; }
   });
   const [tabs, setTabs] = useState<SheetTab[]>([]);
   const [selectedTab, setSelectedTab] = useState<string>('');
@@ -208,6 +265,23 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
   const [sheetHeaders, setSheetHeaders] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // ── Connection health ──────────────────────────────────────────────
+  const [connStatus, setConnStatus] = useState<{ ok: boolean; message: string; latencyMs?: number; lastChecked?: number } | null>(null);
+  const [pinging, setPinging] = useState(false);
+
+  // ── When brand changes, reload the sheet URL + clear stale state ───
+  useEffect(() => {
+    const newKey = `fgos_autoblog_sheet_url_${selectedBrandId || 'none'}`;
+    const newUrl = localStorage.getItem(newKey) || '';
+    setSheetUrl(newUrl);
+    setTabs([]);
+    setSelectedTab('');
+    setSheetRows([]);
+    setSheetHeaders([]);
+    setConnStatus(null);
+    setError(null);
+  }, [selectedBrandId]);
 
   // ── Schedule config ────────────────────────────────────────────────
   const [cadenceDays, setCadenceDays] = useState(() => {
@@ -231,28 +305,53 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
   const [generating, setGenerating] = useState<Set<string>>(new Set());
   const [publishing, setPublishing] = useState<Set<string>>(new Set());
   const [importing, setImporting] = useState(false);
+  const [importProgress, setImportProgress] = useState<{ done: number; total: number } | null>(null);
+  const [resyncing, setResyncing] = useState(false);
+  const [resyncResult, setResyncResult] = useState<{ newRows: number; changedRows: number } | null>(null);
+  const [batchGenerating, setBatchGenerating] = useState(false);
+  const batchCancelRef = React.useRef(false);
   const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
   // ── Calendar state ────────────────────────────────────────────────
   const [calMonth, setCalMonth] = useState(() => new Date().getMonth());
   const [calYear, setCalYear] = useState(() => new Date().getFullYear());
 
-  // Persist config to localStorage
+  // Persist config to localStorage (sheet URL is per-brand)
   useEffect(() => {
     try {
-      localStorage.setItem('fgos_autoblog_sheet_url', sheetUrl);
+      localStorage.setItem(sheetUrlKey, sheetUrl);
       localStorage.setItem('fgos_autoblog_cadence', String(cadenceDays));
       localStorage.setItem('fgos_autoblog_start_date', startDate);
       localStorage.setItem('fgos_autoblog_auto_publish', autoPublish ? '1' : '0');
     } catch { /* ignore */ }
-  }, [sheetUrl, cadenceDays, startDate, autoPublish]);
+  }, [sheetUrl, sheetUrlKey, cadenceDays, startDate, autoPublish]);
+
+  // ── Brand-scoped items: ONLY items belonging to the selected brand ─
+  const brandItems = useMemo(
+    () => selectedBrandId ? items.filter((i) => i.brandId === selectedBrandId) : items,
+    [items, selectedBrandId]
+  );
+
+  // ── AutoBlog items (imported from sheet, brand-scoped) ─────────────
+  const autoBlogItems = useMemo(
+    () => brandItems.filter((i) => i.sourceSheetId || i.scheduledPublishAt),
+    [brandItems]
+  );
+
+  const scheduledItems = useMemo(
+    () =>
+      autoBlogItems
+        .filter((i) => i.scheduledPublishAt)
+        .sort((a, b) => new Date(a.scheduledPublishAt!).getTime() - new Date(b.scheduledPublishAt!).getTime()),
+    [autoBlogItems]
+  );
 
   // ── Auto-publish check (runs every 60s when enabled) ───────────────
   useEffect(() => {
     if (!autoPublish) return;
     const interval = setInterval(async () => {
       const now = new Date();
-      const dueItems = items.filter(
+      const dueItems = brandItems.filter(
         (i) =>
           i.scheduledPublishAt &&
           i.status === 'Draft_Ready' &&
@@ -264,50 +363,56 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
         const resp = await fetch('/api/autoblog/check-publish', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ dueItems, brands }),
+          body: JSON.stringify({ dueItems, brands: brands.filter((b) => b.id === selectedBrandId) }),
         });
         const data = await resp.json();
-        if (data.published > 0) {
-          for (const r of data.results || []) {
-            if (r.success) {
-              const item = dueItems.find((i) => i.id === r.itemId);
-              if (item) {
-                onSaveItem({
-                  ...item,
-                  status: 'Published',
-                  wpPostId: r.wpPostId,
-                  lastAutoPublishedAt: new Date().toISOString(),
-                  updatedAt: new Date().toISOString(),
-                });
-              }
-            }
+        // Record results (both success and failure) for every item
+        for (const r of data.results || []) {
+          const item = dueItems.find((i) => i.id === r.itemId);
+          if (!item) continue;
+          if (r.success) {
+            onSaveItem({
+              ...item,
+              status: 'Published',
+              wpPostId: r.wpPostId,
+              lastAutoPublishedAt: new Date().toISOString(),
+              lastAutoPublishError: undefined,
+              updatedAt: new Date().toISOString(),
+            });
+          } else {
+            onSaveItem({
+              ...item,
+              status: 'Error',
+              lastAutoPublishError: r.message || 'Publish failed',
+              updatedAt: new Date().toISOString(),
+            });
           }
+        }
+        if (data.published > 0) {
           setNotice({ kind: 'ok', text: `Auto-published ${data.published} post(s)` });
+        }
+        const errCount = data.errors?.length || 0;
+        if (errCount > 0) {
+          setNotice({ kind: 'err', text: `${errCount} post(s) failed to publish — check queue for details` });
         }
       } catch {
         // Silently retry next interval
       }
     }, 60_000);
     return () => clearInterval(interval);
-  }, [autoPublish, items, brands, onSaveItem]);
-
-  // ── AutoBlog items (imported from sheet) ────────────────────────────
-  const autoBlogItems = useMemo(
-    () => items.filter((i) => i.sourceSheetId || i.scheduledPublishAt),
-    [items]
-  );
-
-  const scheduledItems = useMemo(
-    () =>
-      autoBlogItems
-        .filter((i) => i.scheduledPublishAt)
-        .sort((a, b) => new Date(a.scheduledPublishAt!).getTime() - new Date(b.scheduledPublishAt!).getTime()),
-    [autoBlogItems]
-  );
+  }, [autoPublish, brandItems, brands, selectedBrandId, onSaveItem]);
 
   // ── Sheet actions ──────────────────────────────────────────────────
+  // AbortController for cancelling in-flight sheet fetches when switching tabs
+  const sheetFetchRef = React.useRef<AbortController | null>(null);
+
   const handleFetchSheet = async () => {
     if (!sheetUrl.trim()) { setError('Enter a Google Sheet URL'); return; }
+    // Cancel any in-flight request
+    sheetFetchRef.current?.abort();
+    const controller = new AbortController();
+    sheetFetchRef.current = controller;
+
     setLoading(true); setError(null); setSheetRows([]); setTabs([]);
     try {
       // Step 1: Discover all tabs with real names
@@ -315,6 +420,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sheetUrl }),
+        signal: controller.signal,
       });
       const tabData = await tabResp.json();
       if (tabData.error) throw new Error(tabData.error);
@@ -334,12 +440,14 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sheetUrl, gid: firstTab.gid }),
+        signal: controller.signal,
       });
       const data = await resp.json();
       if (data.error) throw new Error(data.error);
       setSheetRows(data.rows || []);
       setSheetHeaders(data.headers || []);
     } catch (err: any) {
+      if (err?.name === 'AbortError') return; // Swallowed — new request superseded this one
       setError(err.message || 'Failed to fetch sheet');
     } finally {
       setLoading(false);
@@ -348,28 +456,83 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
 
   const handleFetchTab = async (gid: string) => {
     if (!sheetUrl.trim()) return;
+    // Cancel any in-flight request
+    sheetFetchRef.current?.abort();
+    const controller = new AbortController();
+    sheetFetchRef.current = controller;
+
     setLoading(true); setError(null);
+    const prevRows = sheetRows; // keep previous rows in case fetch fails
+    const prevHeaders = sheetHeaders;
     try {
       setSelectedTab(gid);
       const resp = await fetch('/api/autoblog/fetch-sheet', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sheetUrl, gid }),
+        signal: controller.signal,
       });
       const data = await resp.json();
       if (data.error) throw new Error(data.error);
       setSheetRows(data.rows || []);
       setSheetHeaders(data.headers || []);
     } catch (err: any) {
-      setError(err.message || 'Failed to fetch tab');
+      if (err?.name === 'AbortError') return;
+      // On failure, restore previous data so the UI doesn't go blank
+      setSheetRows(prevRows);
+      setSheetHeaders(prevHeaders);
+      setError(err.message || 'Failed to fetch tab — showing previous tab data');
     } finally {
       setLoading(false);
     }
   };
 
+  // ── Connection health ping ──────────────────────────────────────────
+  const handlePing = async () => {
+    if (!sheetUrl.trim()) return;
+    setPinging(true);
+    try {
+      const resp = await fetch('/api/autoblog/ping-sheet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sheetUrl }),
+      });
+      const data = await resp.json();
+      setConnStatus({ ...data, lastChecked: Date.now() });
+    } catch (err: any) {
+      setConnStatus({ ok: false, message: 'Network error — server may be offline', lastChecked: Date.now() });
+    } finally {
+      setPinging(false);
+    }
+  };
+
+  // Auto-ping on mount if sheet URL is saved, and re-ping every 5 minutes
+  useEffect(() => {
+    if (sheetUrl.trim()) handlePing();
+    const interval = setInterval(() => { if (sheetUrl.trim()) handlePing(); }, 5 * 60_000);
+    return () => clearInterval(interval);
+  }, [sheetUrl]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Auto-retry: if connection was lost, attempt recovery every 30s ──
+  useEffect(() => {
+    if (!sheetUrl.trim()) return;
+    const interval = setInterval(() => {
+      if (connStatus && !connStatus.ok && !loading) {
+        console.log('[FGOS] Auto-retrying sheet connection…');
+        handlePing().then(() => {
+          if (tabs.length > 0 && selectedTab) {
+            // We had data before — try to re-fetch the selected tab
+            handleFetchTab(selectedTab);
+          }
+        });
+      }
+    }, 30_000);
+    return () => clearInterval(interval);
+  }, [sheetUrl, connStatus, loading, tabs.length, selectedTab]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleImportRows = async () => {
     if (sheetRows.length === 0) return;
-    setImporting(true); setError(null);
+    setImporting(true); setError(null); setImportProgress({ done: 0, total: 0 });
     try {
       const resp = await fetch('/api/autoblog/import', {
         method: 'POST',
@@ -379,18 +542,19 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
           brandId: selectedBrandId,
           sheetId: sheetUrl,
           sheetName: tabs.find((t) => t.gid === selectedTab)?.name || 'Sheet1',
-          existingItems: items.map((i) => ({ title: i.title })),
+          existingItems: autoBlogItems.map((i) => ({ title: i.title })),
         }),
       });
       const data = await resp.json();
       if (data.error) throw new Error(data.error);
 
-      // Create content items from imported rows
+      // Create content items from imported rows — show progress
       const startDateMs = new Date(startDate).getTime();
+      const totalCount = data.imported.length;
+      setImportProgress({ done: 0, total: totalCount });
       let createdCount = 0;
       for (let i = 0; i < data.imported.length; i++) {
         const row = data.imported[i];
-        const schedDate = new Date(startDateMs + i * cadenceDays * 86_400_000).toISOString();
 
         await onCreateNewItem(
           row.title,
@@ -406,6 +570,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
         );
 
         createdCount++;
+        setImportProgress({ done: createdCount, total: totalCount });
       }
 
       setNotice({
@@ -416,6 +581,59 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
       setError(err.message || 'Import failed');
     } finally {
       setImporting(false);
+      setImportProgress(null);
+    }
+  };
+
+  // ── Re-sync: detect new/changed rows from the sheet ─────────────
+  const handleResync = async () => {
+    if (sheetRows.length === 0) return;
+    setResyncing(true); setResyncResult(null); setError(null);
+    try {
+      const resp = await fetch('/api/autoblog/resync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rows: sheetRows,
+          existingItems: autoBlogItems.map((i) => ({ title: i.title, seoBrief: i.seoBrief, primaryKeyword: i.primaryKeyword })),
+        }),
+      });
+      const data = await resp.json();
+      if (data.error) throw new Error(data.error);
+      setResyncResult({ newRows: data.newRows?.length || 0, changedRows: data.changedRows?.length || 0 });
+
+      // Import new rows only
+      if (data.newRows && data.newRows.length > 0) {
+        const startDateMs = new Date(startDate).getTime();
+        const startOffset = autoBlogItems.length; // continue after existing items
+        let createdCount = 0;
+        setImportProgress({ done: 0, total: data.newRows.length });
+        for (let i = 0; i < data.newRows.length; i++) {
+          const row = data.newRows[i];
+          await onCreateNewItem(
+            row['Blog Title'] || row['Title'] || 'Untitled',
+            selectedBrandId,
+            'post',
+            {
+              primaryKeyword: row['Primary Keyword'] || '',
+              secondaryKeywords: (row['Secondary Keywords'] || '').split(/[,;|]/).map((s: string) => s.trim()).filter(Boolean),
+              seoBrief: row['Search Intent'] || row['One Line Summary'] || '',
+              initialPrompt: row['One Line Summary'] || row['Blog Title'] || '',
+              sheetContext: row,
+            }
+          );
+          createdCount++;
+          setImportProgress({ done: createdCount, total: data.newRows.length });
+        }
+        setNotice({ kind: 'ok', text: `Re-synced: ${createdCount} new post(s) imported, ${data.changedRows?.length || 0} existing row(s) with changes detected` });
+      } else {
+        setNotice({ kind: 'ok', text: `Sheet is up to date — no new rows. ${data.changedRows?.length || 0} existing row(s) may have changes.` });
+      }
+    } catch (err: any) {
+      setError(err.message || 'Re-sync failed');
+    } finally {
+      setResyncing(false);
+      setImportProgress(null);
     }
   };
 
@@ -520,10 +738,85 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
     });
   };
 
+  // ── Publish now (manual push to WordPress) ────────────────────────
+  const handlePublishNow = async (item: ContentItem) => {
+    const brand = brands.find((b) => b.id === item.brandId);
+    if (!brand?.wpUrl || !brand?.wpUsername) {
+      setNotice({ kind: 'err', text: `"${item.title}" — brand has no WordPress credentials configured. Go to Settings → Brand DNA to add them.` });
+      return;
+    }
+    setPublishing((prev) => new Set(prev).add(item.id));
+    try {
+      const resp = await fetch('/api/autoblog/check-publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dueItems: [{ ...item, scheduledPublishAt: new Date().toISOString() }],
+          brands: [brand],
+        }),
+      });
+      const data = await resp.json();
+      const result = data.results?.[0];
+      if (result?.success) {
+        onSaveItem({
+          ...item,
+          status: 'Published',
+          wpPostId: result.wpPostId,
+          lastAutoPublishedAt: new Date().toISOString(),
+          lastAutoPublishError: undefined,
+          updatedAt: new Date().toISOString(),
+        });
+        setNotice({ kind: 'ok', text: `Published "${item.title}" to WordPress` });
+      } else {
+        onSaveItem({
+          ...item,
+          status: 'Error',
+          lastAutoPublishError: result?.message || 'Publish failed',
+          updatedAt: new Date().toISOString(),
+        });
+        setNotice({ kind: 'err', text: `Publish failed: ${result?.message || 'Unknown error'}` });
+      }
+    } catch (err: any) {
+      setNotice({ kind: 'err', text: `Publish error: ${err.message}` });
+    } finally {
+      setPublishing((prev) => {
+        const next = new Set(prev);
+        next.delete(item.id);
+        return next;
+      });
+    }
+  };
+
   // ── Delete item ────────────────────────────────────────────────────
   const handleDelete = async (item: ContentItem) => {
     await onDeleteItem(item);
     setNotice({ kind: 'ok', text: `Deleted "${item.title}"` });
+  };
+
+  // ── Batch generate all Planned items (with cancel) ────────────────
+  const handleGenerateAll = async () => {
+    const planned = autoBlogItems.filter((i) => i.status === 'Planned');
+    if (planned.length === 0) return;
+    batchCancelRef.current = false;
+    setBatchGenerating(true);
+    setNotice({ kind: 'ok', text: `Generating ${planned.length} articles sequentially — click Stop to cancel…` });
+    let done = 0;
+    for (const item of planned) {
+      if (batchCancelRef.current) {
+        setNotice({ kind: 'ok', text: `Stopped after ${done} / ${planned.length} articles` });
+        break;
+      }
+      await handleGenerate(item);
+      done++;
+    }
+    if (!batchCancelRef.current) {
+      setNotice({ kind: 'ok', text: `All done — ${done} articles generated` });
+    }
+    setBatchGenerating(false);
+  };
+
+  const handleCancelBatch = () => {
+    batchCancelRef.current = true;
   };
 
   const formatDate = (iso?: string) => {
@@ -624,6 +917,28 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
                 </button>
               </div>
               {error && <p className="text-xs text-red-500 mt-1">{error}</p>}
+              {/* Connection health indicator */}
+              {connStatus && (
+                <div className={`mt-2 flex items-center gap-2 text-xs px-3 py-2 rounded-xl border ${
+                  connStatus.ok
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                    : 'bg-red-50 border-red-200 text-red-700'
+                }`}>
+                  <span className={`w-2 h-2 rounded-full shrink-0 ${connStatus.ok ? 'bg-emerald-500' : 'bg-red-500 animate-pulse'}`} />
+                  <span className="flex-1">{connStatus.message}</span>
+                  {connStatus.latencyMs != null && (
+                    <span className="text-[10px] opacity-60">{connStatus.latencyMs}ms</span>
+                  )}
+                  <button
+                    onClick={handlePing}
+                    disabled={pinging}
+                    className="px-2 py-0.5 rounded-lg bg-white border border-current/10 text-[10px] font-semibold hover:opacity-80 transition disabled:opacity-50"
+                    title="Test connection now"
+                  >
+                    {pinging ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Test'}
+                  </button>
+                </div>
+              )}
               <p className="text-[11px] text-slate-400 mt-1">
                 The sheet must be publicly accessible (Anyone with link can view).
               </p>
@@ -715,7 +1030,10 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
                   className="w-full px-4 py-3 bg-violet-600 hover:bg-violet-700 text-white rounded-xl text-sm font-bold transition flex items-center justify-center gap-2 disabled:opacity-50 shadow-sm"
                 >
                   {importing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-                  Import {sheetRows.length} Rows as Planned Posts
+                  {importing && importProgress
+                    ? `Importing ${importProgress.done} / ${importProgress.total}…`
+                    : `Import ${sheetRows.length} Rows as Planned Posts`
+                  }
                 </button>
               </div>
             )}
@@ -803,6 +1121,16 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
                 />
                 Auto-publish when scheduled date arrives
               </label>
+              {autoPublish && (
+                <div className="flex items-start gap-2 p-2.5 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-700">
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <span>
+                    Auto-publish runs every 60 seconds <strong>while this browser tab is open</strong>.
+                    If you close the tab, scheduled posts won't publish until you return.
+                    For fully automated publishing, set up a server-side cron job targeting <code className="bg-amber-100 px-1 rounded">/api/autoblog/check-publish</code>.
+                  </span>
+                </div>
+              )}
               <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
                 <input
                   type="checkbox"
@@ -901,64 +1229,15 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
               <CalendarGrid
                 year={calYear}
                 month={calMonth}
-                items={autoBlogItems}
+                items={brandItems}
                 onEditItem={onEditItem}
                 onGenerate={handleGenerate}
+                onScheduleItem={handleSchedule}
                 generating={generating}
                 brands={brands}
               />
             </div>
           </div>
-
-          {/* Unscheduled items (no date yet) */}
-          {autoBlogItems.filter((i) => !i.scheduledPublishAt).length > 0 && (
-            <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
-              <h3 className="font-bold text-slate-900 text-sm mb-3 flex items-center gap-2">
-                <Clock className="w-4 h-4 text-slate-400" />
-                Unscheduled ({autoBlogItems.filter((i) => !i.scheduledPublishAt).length})
-              </h3>
-              <div className="space-y-2">
-                {autoBlogItems.filter((i) => !i.scheduledPublishAt).map((item) => {
-                  const isGen = generating.has(item.id);
-                  return (
-                    <div key={item.id} className="flex items-center gap-3 p-3 rounded-xl bg-slate-50 border border-slate-100">
-                      <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold ${statusColors[item.status] || 'bg-slate-100 text-slate-600'}`}>
-                        {item.status.replace('_', ' ')}
-                      </span>
-                      <span className="flex-1 text-sm text-slate-800 truncate font-medium">{item.title}</span>
-                      {item.primaryKeyword && (
-                        <span className="text-[11px] text-slate-400 hidden md:block">🔑 {item.primaryKeyword}</span>
-                      )}
-                      {item.status === 'Planned' && (
-                        <button
-                          onClick={() => handleGenerate(item)}
-                          disabled={isGen}
-                          className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 disabled:opacity-50"
-                        >
-                          {isGen ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
-                          Write Article
-                        </button>
-                      )}
-                      <button
-                        onClick={() => {
-                          // Schedule for next available slot
-                          const today = new Date();
-                          const nextDate = new Date(today);
-                          nextDate.setDate(nextDate.getDate() + 1);
-                          nextDate.setHours(9, 0, 0, 0);
-                          handleSchedule(item, nextDate.toISOString().split('T')[0], '09:00');
-                        }}
-                        className="px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-xs font-bold transition"
-                      >
-                        <Calendar className="w-3 h-3 inline mr-1" />
-                        Schedule
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
         </div>
       )}
 
@@ -968,6 +1247,34 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
           {/* Quick actions bar */}
           {autoBlogItems.length > 0 && (
             <div className="flex flex-wrap items-center gap-2">
+              {batchGenerating ? (
+                <button
+                  onClick={handleCancelBatch}
+                  className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl text-sm font-semibold transition flex items-center gap-1.5"
+                >
+                  <Pause className="w-4 h-4" />
+                  Stop Generation
+                </button>
+              ) : autoBlogItems.some((i) => i.status === 'Planned') && (
+                <button
+                  onClick={handleGenerateAll}
+                  disabled={generating.size > 0}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-semibold transition flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  <Sparkles className="w-4 h-4" />
+                  Generate All Planned ({autoBlogItems.filter((i) => i.status === 'Planned').length})
+                </button>
+              )}
+              {sheetUrl && sheetRows.length > 0 && (
+                <button
+                  onClick={handleResync}
+                  disabled={resyncing}
+                  className="px-4 py-2 bg-white border border-slate-200 text-slate-600 rounded-xl text-sm font-semibold hover:bg-slate-50 transition flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  {resyncing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                  Re-sync Sheet
+                </button>
+              )}
               <button
                 onClick={handleScheduleAll}
                 className="px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-xl text-sm font-semibold transition flex items-center gap-1.5"
@@ -982,6 +1289,22 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
                 <Settings2 className="w-4 h-4" />
                 Sheet Settings
               </button>
+              {/* Live connection indicator */}
+              {connStatus && (
+                <button
+                  onClick={handlePing}
+                  disabled={pinging}
+                  className={`px-3 py-2 rounded-xl text-xs font-semibold transition flex items-center gap-1.5 border ${
+                    connStatus.ok
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-700 hover:bg-emerald-100'
+                      : 'bg-red-50 border-red-200 text-red-600 hover:bg-red-100 animate-pulse'
+                  }`}
+                  title={connStatus.message}
+                >
+                  <span className={`w-2 h-2 rounded-full ${connStatus.ok ? 'bg-emerald-500' : 'bg-red-500'}`} />
+                  {pinging ? 'Checking…' : connStatus.ok ? 'Connected' : 'Reconnect'}
+                </button>
+              )}
             </div>
           )}
 
@@ -1059,13 +1382,23 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
                       </button>
                     )}
 
-                    {item.status === 'Draft_Ready' && !isScheduled && (
+                    {item.status !== 'Published' && item.status !== 'Generating' && !isScheduled && (
                       <button
                         onClick={() => handleSchedule(item, startDate, '09:00')}
                         className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1"
                       >
                         <Calendar className="w-3 h-3" />
                         Schedule
+                      </button>
+                    )}
+
+                    {item.status === 'Draft_Ready' && (
+                      <button
+                        onClick={() => handlePublishNow(item)}
+                        className="px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1"
+                      >
+                        <Send className="w-3 h-3" />
+                        Publish Now
                       </button>
                     )}
 
@@ -1109,8 +1442,8 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
                       </div>
                     </div>
 
-                    {/* Schedule controls */}
-                    {item.status === 'Draft_Ready' && (
+                    {/* Schedule controls — available at any stage except Published */}
+                    {item.status !== 'Published' && item.status !== 'Generating' && (
                       <div className="flex items-end gap-3 pt-2 border-t border-slate-200">
                         <div>
                           <label className="block text-[11px] font-medium text-slate-500 mb-1">Publish Date</label>
@@ -1193,7 +1526,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
                       {formatDate(item.scheduledPublishAt)}
                     </div>
                     <div className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-                      item.status === 'Published' ? 'bg-emerald-500' : item.status === 'Draft_Ready' ? 'bg-violet-500' : 'bg-slate-300'
+                      item.status === 'Published' ? 'bg-emerald-500' : item.scheduledPublishAt ? 'bg-orange-400' : 'bg-red-400'
                     }`} />
                     <div className="flex-1 truncate text-slate-700 text-xs">{item.title}</div>
                     <div className="text-[10px] text-slate-400 shrink-0">{item.status.replace('_', ' ')}</div>

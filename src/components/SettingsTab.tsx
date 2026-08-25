@@ -105,7 +105,7 @@ const ApiKeysTab: React.FC = () => {
               className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
               placeholder="sk-proj-..."
             />
-            <p className="text-[10px] text-slate-400 mt-1">Used for DALL-E 3 image generation in Nano Banana Studio.</p>
+            <p className="text-[10px] text-slate-400 mt-1">Used for DALL-E 3 image generation in AI Image Generator.</p>
           </div>
 
           <div>

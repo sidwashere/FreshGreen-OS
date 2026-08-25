@@ -42,7 +42,8 @@ import {
   Target,
   Upload,
   GripVertical,
-  SlidersHorizontal
+  SlidersHorizontal,
+  Calendar
 } from 'lucide-react';
 
 // Blog production workflow — the order every post moves through
@@ -3160,6 +3161,65 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                     </div>
                   ))}
                 </div>
+
+                {/* Schedule for later — date/time picker */}
+                {editingItem.status !== 'Published' && (
+                  <div className="flex items-end gap-3 p-3 rounded-xl border border-slate-100 bg-slate-50/50">
+                    <Calendar className="w-4 h-4 text-slate-400 shrink-0 mb-1.5" />
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-500 mb-1">Schedule for later</label>
+                      <input
+                        type="date"
+                        defaultValue={editingItem.scheduledPublishAt ? new Date(editingItem.scheduledPublishAt).toISOString().split('T')[0] : ''}
+                        onChange={(e) => {
+                          if (e.target.value) {
+                            const time = editingItem.scheduledPublishAt
+                              ? new Date(editingItem.scheduledPublishAt).toTimeString().slice(0, 5)
+                              : '09:00';
+                            const dt = new Date(`${e.target.value}T${time}:00`);
+                            setEditingItem((prev) => prev ? { ...prev, scheduledPublishAt: dt.toISOString() } : prev);
+                            onSaveItem({ ...editingItem, scheduledPublishAt: dt.toISOString(), updatedAt: new Date().toISOString() });
+                          }
+                        }}
+                        className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs focus:ring-2 focus:ring-violet-500 outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-500 mb-1">Time</label>
+                      <input
+                        type="time"
+                        defaultValue={editingItem.scheduledPublishAt ? new Date(editingItem.scheduledPublishAt).toTimeString().slice(0, 5) : '09:00'}
+                        onChange={(e) => {
+                          const date = editingItem.scheduledPublishAt
+                            ? new Date(editingItem.scheduledPublishAt).toISOString().split('T')[0]
+                            : new Date().toISOString().split('T')[0];
+                          if (e.target.value) {
+                            const dt = new Date(`${date}T${e.target.value}:00`);
+                            setEditingItem((prev) => prev ? { ...prev, scheduledPublishAt: dt.toISOString() } : prev);
+                            onSaveItem({ ...editingItem, scheduledPublishAt: dt.toISOString(), updatedAt: new Date().toISOString() });
+                          }
+                        }}
+                        className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs focus:ring-2 focus:ring-violet-500 outline-none"
+                      />
+                    </div>
+                    {editingItem.scheduledPublishAt && (
+                      <button
+                        onClick={() => {
+                          setEditingItem((prev) => prev ? { ...prev, scheduledPublishAt: undefined } : prev);
+                          onSaveItem({ ...editingItem, scheduledPublishAt: undefined, updatedAt: new Date().toISOString() });
+                        }}
+                        className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-xs font-medium transition"
+                      >
+                        Clear
+                      </button>
+                    )}
+                    {editingItem.scheduledPublishAt && (
+                      <span className="text-[11px] text-violet-600 font-medium ml-1 mb-1.5">
+                        🔵 Scheduled: {new Date(editingItem.scheduledPublishAt).toLocaleDateString()} {new Date(editingItem.scheduledPublishAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    )}
+                  </div>
+                )}
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   <button

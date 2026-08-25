@@ -6,7 +6,6 @@ import { ZenEditor } from './components/ZenEditor';
 import { ContentHub } from './components/ContentHub';
 import { BrandManager } from './components/BrandManager';
 import { NanoBananaStudioModal } from './components/NanoBananaStudioModal';
-import { WorkspaceHub } from './components/WorkspaceHub';
 import { AutoBlogScheduler } from './components/AutoBlogScheduler';
 import { SettingsTab } from './components/SettingsTab';
 import { INITIAL_BRANDS, INITIAL_CONTENT } from './data/initialData';
@@ -289,11 +288,16 @@ export default function App() {
     };
 
     try {
+      // Optimistically add the item to local state immediately so the editor
+      // has something to render before the Firestore onSnapshot catches up.
+      setItems((prev) => [...prev, newItem as ContentItem]);
       await setDoc(doc(db, 'content_items', newItemId), newItem);
       setActiveItemId(newItem.id);
       setActiveTab('editor');
     } catch (err) {
       console.error('Failed to create new content item', err);
+      // Remove the optimistic insert if Firestore write failed
+      setItems((prev) => prev.filter((i) => i.id !== newItemId));
     }
   };
 
@@ -576,8 +580,6 @@ export default function App() {
                 onEditItem={handleEditItem}
               />
             )}
-
-            {activeTab === 'workspace' && <WorkspaceHub />}
 
             {activeTab === 'settings' && (
             <SettingsTab
