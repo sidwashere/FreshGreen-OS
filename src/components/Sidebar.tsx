@@ -9,7 +9,8 @@ import {
   Settings,
   LayoutDashboard,
   Library,
-  CalendarClock
+  CalendarClock,
+  ListChecks
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -18,6 +19,7 @@ interface SidebarProps {
   plannedCount: number;
   draftCount: number;
   contentCount?: number;
+  featureCount?: number;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
 }
@@ -28,6 +30,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   plannedCount,
   draftCount,
   contentCount = 0,
+  featureCount = 0,
   collapsed = false,
   onToggleCollapse
 }) => {
@@ -88,6 +91,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
     {
       label: 'Administration',
       items: [
+        {
+          id: 'features',
+          label: 'Feature Tracker',
+          icon: ListChecks,
+          badge: featureCount > 0 ? featureCount : null,
+          description: 'Requests, priorities & builds'
+        },
         {
           id: 'brands',
           label: 'Brand DNA & Vault',

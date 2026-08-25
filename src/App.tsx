@@ -8,8 +8,9 @@ import { BrandManager } from './components/BrandManager';
 import { NanoBananaStudioModal } from './components/NanoBananaStudioModal';
 import { AutoBlogScheduler } from './components/AutoBlogScheduler';
 import { SettingsTab } from './components/SettingsTab';
+import { FeatureTracker } from './components/FeatureTracker';
 import { INITIAL_BRANDS, INITIAL_CONTENT } from './data/initialData';
-import { Brand, ContentItem, PipelineStatus, AppUser } from './types';
+import { Brand, ContentItem, PipelineStatus, AppUser, FeatureRequest } from './types';
 import { initAuth, db } from './lib/firebase';
 import { User } from 'firebase/auth';
 import { collection, query, where, onSnapshot, doc, setDoc, deleteDoc, getDoc } from 'firebase/firestore';
@@ -17,6 +18,7 @@ import { collection, query, where, onSnapshot, doc, setDoc, deleteDoc, getDoc } 
 export default function App() {
   const [brands, setBrands] = useState<Brand[]>([]);
   const [items, setItems] = useState<ContentItem[]>([]);
+  const [features, setFeatures] = useState<FeatureRequest[]>([]);
 
   const [selectedBrandId, setSelectedBrandId] = useState<string>('dtp-brand');
   const [activeTab, setActiveTab] = useState<string>('pipeline');
@@ -148,6 +150,77 @@ export default function App() {
             const brandId = scopedBrandIds.get(item.brandId) || scope(item.brandId);
             await setDoc(doc(db, 'content_items', itemId), { ...item, id: itemId, brandId, userId: user.uid });
           }
+
+          // Seed feature requests from Carol's initial brief
+          const initialFeatures = [
+            {
+              id: scope('feat-pub-dates'),
+              title: 'Record original publication date & refresh date',
+              description: 'Prevent rehashed content becoming duplicates. Track when a blog was first published and when it was last refreshed, plus count how many times it has been repurposed.',
+              status: 'requested' as const, priority: 'high' as const, area: 'editor' as const,
+              requestedBy: 'Carol', requestedAt: new Date('2026-08-21T10:35:00').toISOString(),
+              tags: ['content-management', 'dates'], notes: '',
+            },
+            {
+              id: scope('feat-brand-numbering'),
+              title: 'Brand-specific blog numbering sequences',
+              description: 'Each brand gets its own starting number: Home At Peace starts at 1000, Daniel\'s Tasty Petfoods at 2000, etc. Prevents cross-brand reference collisions.',
+              status: 'requested' as const, priority: 'high' as const, area: 'autoblog' as const,
+              requestedBy: 'Carol', requestedAt: new Date('2026-08-21T10:35:00').toISOString(),
+              tags: ['autoblog', 'branding', 'numbering'], notes: '',
+            },
+            {
+              id: scope('feat-quarterly-themes'),
+              title: 'Quarterly theme-based blog generation',
+              description: 'Phase 2: Give FGOS a theme (e.g. "Helping Children Fall in Love with Reading") and it searches the Information Bank for relevant material, creates multiple articles around subtopics, identifies older blogs that fit the theme for refreshing.',
+              status: 'requested' as const, priority: 'medium' as const, area: 'autoblog' as const,
+              requestedBy: 'Carol', requestedAt: new Date('2026-08-21T10:35:00').toISOString(),
+              tags: ['phase-2', 'themes', 'information-bank'], notes: 'Also need a way to remind FGOS to draw on the Information Bank / IP.',
+            },
+            {
+              id: scope('feat-internal-linking'),
+              title: 'AI-powered contextual internal linking',
+              description: 'For every new blog, identify relevant existing content and insert contextual internal links naturally within the article.',
+              status: 'requested' as const, priority: 'critical' as const, area: 'seo' as const,
+              requestedBy: 'Carol', requestedAt: new Date('2026-08-25T12:15:00').toISOString(),
+              tags: ['seo', 'internal-linking', 'content-intelligence'], notes: 'Critical for SEO. Requires content register.',
+            },
+            {
+              id: scope('feat-related-sections'),
+              title: 'Dynamic Related Articles / Products / CTA sections',
+              description: 'Templates contain designated sections for Related Articles, Related Products/Services, and a dynamic final CTA. FGOS determines what is relevant and populates these sections per brand.',
+              status: 'requested' as const, priority: 'high' as const, area: 'wordpress' as const,
+              requestedBy: 'Carol', requestedAt: new Date('2026-08-25T12:15:00').toISOString(),
+              tags: ['wordpress', 'templates', 'cta'], notes: 'FCC recommends books, DTP recommends products, HaP recommends care services.',
+            },
+            {
+              id: scope('feat-content-register'),
+              title: 'Content register / library awareness',
+              description: 'Maintain a register of all published content: title, URL, brand, category/topic, keywords, publication date, related products. AI uses this for internal linking decisions.',
+              status: 'requested' as const, priority: 'critical' as const, area: 'dashboard' as const,
+              requestedBy: 'Carol', requestedAt: new Date('2026-08-25T12:15:00').toISOString(),
+              tags: ['content-intelligence', 'wp-rest-api', 'seo'], notes: 'Either maintain in Firestore or pull live from WordPress REST API.',
+            },
+            {
+              id: scope('feat-kadence-templates'),
+              title: 'Kadence-compatible reusable blog templates',
+              description: 'Long Blog and Short Blog templates built using Kadence global styles. No hard-coded brand fonts/colours — each site applies its own global styling automatically.',
+              status: 'planned' as const, priority: 'high' as const, area: 'wordpress' as const,
+              requestedBy: 'Carol', requestedAt: new Date('2026-08-25T11:39:00').toISOString(),
+              tags: ['wordpress', 'kadence', 'templates'], notes: 'Sumbul building the templates. FGOS automation must target these reliably.',
+            },
+            {
+              id: scope('feat-wp-mcp-capabilities'),
+              title: 'WordPress MCP — full capability mapping',
+              description: 'Document what the WP MCP exposes: create/update posts & pages, SEO titles/meta, headings, image alt text, product/CTA links, internal linking, Gutenberg/Kadence blocks, menus, CSS/template settings, routine maintenance.',
+              status: 'planned' as const, priority: 'medium' as const, area: 'wordpress' as const,
+              requestedBy: 'Carol', requestedAt: new Date('2026-08-20T11:28:00').toISOString(),
+              tags: ['wordpress', 'mcp', 'integration'], notes: 'Carol wants to know if ChatGPT can also use the WP MCP for ongoing maintenance.',
+            },
+          ];
+          for (const feat of initialFeatures) {
+            await setDoc(doc(db, 'feature_requests', feat.id), { ...feat, userId: user.uid });
+          }
         }
         localStorage.setItem(storageKey, 'true');
       } catch (err) {
@@ -174,9 +247,18 @@ export default function App() {
       console.error("Error fetching items snapshot:", error);
     });
 
+    const qFeatures = query(collection(db, 'feature_requests'), where('userId', '==', user.uid));
+    const unsubscribeFeatures = onSnapshot(qFeatures, (snapshot) => {
+      const fbFeatures = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as FeatureRequest));
+      setFeatures(fbFeatures);
+    }, (error) => {
+      console.error("Error fetching feature requests snapshot:", error);
+    });
+
     return () => {
       unsubscribeBrands();
       unsubscribeItems();
+      unsubscribeFeatures();
     };
   }, [user]);
 
@@ -422,6 +504,26 @@ export default function App() {
     setActiveItemId(newest.id);
   }, [selectedBrandId, activeTab, items, activeItemId]);
 
+  // Feature Request Actions
+  const handleSaveFeature = async (feature: FeatureRequest) => {
+    if (!user) return;
+    try {
+      const featureToSave = { ...feature, userId: user.uid };
+      await setDoc(doc(db, 'feature_requests', feature.id), featureToSave);
+    } catch (err) {
+      console.error('Failed to save feature request', err);
+    }
+  };
+
+  const handleDeleteFeature = async (featureId: string) => {
+    if (!user) return;
+    try {
+      await deleteDoc(doc(db, 'feature_requests', featureId));
+    } catch (err) {
+      console.error('Failed to delete feature request', err);
+    }
+  };
+
   const plannedCount = items.filter((i) => i.status === 'Planned' || i.status === 'Researching').length;
   const draftCount = items.filter((i) => i.status === 'Draft_Ready' || i.status === 'Generating').length;
 
@@ -486,6 +588,7 @@ export default function App() {
               plannedCount={plannedCount}
               draftCount={draftCount}
               contentCount={items.length}
+              featureCount={features.filter(f => f.status !== 'shipped').length}
               collapsed={sidebarCollapsed}
               onToggleCollapse={toggleSidebar}
             />
@@ -578,6 +681,14 @@ export default function App() {
                 onCreateNewItem={handleCreateNewItem}
                 onDeleteItem={handleDeleteItem}
                 onEditItem={handleEditItem}
+              />
+            )}
+
+            {activeTab === 'features' && (
+              <FeatureTracker
+                features={features}
+                onSave={handleSaveFeature}
+                onDelete={handleDeleteFeature}
               />
             )}
 

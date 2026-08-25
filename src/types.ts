@@ -346,3 +346,25 @@ export interface SeoAuditResult {
   metaTitle: string;
   metaDescription: string;
 }
+
+// ─── Feature Request Tracker ─────────────────────────────────────────────────
+
+export type FeatureStatus = 'requested' | 'planned' | 'in-progress' | 'shipped' | 'deferred';
+export type FeaturePriority = 'critical' | 'high' | 'medium' | 'low';
+export type FeatureArea = 'editor' | 'autoblog' | 'seo' | 'wordpress' | 'dashboard' | 'images' | 'brands' | 'deployment' | 'other';
+
+export interface FeatureRequest {
+  id: string;
+  userId: string;
+  title: string;
+  description: string;
+  status: FeatureStatus;
+  priority: FeaturePriority;
+  area: FeatureArea;
+  requestedBy: string;
+  requestedAt: string;
+  completedAt?: string;
+  shippedInVersion?: string;
+  tags: string[];
+  notes: string;
+}
