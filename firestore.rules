@@ -103,5 +103,19 @@ service cloud.firestore {
                     && parentBrandExistsAndOwned();
       allow delete: if isSignedIn() && isValidId(itemId) && existing().userId == request.auth.uid;
     }
+
+    match /feature_requests/{featureId} {
+      function isValidFeatureRequest(data) {
+        return data.size() >= 5
+          && data.title is string && data.title.size() <= 255
+          && data.userId == request.auth.uid;
+      }
+
+      allow get: if isSignedIn() && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && existing().userId == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(featureId) && isValidFeatureRequest(incoming());
+      allow update: if isSignedIn() && isValidId(featureId) && existing().userId == request.auth.uid && incoming().userId == request.auth.uid;
+      allow delete: if isSignedIn() && isValidId(featureId) && existing().userId == request.auth.uid;
+    }
   }
 }

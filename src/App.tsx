@@ -9,9 +9,10 @@ import { NanoBananaStudioModal } from './components/NanoBananaStudioModal';
 import { AutoBlogScheduler } from './components/AutoBlogScheduler';
 import { SettingsTab } from './components/SettingsTab';
 import { FeatureTracker } from './components/FeatureTracker';
+import { LoginScreen } from './components/LoginScreen';
 import { INITIAL_BRANDS, INITIAL_CONTENT } from './data/initialData';
 import { Brand, ContentItem, PipelineStatus, AppUser, FeatureRequest } from './types';
-import { initAuth, db } from './lib/firebase';
+import { initAuth, db, USE_EMULATORS, adminCreateAccount, usernameToEmail } from './lib/firebase';
 import { User } from 'firebase/auth';
 import { collection, query, where, onSnapshot, doc, setDoc, deleteDoc, getDoc } from 'firebase/firestore';
 
@@ -60,6 +61,7 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [appUser, setAppUser] = useState<AppUser | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [authResolved, setAuthResolved] = useState(false);
 
   // Read the user's app_users profile and decide approved / pending / legacy
   const checkApproval = async (u: User): Promise<AppUser | null> => {
@@ -70,26 +72,36 @@ export default function App() {
       setAppUser(profile);
       return profile;
     }
-    // Auto-authenticated account with no profile yet (fresh emulator first
-    // run): provision it as the workspace ADMIN so the app is never locked
-    // behind an approval screen. The owner auto-signs in as this account.
+
+    // New user with no profile — determine if this is the first user (owner)
+    // or a subsequent user who needs admin approval.
+    let isFirstUser = false;
+    try {
+      const bootstrapSnap = await getDoc(doc(db, 'app_meta', 'bootstrap'));
+      isFirstUser = !bootstrapSnap.exists();
+    } catch {
+      isFirstUser = true; // If we can't check, provision as admin (safe for emulator)
+    }
+
     const profile: AppUser = {
       id: u.uid,
       username: (u.email || 'user').split('@')[0].replace(/[^a-zA-Z0-9._-]/g, '') || 'user',
-      role: 'admin',
-      approved: true,
+      role: isFirstUser ? 'admin' : 'member',
+      approved: isFirstUser, // Only auto-approve the first user (owner)
       createdAt: new Date().toISOString(),
       userId: u.uid,
     };
     try {
       await setDoc(ref, profile as any);
-      await setDoc(doc(db, 'app_meta', 'bootstrap'), {
-        initialized: true,
-        adminUid: u.uid,
-        at: new Date().toISOString(),
-      });
+      if (isFirstUser) {
+        await setDoc(doc(db, 'app_meta', 'bootstrap'), {
+          initialized: true,
+          adminUid: u.uid,
+          at: new Date().toISOString(),
+        });
+      }
     } catch (err) {
-      console.warn('Could not provision the owner profile:', err);
+      console.warn('Could not provision the user profile:', err);
     }
     setAppUser(profile);
     return profile;
@@ -98,6 +110,7 @@ export default function App() {
   const handleAuthUser = async (authUser: User) => {
     setUser(authUser);
     setAuthError(null);
+    setAuthResolved(true);
     const profile = await checkApproval(authUser);
     if (!profile || !profile.approved) {
       setAuthError('Your account is not approved. Ask an administrator to approve it in Settings → User Management.');
@@ -108,9 +121,13 @@ export default function App() {
     const unsubscribe = initAuth(
       (authUser) => { handleAuthUser(authUser); },
       () => {
-        setAuthError(
-          'Automatic sign-in failed. Make sure the Firebase emulators are running (firestore :8080, auth :9099) and that the owner credentials in src/lib/firebase.ts match the seeded emulator.'
-        );
+        setAuthResolved(true);
+        if (USE_EMULATORS) {
+          setAuthError(
+            'Automatic sign-in failed. Make sure the Firebase emulators are running (firestore :8080, auth :9099) and that the owner credentials in src/lib/firebase.ts match the seeded emulator.'
+          );
+        }
+        // In production: no error — just let the login screen show
       }
     );
     return () => unsubscribe();
@@ -220,6 +237,20 @@ export default function App() {
           ];
           for (const feat of initialFeatures) {
             await setDoc(doc(db, 'feature_requests', feat.id), { ...feat, userId: user.uid });
+          }
+
+          // Pre-create Carol's email/password account so she can log in.
+          // Her Firestore profile will be auto-provisioned when she signs in
+          // for the first time (see checkApproval). The owner can then promote
+          // her to admin via Settings → User Management.
+          try {
+            await adminCreateAccount('Carol', 'Process1949**');
+            console.log('[Seed] Carol superadmin account created (carol@fgos.local)');
+          } catch (err: any) {
+            // Already exists — that's fine
+            if (err?.code !== 'auth/email-already-in-use') {
+              console.debug('Carol account creation skipped:', err?.message || err);
+            }
           }
         }
         localStorage.setItem(storageKey, 'true');
@@ -527,9 +558,8 @@ export default function App() {
   const plannedCount = items.filter((i) => i.status === 'Planned' || i.status === 'Researching').length;
   const draftCount = items.filter((i) => i.status === 'Draft_Ready' || i.status === 'Generating').length;
 
-  // No login screen: the app auto-authenticates as the workspace owner. While
-  // that resolves, show a brief splash; if it ever fails (emulator down or
-  // credentials changed), surface a clear error instead of a login form.
+  // No login screen in emulator mode: the app auto-authenticates as the workspace owner.
+  // In production: show a login screen when auth resolves with no user.
   if (authError) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center font-sans p-4">
@@ -553,6 +583,11 @@ export default function App() {
   }
 
   if (!user) {
+    // Production: show login screen once auth has resolved with no user
+    if (authResolved && !USE_EMULATORS) {
+      return <LoginScreen />;
+    }
+    // Emulator or still loading: show spinner
     return (
       <div className="h-[100dvh] bg-[#e9ecef] flex items-center justify-center font-sans">
         <div className="bg-white px-8 py-6 rounded-2xl shadow-sm border border-slate-200 flex items-center space-x-3">

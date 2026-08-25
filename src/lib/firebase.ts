@@ -7,6 +7,10 @@ import {
   createUserWithEmailAndPassword,
   onAuthStateChanged,
   User,
+  GoogleAuthProvider,
+  signInWithPopup,
+  browserLocalPersistence,
+  setPersistence,
 } from 'firebase/auth';
 import { getFirestore, connectFirestoreEmulator } from 'firebase/firestore';
 import { connectAuthEmulator } from 'firebase/auth';
@@ -68,14 +72,36 @@ export const usernameToEmail = (username: string): string =>
 export const isValidUsername = (username: string): boolean =>
   /^[a-zA-Z0-9._-]{3,24}$/.test(username.trim());
 
+// ─── Google Sign-In ───────────────────────────────────────────────────────────
+const googleProvider = new GoogleAuthProvider();
+
+export const signInWithGoogle = async (): Promise<User> => {
+  // Ensure persistent session (survives page reload) for production
+  if (!USE_EMULATORS) {
+    await setPersistence(auth, browserLocalPersistence);
+  }
+  const result = await signInWithPopup(auth, googleProvider);
+  return result.user;
+};
+
+// ─── Email/Password Sign-In ───────────────────────────────────────────────────
+export const signInWithEmail = async (email: string, password: string): Promise<User> => {
+  if (!USE_EMULATORS) {
+    await setPersistence(auth, browserLocalPersistence);
+  }
+  const result = await signInWithEmailAndPassword(auth, email, password);
+  return result.user;
+};
+
+// ─── Sign Out ─────────────────────────────────────────────────────────────────
+export const signOutUser = async (): Promise<void> => {
+  await auth.signOut();
+};
+
 // --- Auto-authentication (no login screen) --------------------------------
-// This app is a private, single-operator tool backed by the local Firebase
-// emulator. Instead of a login screen, every load silently signs in as the
-// workspace owner (whose UID owns all the seeded brands/content). If the
-// account does not exist yet (fresh emulator), it is created on first run —
-// the app then promotes it to admin via the bootstrap flow in App.tsx.
-// NOTE: this only works against the emulator / the account created below.
-// If the emulator is reseeded with a different password, update AUTO_AUTH.
+// In EMULATOR mode: silently signs in as the workspace owner every time.
+// In PRODUCTION mode: no auto-login — show the login screen instead so
+// multiple users (Carol, Sidney, etc.) can authenticate with Google or email.
 const AUTO_AUTH_USERNAME = 'owner';
 const AUTO_AUTH_PASSWORD = 'Owner-Petfoods-2026';
 
@@ -88,8 +114,6 @@ export const initAuth = (
   return onAuthStateChanged(auth, async (user: User | null) => {
     if (user) {
       try {
-        // Refresh the ID token on every session restore (page reload, new tab)
-        // so returning users aren't bounced back to the login screen.
         const idToken = await user.getIdToken(true);
         cachedAccessToken = idToken;
         if (onAuthSuccess) onAuthSuccess(user, idToken);
@@ -99,26 +123,28 @@ export const initAuth = (
         if (onAuthFailure) onAuthFailure();
       }
     } else {
-      // No active session — auto-authenticate instead of showing a login form.
-      // signInWithEmailAndPassword flips the auth state, which fires this
-      // listener again with the signed-in user (so onAuthSuccess runs then).
       cachedAccessToken = null;
-      try {
-        const email = usernameToEmail(AUTO_AUTH_USERNAME);
+
+      if (USE_EMULATORS) {
+        // Emulator mode: auto-login as owner (no login screen needed)
         try {
-          await signInWithEmailAndPassword(auth, email, AUTO_AUTH_PASSWORD);
-        } catch (err: any) {
-          if (err?.code === 'auth/user-not-found') {
-            // First run on a fresh emulator: create the owner account. The
-            // missing app_users profile is auto-provisioned as admin by the
-            // approval check in App.tsx.
-            await createUserWithEmailAndPassword(auth, email, AUTO_AUTH_PASSWORD);
-          } else {
-            throw err;
+          const email = usernameToEmail(AUTO_AUTH_USERNAME);
+          try {
+            await signInWithEmailAndPassword(auth, email, AUTO_AUTH_PASSWORD);
+          } catch (err: any) {
+            if (err?.code === 'auth/user-not-found') {
+              await createUserWithEmailAndPassword(auth, email, AUTO_AUTH_PASSWORD);
+            } else {
+              throw err;
+            }
           }
+        } catch (err: any) {
+          console.error('[AutoAuth] automatic sign-in failed:', err?.message || err);
+          if (onAuthFailure) onAuthFailure();
         }
-      } catch (err: any) {
-        console.error('[AutoAuth] automatic sign-in failed:', err?.message || err);
+      } else {
+        // Production: no auto-login — let the login screen handle auth.
+        // Signal "auth resolved, no user" so App.tsx can show the login UI.
         if (onAuthFailure) onAuthFailure();
       }
     }
