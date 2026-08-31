@@ -1461,6 +1461,9 @@ SEO requirements (scored by an automated SEO analyzer, follow precisely):
     const realProducts = await fetchBrandProducts(brand);
     const relatedList = Array.isArray(relatedArticles) ? relatedArticles.slice(0, 6) : [];
     const dynamicFieldsText = buildDynamicFieldsPrompt(realProducts, relatedList, sc?.callToAction);
+    // feat-internal-linking: feed the real published articles so the model weaves
+    // contextual in-body links to real content (not invented /blog/ paths).
+    const internalLinkingText = buildInternalLinkingPrompt(relatedList);
 
     // One-line summary — as additional brief context
     const summaryText = sc?.oneLineSummary
@@ -1480,6 +1483,7 @@ ${internalLinksText}
 ${faqText}
 ${ctaText}
 ${dynamicFieldsText}
+${internalLinkingText}
 
 Headline: craft your own fresh article title as the single <h1> — do not repeat the topic text above verbatim as the headline.`;
 
@@ -2621,6 +2625,8 @@ Output Format: Return ONLY the raw HTML article body. Use h1, h2, h3, p, ul, li,
     const realProducts = await fetchBrandProducts(brand);
     const relatedList = Array.isArray(relatedArticles) ? relatedArticles.slice(0, 6) : [];
     const dynamicFieldsText = buildDynamicFieldsPrompt(realProducts, relatedList, undefined);
+    // feat-internal-linking: real published articles for contextual in-body links.
+    const internalLinkingText = buildInternalLinkingPrompt(relatedList);
     const prompt = `ENHANCE this existing article. Preserve the author's voice while improving SEO, readability, and completeness.
 
 ORIGINAL ARTICLE TITLE: ${articleSource}
@@ -2643,7 +2649,8 @@ Write the ENHANCED version of this article. Keep the same structure and messages
 - No factual contradictions, all health claims qualified
 - Clean ending with sentence-final punctuation
 - Target approximately ${targetWordCount && targetWordCount > 0 ? targetWordCount : 1000} words (within +/- 15%)
-${dynamicFieldsText}`;
+${dynamicFieldsText}
+${internalLinkingText}`;
 
     emit({ type: 'status', message: 'Analysing the existing article and enhancement instructions…', percent: 5 });
 
@@ -4570,7 +4577,7 @@ function populateDynamicFields(
   //    Only rewrite links whose href is a generic /blog/ path (not an external
   //    URL and not already a real article slug).
   if (related.length) {
-    const knownSlugs = new Set(related.map((r: any) => (r.slug || '').toLowerCase().replace(/^\/+|\/+$/g, '')));
+    const knownSlugs = new Set(related.map((r: any) => (r.slug || '').toLowerCase().replace(/^\/+|\/+$/g, '').replace(/^blog\//i, '')));
     const aRe = /<a\b([^>]*)href="([^"]*)"([^>]*)>([\s\S]*?)<\/a>/gi;
     let linkCount = 0;
     out = out.replace(aRe, (full: string, pre: string, href: string, post: string, anchor: string) => {
@@ -4586,7 +4593,7 @@ function populateDynamicFields(
         (r.title && anchorLower.includes(r.title.toLowerCase()))
       ) || related[0];
       if (!match) return full;
-      const slug = (match.slug || '').replace(/^\/+|\/+$/g, '');
+      const slug = (match.slug || '').replace(/^\/+|\/+$/g, '').replace(/^blog\//i, '');
       if (!slug) return full;
       linkCount++;
       return `<a${pre}href="/blog/${escapeHtmlAttr(slug)}"${post}>${anchor}</a>`;
@@ -4644,6 +4651,30 @@ function buildDynamicFieldsPrompt(products: any[], related: any[], cta?: string)
   }
   if (!lines.length) return '';
   return `\n${lines.join('\n')}`;
+}
+
+/**
+ * feat-internal-linking (AI-powered contextual internal linking): builds a
+ * prompt section that lists the brand's REAL published articles and instructs
+ * the model to weave 1-3 contextual internal links to them within the article
+ * body — using their real slugs — instead of inventing plausible /blog/ paths.
+ * This is the "identify relevant existing content and insert contextual
+ * internal links naturally" half of the feature; the post-generation rewire in
+ * populateDynamicFields guarantees every in-body /blog/ link resolves to a real
+ * article.
+ */
+function buildInternalLinkingPrompt(related: any[]): string {
+  const real = (related || []).filter((r: any) => r && (r.slug || r.title));
+  if (!real.length) return '';
+  const list = real
+    .slice(0, 8)
+    .map((r: any) => {
+      const slug = String(r.slug || '').replace(/^\/+|\/+$/g, '').replace(/^blog\//i, '');
+      const label = r.title || slug;
+      return `- ${label}${slug ? ` → /blog/${slug}` : ''}${r.primaryKeyword ? ` (topic: ${r.primaryKeyword})` : ''}`;
+    })
+    .join('\n');
+  return `\nCONTEXTUAL INTERNAL LINKS — the site already has these REAL published articles. Weave 1-3 natural, contextually-relevant internal links to them within the article body (NOT just in a related-articles section), using their exact real slugs shown below. Anchor text should be descriptive and fit the surrounding sentence. Do NOT invent any other /blog/ paths — only link to the real articles listed here:\n${list}`;
 }
 
 // GET /api/wc/products — authenticated product list (richer data than public Store API)
