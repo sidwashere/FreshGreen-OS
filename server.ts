@@ -1460,7 +1460,7 @@ SEO requirements (scored by an automated SEO analyzer, follow precisely):
     // instead of placeholders.
     const realProducts = await fetchBrandProducts(brand);
     const relatedList = Array.isArray(relatedArticles) ? relatedArticles.slice(0, 6) : [];
-    const dynamicFieldsText = buildDynamicFieldsPrompt(realProducts, relatedList, sc?.callToAction);
+    const dynamicFieldsText = buildDynamicFieldsPrompt(realProducts, relatedList, sc?.callToAction, brand?.recommendationType);
     // feat-internal-linking: feed the real published articles so the model weaves
     // contextual in-body links to real content (not invented /blog/ paths).
     const internalLinkingText = buildInternalLinkingPrompt(relatedList);
@@ -1824,6 +1824,8 @@ Keep the JSON compact — no whitespace, no code fences.`;
         products: realProducts,
         relatedArticles: relatedList,
         cta: sc?.callToAction,
+        recommendationType: brand?.recommendationType,
+        brandName: brand?.name,
       });
       if (populated.fixes.length) {
         completeHtml = populated.html;
@@ -2624,7 +2626,7 @@ Output Format: Return ONLY the raw HTML article body. Use h1, h2, h3, p, ul, li,
     // ── Dynamic template fields (feat-auto-populate-dynamic-fields) ──────────
     const realProducts = await fetchBrandProducts(brand);
     const relatedList = Array.isArray(relatedArticles) ? relatedArticles.slice(0, 6) : [];
-    const dynamicFieldsText = buildDynamicFieldsPrompt(realProducts, relatedList, undefined);
+    const dynamicFieldsText = buildDynamicFieldsPrompt(realProducts, relatedList, undefined, brand?.recommendationType);
     // feat-internal-linking: real published articles for contextual in-body links.
     const internalLinkingText = buildInternalLinkingPrompt(relatedList);
     const prompt = `ENHANCE this existing article. Preserve the author's voice while improving SEO, readability, and completeness.
@@ -2880,6 +2882,8 @@ Keep the JSON compact — no whitespace, no code fences.`;
       const populated = populateDynamicFields(completeHtml, {
         products: realProducts,
         relatedArticles: relatedList,
+        recommendationType: brand?.recommendationType,
+        brandName: brand?.name,
       });
       if (populated.fixes.length) {
         completeHtml = populated.html;
@@ -4530,16 +4534,27 @@ async function fetchBrandProducts(brand: any): Promise<any[]> {
  *  - Replaces any `product-recommendation` placeholder with a real product card.
  *  - Rewrites related-article links to point at real content-register articles.
  *  - Ensures the CTA section carries the agreed CTA text.
+ *  - Appends any missing Related Articles / Related Products / CTA sections using
+ *    semantic, theme-agnostic markup (works with Kadence, Hello Elementor, and
+ *    any other theme — no hard-coded brand fonts/colours).
  * Returns the updated HTML plus a list of human-readable fixes for the log.
  */
 function populateDynamicFields(
   html: string,
-  opts: { products?: any[]; relatedArticles?: any[]; cta?: string },
+  opts: {
+    products?: any[];
+    relatedArticles?: any[];
+    cta?: string;
+    recommendationType?: 'products' | 'services' | 'books' | 'none';
+    brandName?: string;
+  },
 ): { html: string; fixes: string[] } {
   const fixes: string[] = [];
   let out = html;
   const products = opts.products || [];
   const related = opts.relatedArticles || [];
+  const recType = opts.recommendationType || (products.length ? 'products' : 'none');
+  const brandName = opts.brandName || 'our';
 
   // 1) Replace product-recommendation placeholders with a real product card.
   const prodRe = /<div[^>]*class="[^"]*product-recommendation[^"]*"[^>]*>([\s\S]*?)<\/div>/gi;
@@ -4616,6 +4631,85 @@ function populateDynamicFields(
     if (ctaCount) fixes.push(`filled ${ctaCount} empty CTA section(s) with the agreed call-to-action`);
   }
 
+  // 4) Ensure the article always carries the three dynamic sections — Related
+  //    Articles, Related Products/Services, and a final CTA — using semantic,
+  //    theme-agnostic markup. If the AI already produced a section we leave it;
+  //    otherwise we append one built from real data. The `fg-` classes are
+  //    generic and render cleanly under any theme (Kadence, Hello Elementor,
+  //    etc.) because they carry no hard-coded brand fonts or colours.
+  const hasRelatedSection = /class="[^"]*fg-related-articles[^"]*"/i.test(out) ||
+    /<section[^>]*class="[^"]*related[^"]*"[^>]*>/i.test(out) ||
+    /<h2[^>]*>[^<]*(keep reading|related (posts|articles|reading))[^<]*<\/h2>/i.test(out);
+  const hasProductSection = /class="[^"]*fg-related-products[^"]*"/i.test(out) ||
+    /<section[^>]*class="[^"]*product[^"]*"[^>]*>/i.test(out) ||
+    /<h2[^>]*>[^<]*(our (products|services|books)|explore (our )?(products|services|books)|related (products|services))[^<]*<\/h2>/i.test(out);
+  const hasCtaSection = /class="[^"]*fg-cta[^"]*"/i.test(out) ||
+    /<section[^>]*class="[^"]*cta[^"]*"[^>]*>/i.test(out) ||
+    /<h2[^>]*>[^<]*(get started|call to action|visit our shop|book now|contact us)[^<]*<\/h2>/i.test(out);
+
+  const appended: string[] = [];
+
+  // 4a) Related Articles section (only when we have real published articles).
+  if (!hasRelatedSection && related.length) {
+    const cards = related.slice(0, 3).map((r: any) => {
+      const slug = (r.slug || '').replace(/^\/+|\/+$/g, '').replace(/^blog\//i, '');
+      const title = r.title || 'Related article';
+      const excerpt = r.excerpt || r.topic || r.keywords || '';
+      return `<a class="fg-related-card" href="/blog/${escapeHtmlAttr(slug)}">
+  <h3>${escapeHtmlAttr(title)}</h3>
+  ${excerpt ? `<p>${escapeHtmlAttr(excerpt)}</p>` : ''}
+</a>`;
+    }).join('\n');
+    out += `\n\n<section class="fg-related-articles" aria-label="Related articles">
+  <h2>Keep Reading</h2>
+  <div class="fg-related-grid">
+${cards}
+  </div>
+</section>`;
+    appended.push('Related Articles');
+  }
+
+  // 4b) Related Products / Services / Books section (per-brand recommendation type).
+  if (!hasProductSection && recType !== 'none' && products.length) {
+    const heading = recType === 'books' ? 'Explore Our Books'
+      : recType === 'services' ? 'Explore Our Services'
+      : 'Explore Our Products';
+    const cards = products.slice(0, 3).map((p: any) => {
+      const price = p.price ? ` · ${p.currency || '£'}${p.price}` : '';
+      const img = p.image
+        ? `<img src="${escapeHtmlAttr(p.image)}" alt="${escapeHtmlAttr(p.name)}" loading="lazy" />`
+        : '';
+      const link = p.permalink || '#';
+      return `<div class="fg-product-card">
+  ${img}
+  <div class="fg-product-card-body">
+    <h3>${escapeHtmlAttr(p.name)}</h3>
+    <p>${escapeHtmlAttr(p.shortDescription || p.name)}</p>
+    <a class="fg-product-card-link" href="${escapeHtmlAttr(link)}" target="_blank" rel="noopener">View ${recType === 'books' ? 'book' : recType === 'services' ? 'service' : 'product'}${price}</a>
+  </div>
+</div>`;
+    }).join('\n');
+    out += `\n\n<section class="fg-related-products" aria-label="${escapeHtmlAttr(heading)}">
+  <h2>${escapeHtmlAttr(heading)}</h2>
+  <div class="fg-product-grid">
+${cards}
+  </div>
+</section>`;
+    appended.push(recType === 'books' ? 'Related Books' : recType === 'services' ? 'Related Services' : 'Related Products');
+  }
+
+  // 4c) Final CTA section (only when we have agreed CTA text).
+  if (!hasCtaSection && opts.cta && opts.cta.trim()) {
+    out += `\n\n<section class="fg-cta" aria-label="Call to action">
+  <p>${escapeHtmlAttr(opts.cta.trim())}</p>
+</section>`;
+    appended.push('CTA');
+  }
+
+  if (appended.length) {
+    fixes.push(`appended missing dynamic section(s): ${appended.join(', ')} (theme-agnostic markup)`);
+  }
+
   return { html: out, fixes };
 }
 
@@ -4624,7 +4718,12 @@ function populateDynamicFields(
  * real products, related articles and CTA to use when populating the template's
  * dynamic sections. Returns an empty string when there is nothing to populate.
  */
-function buildDynamicFieldsPrompt(products: any[], related: any[], cta?: string): string {
+function buildDynamicFieldsPrompt(
+  products: any[],
+  related: any[],
+  cta?: string,
+  recommendationType?: 'products' | 'services' | 'books' | 'none',
+): string {
   const lines: string[] = [];
   if (products.length) {
     lines.push(
@@ -4648,6 +4747,14 @@ function buildDynamicFieldsPrompt(products: any[], related: any[], cta?: string)
   }
   if (cta && cta.trim()) {
     lines.push(`AGREED CALL TO ACTION: "${cta.trim()}" — use this exact text in the CTA section.`);
+  }
+  if (recommendationType && recommendationType !== 'none') {
+    const noun = recommendationType === 'books' ? 'books'
+      : recommendationType === 'services' ? 'services'
+      : 'products';
+    lines.push(
+      `RECOMMENDATION SECTION — include a "Related ${noun === 'books' ? 'Books' : noun === 'services' ? 'Services' : 'Products'}" section in the article that recommends the real ${noun} listed above (use their real names and links). Use semantic, theme-agnostic markup (a <section> with an <h2> and a grid of cards) so it renders under any WordPress theme.`,
+    );
   }
   if (!lines.length) return '';
   return `\n${lines.join('\n')}`;

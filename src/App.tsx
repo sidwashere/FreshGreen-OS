@@ -225,9 +225,10 @@ export default function App() {
               id: scope('feat-related-sections'),
               title: 'Dynamic Related Articles / Products / CTA sections',
               description: 'Templates contain designated sections for Related Articles, Related Products/Services, and a dynamic final CTA. FGOS determines what is relevant and populates these sections per brand.',
-              status: 'requested' as const, priority: 'high' as const, area: 'wordpress' as const,
+              status: 'shipped' as const, priority: 'high' as const, area: 'wordpress' as const,
               requestedBy: 'Carol', requestedAt: new Date('2026-08-25T12:15:00').toISOString(),
-              tags: ['wordpress', 'templates', 'cta'], notes: 'FCC recommends books, DTP recommends products, HaP recommends care services.',
+              tags: ['wordpress', 'templates', 'cta'], notes: 'Theme-agnostic semantic sections appended when missing; per-brand recommendation type (FCC books, DTP products, HaP services). Works with any WP theme incl. Hello Elementor.',
+              shippedInVersion: 'v0.4', completedAt: new Date('2026-08-31T00:00:00').toISOString(),
             },
             {
               id: scope('feat-content-register'),

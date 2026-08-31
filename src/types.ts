@@ -44,6 +44,12 @@ export interface Brand {
    * independently toggleable; when absent, the global defaults apply. Custom
    * free-text rules can be appended per brand. */
   grammarRules?: GrammarRules;
+  /** What the "Related Products/Services" section should recommend for this
+   *  brand. Universal across themes: 'products' (WooCommerce store), 'services'
+   *  (care/consultancy services), 'books' (bookshop), or 'none' (no product
+   *  section). Defaults to 'products' when the brand has WooCommerce products,
+   *  else 'none'. */
+  recommendationType?: 'products' | 'services' | 'books' | 'none';
 }
 
 /** Per-brand grammar & style rules injected into every content-generation
