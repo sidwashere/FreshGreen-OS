@@ -10,6 +10,7 @@ import {
   FileText,
   Tag,
   ArrowUpDown,
+  RefreshCw,
 } from 'lucide-react';
 
 interface BlogRegisterProps {
@@ -159,6 +160,7 @@ export const BlogRegister: React.FC<BlogRegisterProps> = ({
                 <th className="px-4 py-2.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">Keywords</th>
                 <th className="px-4 py-2.5"><SortBtn label="Created" k="created" /></th>
                 <th className="px-4 py-2.5"><SortBtn label="Published" k="published" /></th>
+                <th className="px-4 py-2.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">Refreshed</th>
                 <th className="px-4 py-2.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">Status</th>
                 <th className="px-4 py-2.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">Live Link</th>
               </tr>
@@ -166,7 +168,7 @@ export const BlogRegister: React.FC<BlogRegisterProps> = ({
             <tbody>
               {sorted.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-10 text-center">
+                  <td colSpan={8} className="px-4 py-10 text-center">
                     <p className="text-[13px] font-semibold text-slate-500">No register entries yet.</p>
                     <p className="text-[12px] text-slate-400 mt-1">
                       Blog numbers are assigned automatically when posts are created and published.
@@ -209,6 +211,17 @@ export const BlogRegister: React.FC<BlogRegisterProps> = ({
                     </td>
                     <td className="px-4 py-3 text-[11px] text-slate-500 whitespace-nowrap">
                       <span className="inline-flex items-center gap-1"><Calendar className="w-3 h-3 text-slate-300" /> {fmtDate(entry.datePublished)}</span>
+                    </td>
+                    <td className="px-4 py-3 text-[11px] text-slate-500 whitespace-nowrap">
+                      {entry.repurposeCount ? (
+                        <span className="inline-flex items-center gap-1" title={`Refreshed ${entry.repurposeCount} time(s); last ${fmtDate(entry.lastRefreshedAt)}`}>
+                          <RefreshCw className="w-3 h-3 text-amber-400" />
+                          {fmtDate(entry.lastRefreshedAt)}
+                          <span className="text-[10px] font-bold text-amber-600 bg-amber-50 border border-amber-200 rounded-full px-1.5">{entry.repurposeCount}×</span>
+                        </span>
+                      ) : (
+                        <span className="text-slate-300">—</span>
+                      )}
                     </td>
                     <td className="px-4 py-3">
                       <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full ${statusChip[status] || 'bg-slate-100 text-slate-600'}`}>

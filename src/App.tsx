@@ -390,7 +390,23 @@ export default function App() {
   const handleSaveItem = async (updatedItem: ContentItem) => {
     if (!user) return;
     try {
-      const itemToSave = { ...updatedItem, userId: user.uid };
+      // ── Publication / repurpose tracking (feat-record-original-pub-refresh) ──
+      // firstPublishedAt is set once on the first transition to Published and
+      // never overwritten. When an already-published item is saved again with a
+      // changed body (a refresh/repurpose), bump repurposeCount + lastRefreshedAt
+      // so rehashed content is visible and never mistaken for a fresh original.
+      const now = new Date().toISOString();
+      const prev = items.find((i) => i.id === updatedItem.id);
+      const bodyChanged = !!prev && (prev.bodyHtml || '') !== (updatedItem.bodyHtml || '');
+      const itemToSave = { ...updatedItem, userId: user.uid } as ContentItem & { userId: string };
+      if (updatedItem.status === 'Published') {
+        if (!itemToSave.firstPublishedAt) {
+          itemToSave.firstPublishedAt = now;
+        } else if (bodyChanged) {
+          itemToSave.repurposeCount = (itemToSave.repurposeCount || 0) + 1;
+          itemToSave.lastRefreshedAt = now;
+        }
+      }
       // Firestore rejects undefined field values ("invalid-argument"), and blocks
       // routinely contain them (imageLayout/author/cards/slides are only set for
       // their block type). Deep-strip undefined before persisting so autosaves
@@ -410,7 +426,7 @@ export default function App() {
       // Keep the Blog Register in sync with the item (title, keywords, status,
       // dates, live link all flow through here).
       const brand = brands.find((b) => b.id === updatedItem.brandId);
-      await setDoc(doc(db, 'blog_register', updatedItem.id), sanitizeForFirestore(buildRegisterEntry(updatedItem, brand, user.uid)));
+      await setDoc(doc(db, 'blog_register', updatedItem.id), sanitizeForFirestore(buildRegisterEntry(itemToSave, brand, user.uid)));
     } catch (err) {
       console.error('Failed to save content item', err);
     }

@@ -260,6 +260,15 @@ export interface ContentItem {
    *  (prefix + 3-digit sequence starting at 001). Never duplicated. Used for
    *  internal tracking and written into the WordPress slug (not the title). */
   blogNumber?: string;
+  /** ISO timestamp of the FIRST time this item was published live to WordPress.
+   *  Set once and never overwritten — used to detect rehashed/repurposed content
+   *  and to distinguish the original publication date from later refreshes. */
+  firstPublishedAt?: string;
+  /** ISO timestamp of the most recent refresh/repurpose of this item (e.g. a
+   *  regeneration or enhancement performed after it was already published). */
+  lastRefreshedAt?: string;
+  /** How many times this item has been repurposed/refreshed since first publish. */
+  repurposeCount?: number;
 }
 
 /** Complete context from a single Google Sheet row. Every field maps to a

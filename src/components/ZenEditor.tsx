@@ -1661,6 +1661,16 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
               {currentStageIdx === WORKFLOW_STAGES.length - 1 ? (
                 <span className="text-[11px] font-bold text-emerald-600 flex items-center gap-1.5">
                   <Check className="w-3.5 h-3.5" /> This post is live — use Publish to WP to re-sync changes
+                  {editingItem.firstPublishedAt && (
+                    <span className="font-medium text-slate-400">
+                      · first published {new Date(editingItem.firstPublishedAt).toLocaleDateString()}
+                    </span>
+                  )}
+                  {editingItem.repurposeCount ? (
+                    <span className="font-medium text-amber-600 bg-amber-50 border border-amber-200 rounded-full px-1.5 py-0.5">
+                      refreshed {editingItem.repurposeCount}×
+                    </span>
+                  ) : null}
                 </span>
               ) : nextStage ? (
                 <button

@@ -103,6 +103,12 @@ export interface BlogRegisterEntry {
   dateCreated: string;   // ISO
   datePublished?: string; // ISO — set when published live
   dateUpdated?: string;  // ISO
+  /** ISO of the FIRST live publication — never overwritten. */
+  firstPublishedAt?: string;
+  /** ISO of the most recent refresh/repurpose. */
+  lastRefreshedAt?: string;
+  /** Number of times the content has been repurposed/refreshed. */
+  repurposeCount?: number;
   wpPostId?: number;
   wpLiveUrl?: string;    // link to the live page
   wpPreviewUrl?: string;
@@ -142,6 +148,9 @@ export function buildRegisterEntry(
   if (item.status === 'Published') {
     entry.datePublished = item.lastAutoPublishedAt || item.updatedAt;
   }
+  if (item.firstPublishedAt) entry.firstPublishedAt = item.firstPublishedAt;
+  if (item.lastRefreshedAt) entry.lastRefreshedAt = item.lastRefreshedAt;
+  if (typeof item.repurposeCount === 'number') entry.repurposeCount = item.repurposeCount;
   if (typeof item.wpPostId === 'number') entry.wpPostId = item.wpPostId;
   if (item.wpLiveUrl) entry.wpLiveUrl = item.wpLiveUrl;
   if (item.wpPreviewUrl) entry.wpPreviewUrl = item.wpPreviewUrl;
