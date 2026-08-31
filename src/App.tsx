@@ -216,9 +216,10 @@ export default function App() {
               id: scope('feat-internal-linking'),
               title: 'AI-powered contextual internal linking',
               description: 'For every new blog, identify relevant existing content and insert contextual internal links naturally within the article.',
-              status: 'requested' as const, priority: 'critical' as const, area: 'seo' as const,
+              status: 'shipped' as const, priority: 'critical' as const, area: 'seo' as const,
               requestedBy: 'Carol', requestedAt: new Date('2026-08-25T12:15:00').toISOString(),
-              tags: ['seo', 'internal-linking', 'content-intelligence'], notes: 'Critical for SEO. Requires content register.',
+              tags: ['seo', 'internal-linking', 'content-intelligence'], notes: 'Real published articles fed to the model; in-body links rewired to real slugs.',
+              shippedInVersion: 'v0.4', completedAt: new Date('2026-08-31T00:00:00').toISOString(),
             },
             {
               id: scope('feat-related-sections'),
