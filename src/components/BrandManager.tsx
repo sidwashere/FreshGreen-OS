@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { Brand, BlogStyleKit } from '../types';
-import { Building2, Plus, Key, Globe, Palette, ShieldAlert, Sparkles, Check, Trash2, Edit3, Save, RotateCcw, LayoutTemplate } from 'lucide-react';
+import { Building2, Plus, Key, Globe, Palette, ShieldAlert, Sparkles, Check, Trash2, Edit3, Save, RotateCcw, LayoutTemplate, Hash, ListChecks } from 'lucide-react';
 import { resolveBlogStyle, FONT_STACKS, FONT_STACK_LABELS, shade, DEFAULT_BUTTON_STYLES } from '../lib/blogHtml';
+import { GRAMMAR_RULE_DEFS } from '../lib/grammarRules';
 
 interface BrandManagerProps {
   brands: Brand[];
@@ -24,6 +25,7 @@ export const BrandManager: React.FC<BrandManagerProps> = ({
   const [savedNotice, setSavedNotice] = useState(false);
   const [newBannedWord, setNewBannedWord] = useState('');
   const [newTemplateSlug, setNewTemplateSlug] = useState('');
+  const [newCustomRule, setNewCustomRule] = useState('');
   const [brandToDelete, setBrandToDelete] = useState<string | null>(null);
 
   // Resolved style kit for the brand being edited (defaults merged in).
@@ -100,6 +102,54 @@ export const BrandManager: React.FC<BrandManagerProps> = ({
       ...editingBrand,
       pageTemplates: (editingBrand.pageTemplates || []).filter((s) => s !== slug),
     });
+  };
+
+  // ── Grammar & Style Rules (Carol's feat-grammar-rules) ─────────────────
+  // Toggle an individual rule on/off for this brand. When a rule is absent
+  // from grammarRules, the global default applies (all rules enabled).
+  const handleToggleGrammarRule = (ruleId: string, enabled: boolean) => {
+    if (!editingBrand) return;
+    const current = editingBrand.grammarRules || {};
+    setEditingBrand({
+      ...editingBrand,
+      grammarRules: {
+        ...current,
+        [ruleId]: enabled,
+      },
+    });
+  };
+
+  const handleAddCustomRule = () => {
+    if (!newCustomRule.trim() || !editingBrand) return;
+    const existing = editingBrand.grammarRules?.customRules || [];
+    if (existing.includes(newCustomRule.trim())) return;
+    setEditingBrand({
+      ...editingBrand,
+      grammarRules: {
+        ...(editingBrand.grammarRules || {}),
+        customRules: [...existing, newCustomRule.trim()],
+      },
+    });
+    setNewCustomRule('');
+  };
+
+  const handleRemoveCustomRule = (rule: string) => {
+    if (!editingBrand) return;
+    setEditingBrand({
+      ...editingBrand,
+      grammarRules: {
+        ...(editingBrand.grammarRules || {}),
+        customRules: (editingBrand.grammarRules?.customRules || []).filter((r) => r !== rule),
+      },
+    });
+  };
+
+  // Returns true when a rule is effectively enabled (explicitly true OR not
+  // explicitly set to false — meaning the global default applies).
+  const isRuleEnabled = (ruleId: string): boolean => {
+    if (!editingBrand) return true;
+    const val = editingBrand.grammarRules?.[ruleId as keyof typeof editingBrand.grammarRules];
+    return val !== false;
   };
 
   return (
@@ -514,6 +564,31 @@ export const BrandManager: React.FC<BrandManagerProps> = ({
               </div>
             </div>
 
+            {/* Section 2.6: Blog Number Prefix / Brand Code */}
+            <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
+              <div className="flex items-center space-x-2 text-slate-900 font-semibold text-sm">
+                <Hash className="w-4 h-4 text-emerald-600" />
+                <span>Blog Number Prefix (Brand Code)</span>
+              </div>
+              <p className="text-[11px] text-slate-500 leading-relaxed -mt-1">
+                Used to build each blog's reference number (e.g. <code className="bg-slate-200 px-1 rounded">DTP001</code>).
+                The number is written into the WordPress slug for internal tracking — it never appears in the
+                visible title. Leave blank to use the default for this brand.
+              </p>
+              <div className="flex items-center gap-3">
+                <input
+                  type="text"
+                  value={editingBrand.brandCode || ''}
+                  onChange={(e) => setEditingBrand({ ...editingBrand, brandCode: e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4) })}
+                  placeholder="e.g. DTP"
+                  className="w-28 px-3 py-2 rounded-xl border border-slate-300 text-sm font-mono uppercase focus:ring-2 focus:ring-emerald-500 focus:outline-none bg-white"
+                />
+                <span className="text-[11px] text-slate-400">
+                  Next number will be <code className="bg-slate-200 px-1 rounded font-mono">{editingBrand.brandCode?.trim() || 'DTP'}001</code>
+                </span>
+              </div>
+            </div>
+
             {/* Section 3: AI Gemini Tone of Voice Guidelines */}
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center justify-between">
@@ -574,7 +649,95 @@ export const BrandManager: React.FC<BrandManagerProps> = ({
               </div>
             </div>
 
-            {/* Section 5: Target WordPress Page Templates */}
+            {/* Section 5: Grammar & Style Rules (Carol's feat-grammar-rules) */}
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center gap-1.5">
+                <ListChecks className="w-3.5 h-3.5 text-emerald-600" />
+                Grammar &amp; Style Rules (applied to every generated article)
+              </label>
+              <p className="text-[11px] text-slate-500 mb-3">
+                Each rule is enforced at source (in the AI prompt) and deterministically after generation. Toggle rules on/off per brand. Custom rules are free-text instructions appended to every prompt for this brand.
+              </p>
+
+              {/* Rule toggles */}
+              <div className="space-y-2 mb-4">
+                {GRAMMAR_RULE_DEFS.map((def) => {
+                  const enabled = isRuleEnabled(def.id);
+                  return (
+                    <label
+                      key={def.id}
+                      className="flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition group hover:bg-slate-50"
+                      style={{
+                        borderColor: enabled ? '#86efac' : '#e2e8f0',
+                        backgroundColor: enabled ? '#f0fdf4' : '#ffffff',
+                      }}
+                    >
+                      <div className="relative inline-flex items-center shrink-0 mt-0.5">
+                        <input
+                          type="checkbox"
+                          checked={enabled}
+                          onChange={(e) => handleToggleGrammarRule(def.id, e.target.checked)}
+                          className="sr-only peer"
+                        />
+                        <div className="w-9 h-5 rounded-full peer peer-checked:bg-emerald-500 peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all after:shadow-sm peer-checked:bg-slate-300 bg-slate-200 transition-colors" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className={`text-xs font-bold ${enabled ? 'text-emerald-800' : 'text-slate-500'}`}>
+                          {def.label}
+                        </div>
+                        <div className={`text-[10px] mt-0.5 leading-relaxed ${enabled ? 'text-emerald-700' : 'text-slate-400'}`}>
+                          {def.description}
+                        </div>
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
+
+              {/* Custom rules */}
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">
+                  Custom rules (appended to every prompt for this brand)
+                </label>
+                <div className="flex gap-2 mb-2">
+                  <input
+                    type="text"
+                    value={newCustomRule}
+                    onChange={(e) => setNewCustomRule(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), handleAddCustomRule())}
+                    placeholder="e.g. Always include a numbered list in the introduction"
+                    className="flex-1 px-3 py-1.5 rounded-xl border border-slate-300 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddCustomRule}
+                    className="px-3 py-1.5 rounded-xl bg-emerald-100 hover:bg-emerald-200 text-emerald-700 font-medium text-xs border border-emerald-300 transition"
+                  >
+                    Add Rule
+                  </button>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {(editingBrand?.grammarRules?.customRules || []).map((rule) => (
+                    <span
+                      key={rule}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 text-xs font-medium border border-emerald-200"
+                    >
+                      <ListChecks className="w-3 h-3 shrink-0" />
+                      <span className="leading-snug">{rule}</span>
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveCustomRule(rule)}
+                        className="hover:text-emerald-900 font-bold ml-0.5"
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Section 7: Target WordPress Page Templates */}
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
                 WordPress Page Template Slugs (Preserves Theme Header & Footer)

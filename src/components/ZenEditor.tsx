@@ -6,6 +6,7 @@ import { ContentItem, Brand, VisualBlock, VisualBlockType, PipelineStatus, Gener
 import { figureHtmlFor as figureHtmlForLib, rebuildArticleHtml, syncImageMarkers } from '../lib/blogHtml';
 import { countWords, deriveWpState, syncItemToWp, refreshWpState } from '../lib/wpSync';
 import { SeoPanel } from './SeoPanel';
+import { GenerationInfoPanel } from './GenerationInfoPanel';
 import { 
   Sparkles, 
   Image as ImageIcon, 
@@ -95,6 +96,9 @@ interface ZenEditorProps {
     contentType: 'post' | 'page',
     opts?: { primaryKeyword?: string; secondaryKeywords?: string[] }
   ) => void;
+  /** All content items for the workspace — used to build the brand's real
+   * "related articles" list for dynamic template field population. */
+  items?: ContentItem[];
 }
 
 export const ZenEditor: React.FC<ZenEditorProps> = ({
@@ -103,6 +107,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
   onSaveItem,
   onSyncToWP,
   onCreateNewItem,
+  items = [],
 }) => {
   const [editingItem, setEditingItem] = useState<ContentItem | null>(item || null);
   const [newDraftTitle, setNewDraftTitle] = useState('');
@@ -111,9 +116,15 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
   // Workflow steps: Brief -> Write -> SEO -> Visuals -> Publish
   const [stepTab, setStepTab] = useState<'brief' | 'write' | 'seo' | 'visuals' | 'publish'>('write');
   const [writeMode, setWriteMode] = useState<'visual' | 'html'>('visual');
+  // User-stated block hints for Auto-Write: which content blocks the engine
+  // should include (image wraps, product showcases, CTA bands, cards, quotes,
+  // callouts, Daniel's Tips, newsletters, FAQs…). The engine auto-detects the
+  // rest; these take priority.
+  const [requestedBlocks, setRequestedBlocks] = useState<string[]>([]);
   const [isGeneratingAi, setIsGeneratingAi] = useState(false);
   // Live generation transparency: percentage, phase message, the model's text
-  // as it writes, and heartbeat info so "slow" is never confused with "stuck".
+  // as it writes, heartbeat info, plus the full generation blueprint (rules,
+  // parameters) and a live history timeline of every step taken.
   const [genState, setGenState] = useState<{
     phase: string;
     percent: number;
@@ -122,6 +133,19 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
     elapsed: number;
     lastUpdate: number;
     stalled: boolean;
+    generationInfo: {
+      brand: { name: string; voiceGuidelines: string } | null;
+      primaryKeyword: string;
+      secondaryKeywords: string[];
+      targetWordCount: number;
+      seoBrief: string;
+      contentType: string;
+      bannedWords: string[];
+      grammarRules: { id: string; label: string; description: string }[];
+      grammarRulesPrompt: string | null;
+      wordTarget: string;
+    } | null;
+    history: { message: string; percent: number; at: number }[];
   } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   // Interactive humanisation: original vs humanised draft, user picks a version.
@@ -135,6 +159,16 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
   const [isHumanizing, setIsHumanizing] = useState(false);
   const [humanizeError, setHumanizeError] = useState<string | null>(null);
   const lastUpdateRef = useRef<number>(Date.now());
+  // Real "related articles" for the current brand — published content items from
+  // the workspace register. Passed to the server so the generated article can
+  // populate the template's related-articles / internal-link sections with real
+  // existing content instead of invented paths.
+  const relatedArticles = useMemo(() => {
+    return items
+      .filter((i) => i.brandId === brand.id && i.id !== editingItem?.id && i.status === 'Published')
+      .map((i) => ({ title: i.title, slug: i.slug, primaryKeyword: i.primaryKeyword || '' }))
+      .slice(0, 8);
+  }, [items, brand.id, editingItem?.id]);
   // Watchdog: warns when no progress arrived for a while, auto-aborts if truly stuck.
   useEffect(() => {
     if (!isGeneratingAi) return;
@@ -307,7 +341,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
     setIsGeneratingAi(true);
     setAiError(null);
     lastUpdateRef.current = Date.now();
-    setGenState({ phase: 'Connecting…', percent: 2, words: 0, text: '', elapsed: 0, lastUpdate: Date.now(), stalled: false });
+    setGenState({ phase: 'Connecting…', percent: 2, words: 0, text: '', elapsed: 0, lastUpdate: Date.now(), stalled: false, generationInfo: null, history: [] });
     const abort = new AbortController();
     abortRef.current = abort;
     const byokKeys = await fetchGlobalKeys();
@@ -328,6 +362,8 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
           applyHumanization: false,
           targetWordCount: editingItem.targetWordCount,
           modelPref: aiPref,
+          requestedBlocks,
+          relatedArticles,
         }),
         signal: abort.signal,
       });
@@ -337,7 +373,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
         throw new Error(errText?.slice(0, 200) || `Generation failed (HTTP ${res.status}).`);
       }
 
-      // NDJSON stream: {"type":"status"|"stream"|"heartbeat"|"done"|"error", ...}
+      // NDJSON stream: {"type":"status"|"stream"|"heartbeat"|"done"|"error"|"generationInfo", ...}
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = '';
@@ -346,13 +382,47 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
       let streamError: string | null = null;
 
       const handleEvent = (evt: any) => {
-        if (evt.type === 'status') {
+        if (evt.type === 'generationInfo') {
+          // Capture the full generation blueprint — rules, parameters, brand voice.
           lastUpdateRef.current = Date.now();
-          setGenState((prev) => ({ ...(prev || { phase: '', percent: 0, words: 0, text: '', elapsed: 0, lastUpdate: Date.now(), stalled: false }), phase: evt.message || evt.phase || '', percent: evt.percent ?? prev?.percent ?? 0, stalled: false }));
+          setGenState((prev) => ({
+            ...(prev || { phase: '', percent: 0, words: 0, text: '', elapsed: 0, lastUpdate: Date.now(), stalled: false, generationInfo: null, history: [] }),
+            generationInfo: evt,
+            history: prev?.history || [],
+          }));
+        } else if (evt.type === 'status') {
+          lastUpdateRef.current = Date.now();
+          setGenState((prev) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              phase: evt.message || evt.phase || '',
+              percent: evt.percent ?? prev.percent,
+              stalled: false,
+              history: [
+                ...prev.history,
+                { message: evt.message || '', percent: evt.percent ?? prev.percent, at: Date.now() },
+              ],
+            };
+          });
         } else if (evt.type === 'stream') {
           lastUpdateRef.current = Date.now();
           streamedText += evt.text || '';
-          setGenState((prev) => ({ ...(prev || { phase: '', percent: 0, words: 0, text: '', elapsed: 0, lastUpdate: Date.now(), stalled: false }), phase: evt.phase || prev?.phase || 'Writing…', percent: evt.percent ?? prev?.percent ?? 0, words: evt.words ?? countWords(streamedText), text: streamedText, stalled: false }));
+          setGenState((prev) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              phase: evt.phase || prev.phase || 'Writing…',
+              percent: evt.percent ?? prev.percent,
+              words: evt.words ?? countWords(streamedText),
+              text: streamedText,
+              stalled: false,
+              history: evt.phase ? [
+                ...prev.history,
+                { message: evt.phase, percent: evt.percent ?? prev.percent, at: Date.now() },
+              ] : prev.history,
+            };
+          });
         } else if (evt.type === 'heartbeat') {
           lastUpdateRef.current = Date.now();
           setGenState((prev) => (prev ? { ...prev, elapsed: evt.elapsed ?? prev.elapsed, stalled: false } : prev));
@@ -388,6 +458,10 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
             phase: img.role === 'hero' ? 'Hero image ready — rendering in-body image…' : 'Both AI images ready.',
             percent: img.role === 'hero' ? 90 : 92,
             stalled: false,
+            history: [
+              ...prev.history,
+              { message: img.role === 'hero' ? 'Hero image ready — rendering in-body image…' : 'Both AI images ready.', percent: img.role === 'hero' ? 90 : 92, at: Date.now() },
+            ],
           } : prev));
         } else if (evt.type === 'imageWarning') {
           lastUpdateRef.current = Date.now();
@@ -739,7 +813,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
     setIsGeneratingAi(true);
     setAiError(null);
     lastUpdateRef.current = Date.now();
-    setGenState({ phase: 'Connecting…', percent: 2, words: 0, text: '', elapsed: 0, lastUpdate: Date.now(), stalled: false });
+    setGenState({ phase: 'Connecting…', percent: 2, words: 0, text: '', elapsed: 0, lastUpdate: Date.now(), stalled: false, generationInfo: null, history: [] });
     const abort = new AbortController();
     abortRef.current = abort;
     const byokKeys = await fetchGlobalKeys();
@@ -758,6 +832,8 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
           byokKeys,
           targetWordCount: editingItem.targetWordCount,
           modelPref: aiPref,
+          requestedBlocks,
+          relatedArticles,
         }),
         signal: abort.signal,
       });
@@ -773,13 +849,43 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
       let streamError: string | null = null;
 
       const handleEvent = (evt: any) => {
-        if (evt.type === 'status') {
+        if (evt.type === 'generationInfo') {
           lastUpdateRef.current = Date.now();
-          setGenState((prev) => ({ ...(prev || { phase: '', percent: 0, words: 0, text: '', elapsed: 0, lastUpdate: Date.now(), stalled: false }), phase: evt.message || evt.phase || '', percent: evt.percent ?? prev?.percent ?? 0, stalled: false }));
+          setGenState((prev) => ({
+            ...(prev || { phase: '', percent: 0, words: 0, text: '', elapsed: 0, lastUpdate: Date.now(), stalled: false, generationInfo: null, history: [] }),
+            generationInfo: evt,
+            history: prev?.history || [],
+          }));
+        } else if (evt.type === 'status') {
+          lastUpdateRef.current = Date.now();
+          setGenState((prev) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              phase: evt.message || evt.phase || '',
+              percent: evt.percent ?? prev.percent,
+              stalled: false,
+              history: [
+                ...prev.history,
+                { message: evt.message || '', percent: evt.percent ?? prev.percent, at: Date.now() },
+              ],
+            };
+          });
         } else if (evt.type === 'stream') {
           lastUpdateRef.current = Date.now();
           streamedText += evt.text || '';
-          setGenState((prev) => ({ ...(prev || { phase: '', percent: 0, words: 0, text: '', elapsed: 0, lastUpdate: Date.now(), stalled: false }), phase: evt.phase || prev?.phase || 'Enhancing…', percent: evt.percent ?? prev?.percent ?? 0, words: evt.words ?? countWords(streamedText), text: streamedText, stalled: false }));
+          setGenState((prev) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              phase: evt.phase || prev.phase || 'Enhancing…',
+              percent: evt.percent ?? prev.percent,
+              words: evt.words ?? countWords(streamedText),
+              text: streamedText,
+              stalled: false,
+              history: evt.phase ? [...prev.history, { message: evt.phase, percent: evt.percent ?? prev.percent, at: Date.now() }] : prev.history,
+            };
+          });
         } else if (evt.type === 'heartbeat') {
           lastUpdateRef.current = Date.now();
           setGenState((prev) => (prev ? { ...prev, elapsed: evt.elapsed ?? prev.elapsed, stalled: false } : prev));
@@ -2059,6 +2165,59 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                 />
               )}
 
+              {/* Block hints: which content blocks the engine should include.
+                  The engine auto-detects the rest; these take priority. */}
+              <div className="relative" title="Which content blocks the engine should include. The engine auto-detects the rest from your content — these take priority. Leave empty for fully automatic.">
+                <select
+                  value={requestedBlocks.length ? requestedBlocks[requestedBlocks.length - 1] : ''}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (!v) return;
+                    setRequestedBlocks((prev) => (prev.includes(v) ? prev : [...prev, v]));
+                  }}
+                  className="px-2.5 py-2.5 rounded-xl bg-white border border-slate-200 text-slate-600 text-xs font-semibold shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 cursor-pointer"
+                >
+                  <option value="">Blocks: Auto</option>
+                  <option value="image_banner">+ Image wrap</option>
+                  <option value="product_cta">+ Product showcase</option>
+                  <option value="cta_band">+ CTA band</option>
+                  <option value="cards">+ Card grid</option>
+                  <option value="quote">+ Quote</option>
+                  <option value="callout">+ Callout</option>
+                  <option value="daniels_tip">+ Daniel's Tip</option>
+                  <option value="newsletter">+ Newsletter</option>
+                  <option value="faq">+ FAQ</option>
+                  <option value="carousel">+ Carousel</option>
+                </select>
+                {requestedBlocks.length > 0 && (
+                  <div className="absolute z-20 mt-1 right-0 bg-white border border-slate-200 rounded-xl shadow-lg p-2 w-56">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wide">Requested blocks</span>
+                      <button
+                        onClick={() => setRequestedBlocks([])}
+                        className="text-[10px] font-semibold text-rose-500 hover:text-rose-700"
+                      >
+                        Clear all
+                      </button>
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      {requestedBlocks.map((b) => (
+                        <span key={b} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 text-[10px] font-semibold">
+                          {b.replace(/_/g, ' ')}
+                          <button
+                            onClick={() => setRequestedBlocks((prev) => prev.filter((x) => x !== b))}
+                            className="text-indigo-400 hover:text-indigo-700"
+                            title={`Remove ${b}`}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <button
                 onClick={handleHumanizeDraft}
                 disabled={isGeneratingAi || isHumanizing || countWords(editingItem?.bodyHtml || '') < 50}
@@ -2155,72 +2314,14 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
             </div>
           )}
 
-          {/* Live generation progress: percent, phase, heartbeat, live draft */}
+          {/* Full generation info panel: rules, live progress & history timeline */}
           {isGeneratingAi && genState && (
-            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-              <div className="p-4 space-y-3">
-                <div className="flex items-center justify-between gap-3 flex-wrap">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="relative flex h-2.5 w-2.5 shrink-0">
-                      {!genState.stalled && <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-60" style={{ backgroundColor: brandColor(brand) }} />}
-                      <span className="relative inline-flex rounded-full h-2.5 w-2.5" style={{ backgroundColor: genState.stalled ? '#f59e0b' : brandColor(brand) }} />
-                    </span>
-                    <span className="text-sm font-bold text-slate-800 truncate">
-                      {genState.stalled ? '⚠ Waiting on the model…' : genState.phase}
-                    </span>
-                  </div>
-                  <span className="text-xs font-bold tabular-nums px-2.5 py-1 rounded-full bg-slate-100 text-slate-700">
-                    {genState.percent}%
-                  </span>
-                </div>
-
-                <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
-                  <div
-                    className="h-full rounded-full transition-all duration-500"
-                    style={{
-                      width: `${Math.max(2, genState.percent)}%`,
-                      backgroundColor: genState.stalled ? '#f59e0b' : brandColor(brand),
-                    }}
-                  />
-                </div>
-
-                <div className="flex items-center justify-between flex-wrap gap-2 text-[11px] text-slate-500">
-                  <span className="tabular-nums">
-                    {genState.words.toLocaleString()} words written
-                    {editingItem.targetWordCount ? ` · target ${editingItem.targetWordCount.toLocaleString()}` : ''}
-                  </span>
-                  <span className={`tabular-nums font-semibold ${genState.stalled ? 'text-amber-600' : 'text-slate-400'}`}>
-                    {genState.elapsed}s elapsed · last update {genState.stalled ? '> 45s ago' : 'live'}
-                  </span>
-                </div>
-
-                {genState.stalled && (
-                  <div className="px-3 py-2 rounded-xl bg-amber-50 border border-amber-200 text-amber-700 text-xs font-medium">
-                    No updates for 45+ seconds. The model may be slow (quota pressure) — you can keep waiting or cancel and retry.
-                  </div>
-                )}
-
-                <details className="group">
-                  <summary className="cursor-pointer text-xs font-semibold text-slate-600 hover:text-slate-800 select-none flex items-center gap-1.5">
-                    <Eye className="w-3.5 h-3.5 text-slate-400" />
-                    Live draft — watch the model write
-                    <span className="ml-auto text-[10px] font-normal text-slate-400 group-open:hidden">tap to expand</span>
-                  </summary>
-                  <div className="mt-2 max-h-64 overflow-y-auto rounded-xl bg-slate-900 text-slate-100 text-[11px] leading-relaxed font-mono p-3 whitespace-pre-wrap">
-                    {genState.text || 'Waiting for the first words…'}
-                  </div>
-                </details>
-
-                <div className="flex items-center justify-end gap-2">
-                  <button
-                    onClick={cancelGeneration}
-                    className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 transition"
-                  >
-                    Cancel generation
-                  </button>
-                </div>
-              </div>
-            </div>
+            <GenerationInfoPanel
+              genState={genState}
+              brandColor={brandColor(brand)}
+              targetWordCount={editingItem.targetWordCount}
+              onCancel={cancelGeneration}
+            />
           )}
 
           {/* Word count meter */}
@@ -3177,6 +3278,10 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                               ? new Date(editingItem.scheduledPublishAt).toTimeString().slice(0, 5)
                               : '09:00';
                             const dt = new Date(`${e.target.value}T${time}:00`);
+                            if (dt.getTime() <= Date.now()) {
+                              setAiError('Cannot schedule in the past — pick a future date/time.');
+                              return;
+                            }
                             setEditingItem((prev) => prev ? { ...prev, scheduledPublishAt: dt.toISOString() } : prev);
                             onSaveItem({ ...editingItem, scheduledPublishAt: dt.toISOString(), updatedAt: new Date().toISOString() });
                           }
@@ -3195,6 +3300,10 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                             : new Date().toISOString().split('T')[0];
                           if (e.target.value) {
                             const dt = new Date(`${date}T${e.target.value}:00`);
+                            if (dt.getTime() <= Date.now()) {
+                              setAiError('Cannot schedule in the past — pick a future date/time.');
+                              return;
+                            }
                             setEditingItem((prev) => prev ? { ...prev, scheduledPublishAt: dt.toISOString() } : prev);
                             onSaveItem({ ...editingItem, scheduledPublishAt: dt.toISOString(), updatedAt: new Date().toISOString() });
                           }

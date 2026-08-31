@@ -3,6 +3,8 @@ import { ContentItem, Brand } from '../types';
 import { countWords, deriveWpState, syncItemToWp, refreshWpState, publishGate, WpState } from '../lib/wpSync';
 import { runSeoFix } from '../lib/seoFix';
 import { fetchAiPref } from '../lib/keys';
+import { BlogRegisterEntry } from '../lib/blogRegister';
+import { BlogRegister } from './BlogRegister';
 import {
   Search,
   RefreshCw,
@@ -19,6 +21,8 @@ import {
   AlertTriangle,
   CheckCircle2,
   Wand2,
+  Library,
+  Hash,
 } from 'lucide-react';
 
 interface ContentHubProps {
@@ -32,6 +36,7 @@ interface ContentHubProps {
   onDeleteItem: (item: ContentItem) => Promise<{ success: boolean; message?: string }>;
   onImportWPPosts: (posts: any[], brand: Brand) => Promise<number>;
   onNavigateTab?: (tab: string) => void;
+  register?: BlogRegisterEntry[];
 }
 
 type Filter = 'all' | 'live' | 'draft' | 'none';
@@ -71,6 +76,7 @@ export const ContentHub: React.FC<ContentHubProps> = ({
   onDeleteItem,
   onImportWPPosts,
   onNavigateTab,
+  register = [],
 }) => {
   const [filter, setFilter] = useState<Filter>('all');
   const [search, setSearch] = useState('');
@@ -82,6 +88,7 @@ export const ContentHub: React.FC<ContentHubProps> = ({
   const [pulling, setPulling] = useState(false);
   const [importing, setImporting] = useState(false);
   const [fixingId, setFixingId] = useState<string | null>(null);
+  const [view, setView] = useState<'posts' | 'register'>('posts');
 
   const brand = brands.find((b) => b.id === selectedBrandId) || null;
   const brandScoped = selectedBrandId !== 'all';
@@ -316,20 +323,55 @@ export const ContentHub: React.FC<ContentHubProps> = ({
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3">
         <div>
-          <h1 className="text-xl font-bold text-slate-900">Blog Content Hub</h1>
+          <h1 className="text-xl font-bold text-slate-900">Blog Manager</h1>
           <p className="text-[12px] text-slate-500 mt-1">
-            Every draft and live post for the selected brand — publish, unpublish, refresh and pull
-            history straight from WordPress. Same engine as the editor: no duplicate sync paths.
+            Manage every draft and live post, and track each blog's permanent reference number in the
+            register — publish, unpublish, refresh and pull history straight from WordPress.
           </p>
         </div>
         <button
           onClick={() => onNavigateTab?.('pipeline')}
           className="shrink-0 px-4 py-2 rounded-xl border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 hover:text-slate-900 text-[12px] font-bold transition"
         >
-          Open production pipeline →
+          Open dashboard →
         </button>
       </div>
 
+      {/* View switcher: Posts | Register */}
+      <div className="flex items-center gap-1.5">
+        <button
+          onClick={() => setView('posts')}
+          className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-[12px] font-bold transition ${
+            view === 'posts' ? 'bg-slate-900 text-white' : 'bg-white border border-slate-200 text-slate-500 hover:bg-slate-50'
+          }`}
+        >
+          <Library className="w-4 h-4" /> Posts
+          <span className={`ml-1 tabular-nums ${view === 'posts' ? 'text-slate-300' : 'text-slate-400'}`}>{scoped.length}</span>
+        </button>
+        <button
+          onClick={() => setView('register')}
+          className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-[12px] font-bold transition ${
+            view === 'register' ? 'bg-emerald-700 text-white' : 'bg-white border border-slate-200 text-slate-500 hover:bg-slate-50'
+          }`}
+        >
+          <Hash className="w-4 h-4" /> Blog Register
+          <span className={`ml-1 tabular-nums ${view === 'register' ? 'text-emerald-100' : 'text-slate-400'}`}>
+            {brandScoped ? register.filter((r) => r.brandId === selectedBrandId).length : register.length}
+          </span>
+        </button>
+      </div>
+
+      {view === 'register' ? (
+        <BlogRegister
+          register={register}
+          items={items}
+          brands={brands}
+          selectedBrandId={selectedBrandId}
+          onSelectBrand={onSelectBrand}
+          onEditItem={onEditItem}
+        />
+      ) : (
+      <>
       {/* Notice */}
       {notice && (
         <div
@@ -529,7 +571,9 @@ export const ContentHub: React.FC<ContentHubProps> = ({
                                 const time = item.scheduledPublishAt
                                   ? new Date(item.scheduledPublishAt).toTimeString().slice(0, 5)
                                   : '09:00';
-                                onSaveItem({ ...item, scheduledPublishAt: new Date(`${e.target.value}T${time}:00`).toISOString(), updatedAt: new Date().toISOString() });
+                                const dt = new Date(`${e.target.value}T${time}:00`);
+                                if (dt.getTime() <= Date.now()) return; // ignore past dates
+                                onSaveItem({ ...item, scheduledPublishAt: dt.toISOString(), updatedAt: new Date().toISOString() });
                               }
                             }}
                             className="px-1 py-0.5 border border-slate-200 rounded text-[10px] focus:ring-2 focus:ring-violet-500 outline-none bg-white"
@@ -629,6 +673,8 @@ export const ContentHub: React.FC<ContentHubProps> = ({
           })
         )}
       </div>
+      </>
+      )}
     </div>
   );
 };

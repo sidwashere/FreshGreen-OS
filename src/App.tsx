@@ -15,11 +15,27 @@ import { Brand, ContentItem, PipelineStatus, AppUser, FeatureRequest } from './t
 import { initAuth, db, USE_EMULATORS, adminCreateAccount, usernameToEmail } from './lib/firebase';
 import { User } from 'firebase/auth';
 import { collection, query, where, onSnapshot, doc, setDoc, deleteDoc, getDoc } from 'firebase/firestore';
+import { BlogRegisterEntry, buildRegisterEntry, nextBlogNumber, collectUsedNumbers } from './lib/blogRegister';
+
+/** Firestore rejects `undefined` field values, so strip them before writing. */
+function sanitizeForFirestore<T>(obj: T): T {
+  if (Array.isArray(obj)) return obj.map((v) => (v === undefined ? null : v)) as unknown as T;
+  if (obj && typeof obj === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+      if (v === undefined) continue;
+      out[k] = sanitizeForFirestore(v);
+    }
+    return out as T;
+  }
+  return obj;
+}
 
 export default function App() {
   const [brands, setBrands] = useState<Brand[]>([]);
   const [items, setItems] = useState<ContentItem[]>([]);
   const [features, setFeatures] = useState<FeatureRequest[]>([]);
+  const [register, setRegister] = useState<BlogRegisterEntry[]>([]);
 
   const [selectedBrandId, setSelectedBrandId] = useState<string>('dtp-brand');
   const [activeTab, setActiveTab] = useState<string>('pipeline');
@@ -234,6 +250,54 @@ export default function App() {
               requestedBy: 'Carol', requestedAt: new Date('2026-08-20T11:28:00').toISOString(),
               tags: ['wordpress', 'mcp', 'integration'], notes: 'Carol wants to know if ChatGPT can also use the WP MCP for ongoing maintenance.',
             },
+            {
+              id: scope('feat-grammar-rules'),
+              title: 'Grammar & style rules — no "And"/"But" sentence starts',
+              description: 'Adjust content-generation instructions so sentences never begin with "And" or "But". Use British English, correct grammar and punctuation, natural sentence construction, avoid unnecessary repetition and obvious AI-style phrasing. Generated copy should require very little editorial correction.',
+              status: 'requested' as const, priority: 'critical' as const, area: 'editor' as const,
+              requestedBy: 'Carol', requestedAt: new Date('2026-08-29T23:30:00').toISOString(),
+              tags: ['writing-rules', 'grammar', 'british-english', 'quality'], notes: 'Found a sentence beginning with "And" in a produced blog. Must be fixed at source, not manually.',
+            },
+            {
+              id: scope('feat-end-to-end-test'),
+              title: 'End-to-end final test — generation to published blog',
+              description: 'Final test must cover the complete process from content generation through to the finished WordPress blog, including all dynamic template fields.',
+              status: 'requested' as const, priority: 'high' as const, area: 'deployment' as const,
+              requestedBy: 'Carol', requestedAt: new Date('2026-08-29T23:30:00').toISOString(),
+              tags: ['testing', 'qa', 'deployment'], notes: 'Sumbul has completed the blog template. Need full pipeline verification.',
+            },
+            {
+              id: scope('feat-auto-blog-numbering'),
+              title: 'Automatic Blog Number generation & population',
+              description: 'Automatically generate and populate the Blog Number field in WordPress. Format per brand: FGC-001, HAP-001, DTP-001, OC-001. System identifies the website/brand, assigns the next available number, and inserts it into the WordPress Blog Number field automatically.',
+              status: 'requested' as const, priority: 'critical' as const, area: 'wordpress' as const,
+              requestedBy: 'Carol', requestedAt: new Date('2026-08-29T23:30:00').toISOString(),
+              tags: ['blog-numbering', 'wordpress', 'automation'], notes: 'Sumbul created a dynamic Blog Number field in WordPress. Currently manual — needs automation.',
+            },
+            {
+              id: scope('feat-blog-register-sync'),
+              title: 'Blog Register sync — number matches records',
+              description: 'The same reference number must be recorded automatically in the Blog Register/Blog History so the number shown on the published article always matches the number held in records. This becomes the permanent reference for tracking as the library grows.',
+              status: 'requested' as const, priority: 'critical' as const, area: 'dashboard' as const,
+              requestedBy: 'Carol', requestedAt: new Date('2026-08-29T23:30:00').toISOString(),
+              tags: ['blog-register', 'tracking', 'content-library'], notes: 'Permanent reference for each article. Must match published article exactly.',
+            },
+            {
+              id: scope('feat-duplicate-number-prevention'),
+              title: 'Duplicate Blog Number prevention',
+              description: 'Check the existing Blog History before assigning a number so a reference can never accidentally be issued twice — even if a blog is deleted, rescheduled, or returned to draft.',
+              status: 'requested' as const, priority: 'critical' as const, area: 'autoblog' as const,
+              requestedBy: 'Carol', requestedAt: new Date('2026-08-29T23:30:00').toISOString(),
+              tags: ['blog-numbering', 'uniqueness', 'data-integrity'], notes: 'Must never issue the same number twice under any workflow state.',
+            },
+            {
+              id: scope('feat-dynamic-fields-population'),
+              title: 'Auto-populate dynamic template fields (CTA, Related Articles, Products)',
+              description: 'Where the template contains dynamic fields such as the CTA, Related Articles and Related Products/Services, the automation must populate these wherever agreed, rather than creating unnecessary manual work.',
+              status: 'requested' as const, priority: 'high' as const, area: 'wordpress' as const,
+              requestedBy: 'Carol', requestedAt: new Date('2026-08-29T23:30:00').toISOString(),
+              tags: ['wordpress', 'templates', 'dynamic-fields', 'automation'], notes: 'Sumbul created dynamic functionality for CTA, Related Articles, Related Products/Services.',
+            },
           ];
           for (const feat of initialFeatures) {
             await setDoc(doc(db, 'feature_requests', feat.id), { ...feat, userId: user.uid });
@@ -286,10 +350,19 @@ export default function App() {
       console.error("Error fetching feature requests snapshot:", error);
     });
 
+    const qRegister = query(collection(db, 'blog_register'), where('userId', '==', user.uid));
+    const unsubscribeRegister = onSnapshot(qRegister, (snapshot) => {
+      const fbRegister = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as BlogRegisterEntry));
+      setRegister(fbRegister);
+    }, (error) => {
+      console.error("Error fetching blog register snapshot:", error);
+    });
+
     return () => {
       unsubscribeBrands();
       unsubscribeItems();
       unsubscribeFeatures();
+      unsubscribeRegister();
     };
   }, [user]);
 
@@ -334,6 +407,10 @@ export default function App() {
         return v;
       };
       await setDoc(doc(db, 'content_items', updatedItem.id), stripUndefined(itemToSave));
+      // Keep the Blog Register in sync with the item (title, keywords, status,
+      // dates, live link all flow through here).
+      const brand = brands.find((b) => b.id === updatedItem.brandId);
+      await setDoc(doc(db, 'blog_register', updatedItem.id), sanitizeForFirestore(buildRegisterEntry(updatedItem, brand, user.uid)));
     } catch (err) {
       console.error('Failed to save content item', err);
     }
@@ -361,6 +438,8 @@ export default function App() {
         }
       }
       await deleteDoc(doc(db, 'content_items', item.id));
+      // Remove the matching Blog Register entry too.
+      try { await deleteDoc(doc(db, 'blog_register', item.id)); } catch { /* best-effort */ }
       return { success: true };
     } catch (err: any) {
       console.error('Failed to delete content item', err);
@@ -372,16 +451,20 @@ export default function App() {
     title: string,
     brandId: string,
     contentType: 'post' | 'page',
-    opts?: { primaryKeyword?: string; secondaryKeywords?: string[]; sheetContext?: any; seoBrief?: string; initialPrompt?: string }
+    opts?: { primaryKeyword?: string; secondaryKeywords?: string[]; sheetContext?: any; seoBrief?: string; initialPrompt?: string; sourceSheetId?: string }
   ) => {
     if (!user) return;
     const brand = brands.find((b) => b.id === brandId) || brands[0];
     const newItemId = `item-${Date.now()}`;
+    // Assign the next available blog number for this brand (no duplicates).
+    const used = collectUsedNumbers(items, register, brandId);
+    const { number: blogNumber } = nextBlogNumber(brand, used);
     const newItem: ContentItem & { userId: string } = {
       id: newItemId,
       userId: user.uid,
       brandId,
       title,
+      blogNumber,
       // The seed title is the *brief* — it must not become the article's
       // headline (the theme renders the post title as an h1, so keeping the
       // seed out of the title prevents the recurring duplicate-header issue).
@@ -394,6 +477,7 @@ export default function App() {
       secondaryKeywords: opts?.secondaryKeywords || [],
       seoBrief: opts?.seoBrief || 'Target audience interest and organic search ranking.',
       sheetContext: opts?.sheetContext || undefined,
+      sourceSheetId: opts?.sourceSheetId || undefined,
       bodyHtml: `<h2>${title}</h2><p>Article introduction content generated for ${brand?.name || 'Brand'}.</p>`,
       blocks: [],
       createdAt: new Date().toISOString(),
@@ -404,7 +488,10 @@ export default function App() {
       // Optimistically add the item to local state immediately so the editor
       // has something to render before the Firestore onSnapshot catches up.
       setItems((prev) => [...prev, newItem as ContentItem]);
-      await setDoc(doc(db, 'content_items', newItemId), newItem);
+      await setDoc(doc(db, 'content_items', newItemId), sanitizeForFirestore(newItem));
+      // Create the matching Blog Register entry so the number is recorded
+      // persistently from the moment the post exists.
+      await setDoc(doc(db, 'blog_register', newItemId), sanitizeForFirestore(buildRegisterEntry(newItem as ContentItem, brand, user.uid)));
       setActiveItemId(newItem.id);
       setActiveTab('editor');
     } catch (err) {
@@ -540,7 +627,7 @@ export default function App() {
     if (!user) return;
     try {
       const featureToSave = { ...feature, userId: user.uid };
-      await setDoc(doc(db, 'feature_requests', feature.id), featureToSave);
+      await setDoc(doc(db, 'feature_requests', feature.id), sanitizeForFirestore(featureToSave));
     } catch (err) {
       console.error('Failed to save feature request', err);
     }
@@ -675,6 +762,7 @@ export default function App() {
                   handleSaveItem(item);
                 }}
                 onCreateNewItem={handleCreateNewItem}
+                items={items}
               />
             )}
 
@@ -694,6 +782,7 @@ export default function App() {
                 onDeleteItem={handleDeleteItem}
                 onImportWPPosts={handleImportWPPosts}
                 onNavigateTab={navigateTab}
+                register={register}
               />
             )}
 

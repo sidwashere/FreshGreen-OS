@@ -8,6 +8,12 @@ import { GoogleGenAI, Type } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 import { analyzeContent } from '@power-seo/content-analysis';
 import { Humanizer } from './src/lib/patina-core.js';
+import {
+  buildGrammarRulesPrompt,
+  resolveGrammarRules,
+  enforceGrammarRules,
+  GRAMMAR_RULE_DEFS,
+} from './src/lib/grammarRules.js';
 
 dotenv.config();
 
@@ -16,6 +22,17 @@ const GEMINI_TEXT_FALLBACK_MODEL = 'gemini-flash-latest';
 // Free-tier quota buckets are per-model, so we fall through the chain when one
 // model is exhausted (RESOURCE_EXHAUSTED) and try the next.
 const MODEL_CHAIN = Array.from(new Set([GEMINI_TEXT_MODEL, GEMINI_TEXT_FALLBACK_MODEL]));
+
+// ── Grammar & style rules (Carol's request: feat-grammar-rules) ─────────────
+// Shared editorial rules injected into every content-generation prompt so the
+// rules are enforced at source, not patched manually after generation.
+//
+// The rule catalogue, per-brand merging and deterministic post-generation
+// enforcement all live in src/lib/grammarRules.ts (shared with the frontend so
+// the BrandManager toggles and the server never drift). `grammarRulesPrompt`
+// renders the enabled rules for a given brand + optional per-request overrides.
+const grammarRulesPrompt = (brand?: any, overrides?: any) =>
+  buildGrammarRulesPrompt(brand, overrides);
 
 const app = express();
 // 25mb so PC image uploads fit: the client sends base64 data URLs (~4/3 the
@@ -643,6 +660,491 @@ function parseHtmlIntoBlocks(html: string, title?: string, keyword?: string): an
 }
 
 // ==========================================
+// Intelligent auto-block generation
+// ==========================================
+// Carol's feat-auto-blocks: instead of only reactively parsing the finished
+// HTML into generic paragraph blocks, the engine now decides WHICH blocks make
+// each article most effective — image wraps, product showcases, CTA bands,
+// card grids, quotes, callouts, Daniel's Tips, newsletter signups, FAQs — and
+// builds them from the content it finds. The user can optionally state which
+// blocks they want (`requestedBlocks`); those take priority and are merged
+// with the auto-detected defaults.
+//
+// Block type catalogue (src/types.ts VisualBlockType):
+//   hero, paragraph, heading, product_cta, faq, callout, image_banner, cards,
+//   quote, cta_band, carousel, daniels_tip, newsletter
+
+const BLOCK_TYPE_LABELS: Record<string, string> = {
+  hero: 'Hero',
+  paragraph: 'Paragraph',
+  heading: 'Heading',
+  product_cta: 'Product Showcase',
+  faq: 'FAQ',
+  callout: 'Callout',
+  image_banner: 'Image',
+  cards: 'Card Grid',
+  quote: 'Quote',
+  cta_band: 'CTA Band',
+  carousel: 'Carousel',
+  daniels_tip: "Daniel's Tip",
+  newsletter: 'Newsletter',
+};
+
+// Normalise a user-supplied block hint (free text or a type name) to a known
+// VisualBlockType, or null if it doesn't match anything.
+function normalizeBlockHint(hint: string): string | null {
+  const h = String(hint || '').trim().toLowerCase();
+  if (!h) return null;
+  // Exact type names first.
+  if (BLOCK_TYPE_LABELS[h]) return h;
+  // Friendly aliases.
+  const aliases: Record<string, string> = {
+    'image': 'image_banner',
+    'image banner': 'image_banner',
+    'image wrap': 'image_banner',
+    'imagewrap': 'image_banner',
+    'photo': 'image_banner',
+    'picture': 'image_banner',
+    'product': 'product_cta',
+    'product showcase': 'product_cta',
+    'product cta': 'product_cta',
+    'showcase': 'product_cta',
+    'shop': 'product_cta',
+    'buy': 'product_cta',
+    'cta': 'cta_band',
+    'cta band': 'cta_band',
+    'call to action': 'cta_band',
+    'cards': 'cards',
+    'card grid': 'cards',
+    'card': 'cards',
+    'grid': 'cards',
+    'quote': 'quote',
+    'testimonial': 'quote',
+    'callout': 'callout',
+    'tip': 'daniels_tip',
+    "daniel's tip": 'daniels_tip',
+    'daniels tip': 'daniels_tip',
+    'newsletter': 'newsletter',
+    'signup': 'newsletter',
+    'subscribe': 'newsletter',
+    'faq': 'faq',
+    'faqs': 'faq',
+    'questions': 'faq',
+    'carousel': 'carousel',
+    'slider': 'carousel',
+    'hero': 'hero',
+    'paragraph': 'paragraph',
+    'heading': 'heading',
+    'section': 'paragraph',
+  };
+  return aliases[h] || null;
+}
+
+// Build a `cards` grid block from a list-like HTML region (ul/ol with 3+ items).
+function cardsFromList(html: string, title: string): any | null {
+  const listRe = /<(ul|ol)\b[^>]*>([\s\S]*?)<\/\1>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = listRe.exec(html)) !== null) {
+    const items = Array.from(m[2].matchAll(/<li\b[^>]*>([\s\S]*?)<\/li>/gi))
+      .map((im) => stripHtml(im[1]).trim())
+      .filter(Boolean);
+    if (items.length >= 3) {
+      return {
+        id: `block-${Date.now()}-cards${Math.floor(Math.random() * 1000)}`,
+        type: 'cards',
+        title,
+        content: '',
+        cards: items.slice(0, 6).map((c, i) => ({
+          id: `card-${Date.now()}-${i}`,
+          title: c.split(/[.:]/)[0].slice(0, 60),
+          content: c.slice(0, 240),
+        })),
+      };
+    }
+  }
+  return null;
+}
+
+// Build a `quote` block from a <blockquote> element.
+function quoteFromHtml(html: string): any | null {
+  const qRe = /<blockquote\b[^>]*>([\s\S]*?)<\/blockquote>/gi;
+  const m = qRe.exec(html);
+  if (!m) return null;
+  const text = stripHtml(m[1]).trim();
+  if (!text) return null;
+  const cite = m[1].match(/<cite\b[^>]*>([\s\S]*?)<\/cite>/i);
+  return {
+    id: `block-${Date.now()}-quote${Math.floor(Math.random() * 1000)}`,
+    type: 'quote',
+    title: '',
+    content: text.slice(0, 600),
+    author: cite ? stripHtml(cite[1]).trim() : undefined,
+  };
+}
+
+// Build a `callout` block from a callout/note/important div.
+function calloutFromHtml(html: string): any | null {
+  const cRe = /<div[^>]*class="[^"]*(?:callout|note|important|highlight|alert)[^"]*"[^>]*>([\s\S]*?)<\/div>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = cRe.exec(html)) !== null) {
+    const text = stripHtml(m[1]).trim();
+    if (text) {
+      return {
+        id: `block-${Date.now()}-callout${Math.floor(Math.random() * 1000)}`,
+        type: 'callout',
+        title: '',
+        content: text.slice(0, 800),
+      };
+    }
+  }
+  return null;
+}
+
+// Build a `newsletter` block when the article contains a signup section.
+function newsletterFromHtml(html: string): any | null {
+  const nRe = /<div[^>]*class="[^"]*(?:newsletter|subscribe|signup|sign-up|email-capture)[^"]*"[^>]*>([\s\S]*?)<\/div>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = nRe.exec(html)) !== null) {
+    const text = stripHtml(m[1]).trim();
+    if (text) {
+      return {
+        id: `block-${Date.now()}-newsletter${Math.floor(Math.random() * 1000)}`,
+        type: 'newsletter',
+        title: 'Stay in the Loop',
+        subtitle: 'Get the latest tips delivered to your inbox.',
+        content: text.slice(0, 400),
+        buttonText: 'Subscribe',
+      };
+    }
+  }
+  return null;
+}
+
+// Build a `product_cta` (product showcase) block from a product-recommendation
+// div or a CTA section that names a product.
+function productShowcaseFromHtml(html: string, sectionHtml: string, headingText: string): any | null {
+  // 1) Explicit product-recommendation divs.
+  const prodRe = /<div[^>]*class="[^"]*product-recommendation[^"]*"[^>]*>([\s\S]*?)<\/div>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = prodRe.exec(html)) !== null) {
+    const content = stripHtml(m[1]).trim();
+    if (content) {
+      const btn = m[1].match(/<a[^>]*>([\s\S]*?)<\/a>/i);
+      const link = m[1].match(/<a[^>]*href="([^"]+)"/i);
+      return {
+        id: `block-${Date.now()}-prod${Math.floor(Math.random() * 1000)}`,
+        type: 'product_cta',
+        title: content.slice(0, 200),
+        content: '',
+        buttonText: btn ? stripHtml(btn[1]).trim() || 'View Product' : 'View Product',
+        buttonUrl: link?.[1] || '#',
+        badge: 'Recommended',
+      };
+    }
+  }
+  // 2) A CTA section whose heading mentions a product / shop / buy.
+  if (/(product|shop|buy|order|bundle|range|try )/i.test(headingText)) {
+    const btn = sectionHtml.match(/<a[^>]*>([\s\S]*?)<\/a>|<button[^>]*>([\s\S]*?)<\/button>/i);
+    const link = sectionHtml.match(/<a[^>]*href="([^"]+)"/i);
+    return {
+      id: `block-${Date.now()}-prod${Math.floor(Math.random() * 1000)}`,
+      type: 'product_cta',
+      title: headingText,
+      content: stripHtml(sectionHtml).slice(0, 900),
+      buttonText: btn ? stripHtml(btn[1] || btn[2] || '').trim() || 'Shop Now' : 'Shop Now',
+      buttonUrl: link?.[1] || '#',
+      badge: 'Product',
+    };
+  }
+  return null;
+}
+
+// Build a `cta_band` block from a CTA section.
+function ctaBandFromHtml(sectionHtml: string, headingText: string): any | null {
+  if (!/(cta|call to action|get started|learn more|find out|discover|try |shop|order|book|contact)/i.test(headingText)) return null;
+  const btn = sectionHtml.match(/<a[^>]*>([\s\S]*?)<\/a>|<button[^>]*>([\s\S]*?)<\/button>/i);
+  const link = sectionHtml.match(/<a[^>]*href="([^"]+)"/i);
+  return {
+    id: `block-${Date.now()}-cta${Math.floor(Math.random() * 1000)}`,
+    type: 'cta_band',
+    title: headingText,
+    subtitle: '',
+    content: stripHtml(sectionHtml).slice(0, 700),
+    buttonText: btn ? stripHtml(btn[1] || btn[2] || '').trim() || 'Get Started' : 'Get Started',
+    buttonUrl: link?.[1] || '#',
+  };
+}
+
+// Build a `daniels_tip` block from a daniels-tip div.
+function danielsTipFromHtml(html: string): any | null {
+  const tipRe = /<div[^>]*class="[^"]*daniels-tip[^"]*"[^>]*>([\s\S]*?)<\/div>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = tipRe.exec(html)) !== null) {
+    const content = stripHtml(m[1]).trim();
+    if (content) {
+      return {
+        id: `block-${Date.now()}-tip${Math.floor(Math.random() * 1000)}`,
+        type: 'daniels_tip',
+        title: "Daniel's Tip",
+        content: content.slice(0, 1000),
+      };
+    }
+  }
+  return null;
+}
+
+// Build an `faq` block from an FAQ section.
+function faqFromHtml(html: string, headingText: string, sectionHtml: string): any | null {
+  if (!/(^|\s)(faq|frequently asked|questions?\b|common questions)/i.test(headingText)) return null;
+  const pairs: Array<{ question: string; answer: string }> = [];
+  const qRe = /<h3\b[^>]*>([\s\S]*?)<\/h3>([\s\S]*?)(?=<h3\b|<h2\b|$)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = qRe.exec(sectionHtml)) !== null) {
+    const q = stripHtml(m[1]).trim();
+    const a = stripHtml(m[2]).trim();
+    if (q && a) pairs.push({ question: q, answer: a.slice(0, 600) });
+  }
+  if (!pairs.length) {
+    // Fall back to the whole section as one Q/A.
+    const text = stripHtml(sectionHtml).trim();
+    if (text) pairs.push({ question: headingText, answer: text.slice(0, 800) });
+  }
+  if (!pairs.length) return null;
+  return {
+    id: `block-${Date.now()}-faq${Math.floor(Math.random() * 1000)}`,
+    type: 'faq',
+    title: headingText,
+    content: '',
+    faqItems: pairs.slice(0, 8),
+  };
+}
+
+// Build a `carousel` block from a gallery of images.
+function carouselFromImages(images: Array<{ src: string; alt: string }>): any | null {
+  if (images.length < 3) return null;
+  return {
+    id: `block-${Date.now()}-carousel${Math.floor(Math.random() * 1000)}`,
+    type: 'carousel',
+    title: 'Explore the range',
+    content: '',
+    slides: images.slice(0, 8).map((img, i) => ({
+      id: `slide-${Date.now()}-${i}`,
+      imageUrl: img.src,
+      title: img.alt || '',
+      content: '',
+    })),
+  };
+}
+
+// The main intelligent block generator. `requestedBlocks` is an optional array
+// of user-stated block hints (type names or friendly labels). Auto-detected
+// defaults are always computed; user-requested blocks are inserted at the front
+// (after the hero) and take priority, with dedup against what was auto-detected.
+function autoGenerateBlocks(
+  html: string,
+  title?: string,
+  keyword?: string,
+  requestedBlocks?: string[] | null,
+): any[] {
+  if (!html || !stripHtml(html)) return [];
+  const blocks: any[] = [];
+
+  // ---- 1. Hero (always first) -------------------------------------------
+  const headingRe = /<h([123])[^>]*>([\s\S]*?)<\/h\1>/gi;
+  const headings: { level: number; text: string; start: number; end: number }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = headingRe.exec(html))) {
+    const text = stripHtml(m[2]);
+    if (!text) continue;
+    headings.push({ level: Number(m[1]), text, start: m.index, end: headingRe.lastIndex });
+  }
+  const sectionText = (start: number, end: number) =>
+    stripHtml(html.slice(start, end).replace(/<li\b[^>]*>/gi, '\n• ').replace(/<\/li>/gi, '\n'))
+      .replace(/[ \t]*\n[ \t]*/g, '\n')
+      .split('\n').map((l) => l.trim()).filter(Boolean).join('\n');
+
+  const h1 = headings.find((h) => h.level === 1);
+  const heroEnd = h1 ? h1.end : headings[0]?.start ?? 0;
+  const heroSubtitle = h1
+    ? sectionText(h1.end, headings.find((h) => h.start > h1.end)?.start ?? html.length)
+    : '';
+  blocks.push({
+    id: `block-${Date.now()}-hero${Math.floor(Math.random() * 1000)}`,
+    type: 'hero',
+    title: h1?.text || title || 'Featured Story',
+    subtitle: heroSubtitle ? heroSubtitle.split(/[.!?]/).slice(0, 2).join('. ') + '.' : '',
+    content: heroSubtitle ? heroSubtitle.slice(0, 700) : '',
+    badge: keyword || 'Featured',
+  });
+
+  // ---- 2. Collect images (for image wraps / carousel) -------------------
+  const imgRe = /<img\b[^>]*>/gi;
+  const seenSrcs = new Set<string>();
+  const images: Array<{ src: string; alt: string }> = [];
+  let heroImg: { src: string; alt: string } | null = null;
+  while ((m = imgRe.exec(html)) !== null) {
+    const tag = m[0];
+    const src = tag.match(/src\s*=\s*["']([^"']+)["']/i)?.[1] || '';
+    if (!src || src.startsWith('data:')) continue;
+    const alt = tag.match(/alt\s*=\s*["']([^"']*)["']/i)?.[1] || '';
+    if (!heroImg) { heroImg = { src, alt }; continue; }
+    if (seenSrcs.has(src)) continue;
+    seenSrcs.add(src);
+    images.push({ src, alt });
+  }
+  if (heroImg && blocks[0]?.type === 'hero' && !(blocks[0].imageUrl || '').trim()) {
+    blocks[0].imageUrl = heroImg.src;
+    blocks[0].imageAlt = heroImg.alt || blocks[0].title || 'Article image';
+  }
+
+  // ---- 3. Walk sections into content-aware blocks -----------------------
+  // Track which auto-detected block types we've already emitted so we can
+  // dedup against user-requested ones.
+  const autoTypes = new Set<string>(['hero']);
+  const sectionBlocks: any[] = [];
+
+  for (let i = 0; i < headings.length; i++) {
+    const h = headings[i];
+    if (h.level === 1) continue; // handled as hero
+
+    const sectionStart = h.end;
+    const sectionEnd = headings[i + 1]?.start ?? html.length;
+    const sectionHtml = html.slice(sectionStart, sectionEnd);
+    const content = sectionText(sectionStart, sectionEnd);
+    const headingText = h.text;
+
+    // FAQ section → faq block. The section extends to the NEXT h2 (not the
+    // next heading of any level) so it can absorb the h3 Q/A pairs beneath it.
+    if (h.level === 2 && /(^|\s)(faq|frequently asked|questions?\b|common questions)/i.test(headingText)) {
+      const faqSectionEnd = headings.find((nh) => nh.start > h.start && nh.level <= 2)?.start ?? html.length;
+      const faqSectionHtml = html.slice(sectionStart, faqSectionEnd);
+      const faq = faqFromHtml(html, headingText, faqSectionHtml);
+      if (faq) {
+        sectionBlocks.push(faq);
+        autoTypes.add('faq');
+        // Skip the h3 Q/A headings absorbed into the FAQ block.
+        while (i + 1 < headings.length && headings[i + 1].level === 3 && headings[i + 1].start < faqSectionEnd) i++;
+        continue;
+      }
+    }
+
+    // Daniel's Tip div → daniels_tip block.
+    const tip = danielsTipFromHtml(sectionHtml);
+    if (tip) { sectionBlocks.push(tip); autoTypes.add('daniels_tip'); continue; }
+
+    // Product recommendation / product CTA section → product_cta.
+    const prod = productShowcaseFromHtml(sectionHtml, sectionHtml, headingText);
+    if (prod) { sectionBlocks.push(prod); autoTypes.add('product_cta'); continue; }
+
+    // CTA section → cta_band.
+    const cta = ctaBandFromHtml(sectionHtml, headingText);
+    if (cta) { sectionBlocks.push(cta); autoTypes.add('cta_band'); continue; }
+
+    // List-like content (3+ items) → cards grid.
+    const cards = cardsFromList(sectionHtml, headingText);
+    if (cards) { sectionBlocks.push(cards); autoTypes.add('cards'); continue; }
+
+    // Blockquote → quote.
+    const quote = quoteFromHtml(sectionHtml);
+    if (quote) { sectionBlocks.push(quote); autoTypes.add('quote'); continue; }
+
+    // Callout/note div → callout.
+    const callout = calloutFromHtml(sectionHtml);
+    if (callout) { sectionBlocks.push(callout); autoTypes.add('callout'); continue; }
+
+    // Newsletter signup → newsletter.
+    const newsletter = newsletterFromHtml(sectionHtml);
+    if (newsletter) { sectionBlocks.push(newsletter); autoTypes.add('newsletter'); continue; }
+
+    // Default: paragraph block (or heading-only if no body text).
+    if (content) {
+      sectionBlocks.push({
+        id: `block-${Date.now()}-p${sectionBlocks.length}${Math.floor(Math.random() * 1000)}`,
+        type: 'paragraph',
+        title: headingText,
+        content: content.slice(0, 4000),
+      });
+    } else {
+      sectionBlocks.push({
+        id: `block-${Date.now()}-h${sectionBlocks.length}${Math.floor(Math.random() * 1000)}`,
+        type: 'heading',
+        title: headingText,
+        content: '',
+      });
+    }
+  }
+
+  // ---- 4. Image wraps: insert image_banner blocks after the hero ---------
+  // First image becomes an image_banner right after the hero; if there are 3+
+  // images, also build a carousel.
+  const imageBlocks: any[] = [];
+  if (images.length) {
+    const first = images[0];
+    imageBlocks.push({
+      id: `block-${Date.now()}-img0${Math.floor(Math.random() * 1000)}`,
+      type: 'image_banner',
+      title: '',
+      subtitle: '',
+      content: '',
+      buttonText: '',
+      buttonUrl: '',
+      keywords: '',
+      imageLayout: 'full',
+      imageUrl: first.src,
+      imageAlt: first.alt,
+    });
+    autoTypes.add('image_banner');
+  }
+  const carousel = carouselFromImages(images);
+  if (carousel) { imageBlocks.push(carousel); autoTypes.add('carousel'); }
+
+  // ---- 5. Assemble: hero + image wrap + sections ------------------------
+  blocks.push(...imageBlocks);
+  blocks.push(...sectionBlocks);
+
+  // Guarantee at least one content block beyond the hero.
+  if (blocks.length === 1) {
+    blocks.push({
+      id: `block-${Date.now()}-p0${Math.floor(Math.random() * 1000)}`,
+      type: 'paragraph',
+      title: '',
+      content: stripHtml(html).slice(0, 4000),
+    });
+  }
+
+  // ---- 6. Merge user-requested blocks -----------------------------------
+  // User hints take priority: any requested block type that wasn't auto-detected
+  // gets a placeholder block inserted right after the hero (and image wrap).
+  if (Array.isArray(requestedBlocks) && requestedBlocks.length) {
+    const requested: string[] = [];
+    for (const hint of requestedBlocks) {
+      const norm = normalizeBlockHint(hint);
+      if (norm && !requested.includes(norm)) requested.push(norm);
+    }
+    // Insert missing requested types after the hero + image wrap.
+    let insertAt = 1 + imageBlocks.length;
+    for (const type of requested) {
+      if (autoTypes.has(type)) continue; // already present
+      const placeholder = {
+        id: `block-${Date.now()}-req-${type}${Math.floor(Math.random() * 1000)}`,
+        type,
+        title: type === 'cta_band' ? 'Ready to make a change?' : type === 'newsletter' ? 'Stay in the Loop' : type === 'daniels_tip' ? "Daniel's Tip" : type === 'cards' ? 'Why choose us' : type === 'carousel' ? 'Explore the range' : type === 'quote' ? '' : type === 'image_banner' ? '' : type === 'faq' ? 'FAQ' : 'Section Title',
+        subtitle: type === 'cta_band' ? 'No-pressure, expert-led guidance' : type === 'newsletter' ? 'Get the latest tips delivered to your inbox.' : 'Section Subtitle',
+        content: type === 'image_banner' ? '' : type === 'quote' ? 'A powerful sentence worth quoting…' : type === 'cta_band' ? 'A short, warm call to action that invites the reader to take the next step.' : type === 'daniels_tip' ? 'A practical, actionable tip that benefits from being highlighted.' : type === 'newsletter' ? '' : 'Write content here...',
+        buttonText: type === 'cta_band' ? 'Get Started' : type === 'newsletter' ? 'Subscribe' : type === 'product_cta' ? 'Shop Now' : '',
+        buttonUrl: '#',
+        imageLayout: type === 'image_banner' ? 'full' : undefined,
+        badge: type === 'product_cta' ? 'Product' : undefined,
+      };
+      blocks.splice(Math.min(insertAt, blocks.length), 0, placeholder);
+      insertAt++;
+    }
+  }
+
+  return blocks.slice(0, 12);
+}
+
+// ==========================================
 // 1. AI API ENDPOINTS (Gemini Server-Side)
 // ==========================================
 
@@ -751,7 +1253,7 @@ async function generateAdditionalSection(opts: {
 }): Promise<string> {
   const { byokKeys, pref, brand, title, primaryKeyword, contentType, existingHeadings, existingTail, shortfall } = opts;
   const result = await completeWithProvider(byokKeys, pref, {
-    systemInstruction: `You are the senior editor for "${brand?.name || 'the site'}". The article below is ${shortfall} words short of its target length. Write ONE additional on-topic section to extend it: a fresh <h2> that is NOT any of these existing headings (${existingHeadings.join('; ') || 'none'}), followed by 2-3 substantial paragraphs (200-450 words total) that continue the article's argument naturally and stay on the exact same topic. Use the keyword "${primaryKeyword}" naturally, keep the brand voice (${brand?.voiceGuidelines || 'professional, clear, engaging'}), and end with a complete sentence. BRITISH ENGLISH ONLY (colour not color, favourite not favorite, analyse not analyze, organise not organize, centre not center, grey not gray, towards not toward, whilst not while). Do NOT repeat or restate any heading or paragraph that already exists in the article — advance the argument forward. Return ONLY the raw HTML of the new section (h2, p, ul/li allowed) — no markdown fences, no JSON, no commentary.`,
+    systemInstruction: `You are the senior editor for "${brand?.name || 'the site'}". The article below is ${shortfall} words short of its target length. Write ONE additional on-topic section to extend it: a fresh <h2> that is NOT any of these existing headings (${existingHeadings.join('; ') || 'none'}), followed by 2-3 substantial paragraphs (200-450 words total) that continue the article's argument naturally and stay on the exact same topic. Use the keyword "${primaryKeyword}" naturally, keep the brand voice (${brand?.voiceGuidelines || 'professional, clear, engaging'}), and end with a complete sentence. ${grammarRulesPrompt(brand)} Do NOT repeat or restate any heading or paragraph that already exists in the article — advance the argument forward. Return ONLY the raw HTML of the new section (h2, p, ul/li allowed) — no markdown fences, no JSON, no commentary.`,
     prompt: `Article topic: "${title}" (${contentType === 'page' ? 'landing page' : 'blog post'}).\n\nCurrent article tail (for continuity):\n${existingTail.slice(0, 1200)}`,
     maxTokens: 1024,
     temperature: 0.7,
@@ -793,7 +1295,7 @@ app.post('/api/ai/generate-article', async (req, res) => {
     'X-Accel-Buffering': 'no',
   });
 
-  const { title, contentType, primaryKeyword, secondaryKeywords, seoBrief, brand, byokKeys, applyHumanization, targetWordCount, modelPref, sheetContext } = req.body;
+  const { title, contentType, primaryKeyword, secondaryKeywords, seoBrief, brand, byokKeys, applyHumanization, targetWordCount, modelPref, sheetContext, requestedBlocks, relatedArticles } = req.body;
 
   const aiApiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || byokKeys?.gemini;
   let ai = aiApiKey ? new GoogleGenAI({ apiKey: aiApiKey }) : null;
@@ -852,6 +1354,8 @@ Output Format: Return ONLY the raw HTML article body. Use h1, h2, h3, p, ul, li,
 
 BRITISH ENGLISH RULE: Write entirely in British English. Use "colour" not "color", "favourite" not "favorite", "analyse" not "analyze", "organise" not "organize", "behaviour" not "behavior", "colour" not "color", "defence" not "defense", "licence" not "license" (noun), "programme" not "program" (noun), "metre" not "meter", "centre" not "center", "grey" not "gray", "draught" not "draft" (noun), "whilst" not "while" (conjunction), "towards" not "toward", and all other standard British spellings. Never default to American spellings.
 
+${grammarRulesPrompt(brand)}
+
 CRITICAL: Do NOT repeat the opening paragraph or its core message anywhere else in the article. The first paragraph sets the scene once — the rest of the article must progress forward, never circle back to restate the introduction. If you find yourself restating the opening, rephrase or advance to the next point instead.
 
 FACTUAL ACCURACY RULES:
@@ -887,6 +1391,29 @@ SEO requirements (scored by an automated SEO analyzer, follow precisely):
 
     emit({ type: 'status', message: 'Connecting to the model…', percent: 4 });
     emit({ type: 'status', message: 'Analysing brief, keywords & brand voice…', percent: 8 });
+
+    // Emit the full generation blueprint so the frontend can show every rule and
+    // parameter being applied — this makes the process transparent and credible.
+    const resolvedGrammar = resolveGrammarRules(brand);
+    const grammarRuleLines: { id: string; label: string; description: string }[] = [
+      ...GRAMMAR_RULE_DEFS
+        .filter((def) => resolvedGrammar[def.id])
+        .map((def) => ({ id: def.id, label: def.label, description: def.description })),
+      ...(resolvedGrammar.customRules || []).map((r) => ({ id: 'custom', label: 'Custom rule', description: r })),
+    ];
+    emit({
+      type: 'generationInfo',
+      brand: brand ? { name: brand.name, voiceGuidelines: brand.voiceGuidelines || '' } : null,
+      primaryKeyword: primaryKeyword || '',
+      secondaryKeywords: Array.isArray(secondaryKeywords) ? secondaryKeywords : [],
+      targetWordCount: targetWordCount || 0,
+      seoBrief: seoBrief || '',
+      contentType: contentType || 'post',
+      bannedWords: brand?.bannedWords || [],
+      grammarRules: grammarRuleLines,
+      grammarRulesPrompt: buildGrammarRulesPrompt(brand) || null,
+      wordTarget: wordTarget,
+    });
 
     // ── Build rich prompt from sheet context (if available) ──────────────
     const sc = sheetContext && typeof sheetContext === 'object' ? sheetContext : null;
@@ -926,6 +1453,15 @@ SEO requirements (scored by an automated SEO analyzer, follow precisely):
       ? `\nCALL TO ACTION: Near the end of the article (before the FAQ), include a natural, compelling call-to-action section. Use this CTA text as guidance: "${sc.callToAction}". Wrap it in a styled div or integrate it naturally into the closing paragraphs.`
       : '';
 
+    // ── Dynamic template fields (feat-auto-populate-dynamic-fields) ──────────
+    // Fetch the brand's REAL products and gather REAL related articles from the
+    // content register so the generated article populates the template's dynamic
+    // sections (product recommendation, related articles, CTA) with real data
+    // instead of placeholders.
+    const realProducts = await fetchBrandProducts(brand);
+    const relatedList = Array.isArray(relatedArticles) ? relatedArticles.slice(0, 6) : [];
+    const dynamicFieldsText = buildDynamicFieldsPrompt(realProducts, relatedList, sc?.callToAction);
+
     // One-line summary — as additional brief context
     const summaryText = sc?.oneLineSummary
       ? `\nARTICLE SUMMARY: ${sc.oneLineSummary}`
@@ -943,6 +1479,7 @@ ${extraKeywordsText}
 ${internalLinksText}
 ${faqText}
 ${ctaText}
+${dynamicFieldsText}
 
 Headline: craft your own fresh article title as the single <h1> — do not repeat the topic text above verbatim as the headline.`;
 
@@ -1234,49 +1771,17 @@ Keep the JSON compact — no whitespace, no code fences.`;
       checks.push(`duplicate paragraph scan: ${removedDupes} duplicate(s) removed`);
     }
 
-    // 1c) British English common-word replacements (deterministic, zero AI cost).
-    //     Catches the most frequent US→UK drift the model produces.
+    // 1c) Deterministic grammar & style enforcement (Carol's feat-grammar-rules).
+    //     Runs the enabled rules (British English, And/But sentence starts, AI
+    //     clichés) as a zero-AI-cost post-pass, so the rules hold even if the
+    //     model slips. Respects the brand's per-brand rule configuration.
     {
-      const usToUk: [RegExp, string | ((...args: any[]) => string)][] = [
-        [/\b(flavor|flavors|flavored|flavoring)\b/gi, (m: string) => m.replace(/or$/i, 'our').replace(/or(s|ed|ing)$/i, (_, s: string) => s === 's' ? 'ours' : s === 'ed' ? 'oured' : 'ouring')],
-        [/\b(color|colors|colored|coloring)\b/gi, (m: string) => m.replace(/or$/i, 'our').replace(/or(s|ed|ing)$/i, (_, s: string) => s === 's' ? 'ours' : s === 'ed' ? 'oured' : 'ouring')],
-        [/\b(honor|honors|honored|honoring)\b/gi, (m: string) => m.replace(/or$/i, 'our').replace(/or(s|ed|ing)$/i, (_, s: string) => s === 's' ? 'ours' : s === 'ed' ? 'oured' : 'ouring')],
-        [/\b(labor|labors|labored|laboring)\b/gi, (m: string) => m.replace(/or$/i, 'our').replace(/or(s|ed|ing)$/i, (_, s: string) => s === 's' ? 'ours' : s === 'ed' ? 'oured' : 'ouring')],
-        [/\b(favorite|favorites)\b/gi, (m: string) => m.replace(/or/g, 'ou')],
-        [/\b(behavior|behaviors)\b/gi, (m: string) => m.replace(/or/g, 'ou')],
-        [/\b(neighbor|neighbors|neighborhood)\b/gi, (m: string) => m.replace(/or/g, 'ou')],
-        [/\b(analyze|analyzes|analyzing|analyzed)\b/gi, (m: string) => m.replace(/ze/i, 'se')],
-        [/\b(optimize|optimizes|optimizing|optimized)\b/gi, (m: string) => m.replace(/ze/i, 'se')],
-        [/\b(realize|realizes|realizing|realized)\b/gi, (m: string) => m.replace(/ze/i, 'se')],
-        [/\b(customize|organize|recognize|summarize|standardize|prioritize|minimize|maximize|utilize|specialize|initialize|authorize)\b/gi, (m: string) => m.replace(/ze/i, 'se')],
-        [/\b(defense)\b/gi, 'defence'],
-        [/\b(license)\b/gi, (m: string, off: number, str: string) => {
-          // "licence" (noun) vs "license" (verb) — approximate: if followed by a noun context, use licence
-          const after = str.slice(off + m.length, off + m.length + 20);
-          if (/^\s+(to|for|the|a|an|and|or|is|are|was|were|of|in|on|at)\b/.test(after)) return 'licence';
-          return m; // keep "license" for verb uses
-        }],
-        [/\b(program)\b/gi, (m: string, off: number, str: string) => {
-          const before = str.slice(Math.max(0, off - 30), off);
-          if (/\b(computer|software|app|training|exercise)\s*$/.test(before)) return 'program'; // US is fine for computing
-          return 'programme';
-        }],
-        [/\b(center|centers|centered|centering)\b/gi, (m: string) => m.replace(/er/g, 're').replace(/er(s|ed|ing)$/i, (_, s: string) => s === 's' ? 'res' : s === 'ed' ? 'red' : 'ring')],
-        [/\b(gray|grey)\b/gi, 'grey'],
-        [/\b(toward)\b/gi, 'towards'],
-      ];
-      let usCount = 0;
-      for (const [pat, repl] of usToUk) {
-        const before = completeHtml;
-        if (typeof repl === 'function') {
-          completeHtml = completeHtml.replace(pat, repl as any);
-        } else {
-          completeHtml = completeHtml.replace(pat, repl);
-        }
-        if (completeHtml !== before) usCount++;
+      const enforced = enforceGrammarRules(completeHtml, brand?.grammarRules);
+      if (enforced.fixes.length) {
+        fixes.push(...enforced.fixes);
+        checks.push(`grammar & style scan: ${enforced.fixes.join('; ')}`);
       }
-      if (usCount) fixes.push(`applied ${usCount} British English spelling correction(s)`);
-      checks.push(`British English scan: ${usCount} correction(s) applied`);
+      completeHtml = enforced.text;
     }
 
     // 1d) Internal link validation: strip <a> tags whose href points to a
@@ -1304,6 +1809,23 @@ Keep the JSON compact — no whitespace, no code fences.`;
         fixes.push(`stripped ${strippedLinks} internal link(s) pointing to non-existent pages`);
       }
       checks.push(`internal link validation: ${strippedLinks} link(s) stripped`);
+    }
+
+    // 1d2) Populate dynamic template fields with REAL data (feat-auto-populate-
+    //      dynamic-fields): replace product-recommendation placeholders with real
+    //      store products, rewire internal links to real content-register articles,
+    //      and fill empty CTA sections with the agreed call-to-action.
+    {
+      const populated = populateDynamicFields(completeHtml, {
+        products: realProducts,
+        relatedArticles: relatedList,
+        cta: sc?.callToAction,
+      });
+      if (populated.fixes.length) {
+        completeHtml = populated.html;
+        fixes.push(...populated.fixes);
+        checks.push(`dynamic template fields: ${populated.fixes.join('; ')}`);
+      }
     }
 
     // 1e) AI content quality scan: factual contradictions + unqualified health
@@ -1486,7 +2008,7 @@ Return ONLY the JSON array — no markdown fences, no commentary, no surrounding
     // decide which version to keep. This also removes the old failure mode
     // where the humanizer received a non-Gemini model id and stalled/404'd,
     // which killed the stream with a generic "connection closed" error.
-    emit({ type: 'status', message: 'Draft complete — structuring blocks…', percent: 93 });
+    emit({ type: 'status', message: 'Draft complete — running SEO optimisation…', percent: 93 });
 
     // --- Phase 3.6: SEO guardrail pass (deterministic, zero AI cost) ---------
     // Guarantees the highest-value SEO checks pass BEFORE the draft is scored:
@@ -1874,11 +2396,14 @@ Return ONLY the JSON array — no markdown fences, no commentary, no surrounding
       }
     }
 
-    // --- Phase 4: blocks derived from the FINAL (completeness-checked) html ---
-    // The Blocks view is guaranteed to be populated whenever content exists.
+    // --- Phase 4: blocks derived from the FINAL (fully curated, cleaned and
+    // SEO-optimised) html. Blocks are deliberately built LAST — only after the
+    // words have been curated, cleaned and made SEO-ready do we consider the
+    // content structure, images, paragraphs and formatting for the blog.
     const finalHtml = completeHtml;
-    const blocks = parseHtmlIntoBlocks(finalHtml, title, primaryKeyword);
-    emit({ type: 'status', message: 'Structuring blocks & finishing up…', percent: 98 });
+    emit({ type: 'status', message: 'Structuring content blocks from the final, SEO-ready draft…', percent: 98 });
+    const blocks = autoGenerateBlocks(finalHtml, title, primaryKeyword, requestedBlocks);
+    emit({ type: 'status', message: 'Blocks ready — finishing up…', percent: 99 });
 
     // The AI crafts its own headline (single <h1>) — that is the article's
     // REAL title and gets promoted to the post title, while the seed stays as
@@ -2021,7 +2546,7 @@ app.post('/api/ai/enhance-article', async (req, res) => {
     'X-Accel-Buffering': 'no',
   });
 
-  const { originalHtml, originalTitle, title, primaryKeyword, secondaryKeywords, seoBrief, brand, byokKeys, targetWordCount, modelPref } = req.body;
+  const { originalHtml, originalTitle, title, primaryKeyword, secondaryKeywords, seoBrief, brand, byokKeys, targetWordCount, modelPref, requestedBlocks, relatedArticles } = req.body;
 
   if (!originalHtml && !originalTitle) {
     ndjson(res, { type: 'error', error: 'No article content provided. Paste your article or enter a URL.' });
@@ -2081,6 +2606,8 @@ YOUR TASK: You are ENHANCING an existing published article. You must:
 9. CONVERT to British English (colour not color, favourite not favorite, analyse not analyze, etc.).
 10. ENSURE the article ends cleanly with sentence-final punctuation — no truncation.
 
+${grammarRulesPrompt(brand)}
+
 CRITICAL RULES:
 - Do NOT invent specific internal links — use generic plausible paths like /blog/benefits-of-natural-pet-treats.
 - Never make disease-treatment claims. Use qualified language: "may support", "can contribute to", "as part of a balanced diet".
@@ -2090,6 +2617,10 @@ CRITICAL RULES:
 Output Format: Return ONLY the raw HTML article body. Use h1, h2, h3, p, ul, li, img, a tags. No markdown code fences, no JSON wrapper, no commentary before or after — just the HTML.`;
 
     const articleSource = originalTitle ? `"${originalTitle}"` : 'the article below';
+    // ── Dynamic template fields (feat-auto-populate-dynamic-fields) ──────────
+    const realProducts = await fetchBrandProducts(brand);
+    const relatedList = Array.isArray(relatedArticles) ? relatedArticles.slice(0, 6) : [];
+    const dynamicFieldsText = buildDynamicFieldsPrompt(realProducts, relatedList, undefined);
     const prompt = `ENHANCE this existing article. Preserve the author's voice while improving SEO, readability, and completeness.
 
 ORIGINAL ARTICLE TITLE: ${articleSource}
@@ -2111,9 +2642,32 @@ Write the ENHANCED version of this article. Keep the same structure and messages
 - Internal links to plausible /blog/ paths
 - No factual contradictions, all health claims qualified
 - Clean ending with sentence-final punctuation
-- Target approximately ${targetWordCount && targetWordCount > 0 ? targetWordCount : 1000} words (within +/- 15%)`;
+- Target approximately ${targetWordCount && targetWordCount > 0 ? targetWordCount : 1000} words (within +/- 15%)
+${dynamicFieldsText}`;
 
     emit({ type: 'status', message: 'Analysing the existing article and enhancement instructions…', percent: 5 });
+
+    // Emit the generation blueprint for transparency — same as generate-article.
+    const resolvedGrammar = resolveGrammarRules(brand);
+    const grammarRuleLines: { id: string; label: string; description: string }[] = [
+      ...GRAMMAR_RULE_DEFS
+        .filter((def) => resolvedGrammar[def.id])
+        .map((def) => ({ id: def.id, label: def.label, description: def.description })),
+      ...(resolvedGrammar.customRules || []).map((r) => ({ id: 'custom', label: 'Custom rule', description: r })),
+    ];
+    emit({
+      type: 'generationInfo',
+      brand: brand ? { name: brand.name, voiceGuidelines: brand.voiceGuidelines || '' } : null,
+      primaryKeyword: primaryKeyword || '',
+      secondaryKeywords: Array.isArray(secondaryKeywords) ? secondaryKeywords : [],
+      targetWordCount: targetWordCount || 0,
+      seoBrief: seoBrief || '',
+      contentType: 'post',
+      bannedWords: brand?.bannedWords || [],
+      grammarRules: grammarRuleLines,
+      grammarRulesPrompt: buildGrammarRulesPrompt(brand) || null,
+      wordTarget: `Target approximately ${targetWordCount && targetWordCount > 0 ? targetWordCount : 1000} words (within +/- 15%).`,
+    });
 
     // --- Phase 1: Stream the enhanced article body (5-80%) -----------------
     emit({ type: 'status', message: 'Enhancing the article — preserving voice while improving SEO and readability…', percent: 10 });
@@ -2287,31 +2841,15 @@ Keep the JSON compact — no whitespace, no code fences.`;
       checks.push(`duplicate scan: ${removedDupes} removed`);
     }
 
-    // British English
+    // Deterministic grammar & style enforcement (Carol's feat-grammar-rules).
+    // Uses the shared grammarRules module so per-brand toggles are respected.
     {
-      const usToUk: [RegExp, string | ((...args: any[]) => string)][] = [
-        [/\b(flavor|flavors|flavored|flavoring)\b/gi, (m: string) => m.replace(/or$/i, 'our').replace(/or(s|ed|ing)$/i, (_: string, s: string) => s === 's' ? 'ours' : s === 'ed' ? 'oured' : 'ouring')],
-        [/\b(color|colors|colored|coloring)\b/gi, (m: string) => m.replace(/or$/i, 'our').replace(/or(s|ed|ing)$/i, (_: string, s: string) => s === 's' ? 'ours' : s === 'ed' ? 'oured' : 'ouring')],
-        [/\b(honor|honors|honored|honoring)\b/gi, (m: string) => m.replace(/or$/i, 'our').replace(/or(s|ed|ing)$/i, (_: string, s: string) => s === 's' ? 'ours' : s === 'ed' ? 'oured' : 'ouring')],
-        [/\b(labor|labors|labored|laboring)\b/gi, (m: string) => m.replace(/or$/i, 'our').replace(/or(s|ed|ing)$/i, (_: string, s: string) => s === 's' ? 'ours' : s === 'ed' ? 'oured' : 'ouring')],
-        [/\b(favorite|favorites)\b/gi, (m: string) => m.replace(/or/g, 'ou')],
-        [/\b(behavior|behaviors)\b/gi, (m: string) => m.replace(/or/g, 'ou')],
-        [/\b(analyze|analyzes|analyzing|analyzed)\b/gi, (m: string) => m.replace(/ze/i, 'se')],
-        [/\b(optimize|optimizes|optimizing|optimized)\b/gi, (m: string) => m.replace(/ze/i, 'se')],
-        [/\b(realize|realizes|realizing|realized)\b/gi, (m: string) => m.replace(/ze/i, 'se')],
-        [/\b(center|centers|centered|centering)\b/gi, (m: string) => m.replace(/er/g, 're').replace(/er(s|ed|ing)$/i, (_: string, s: string) => s === 's' ? 'res' : s === 'ed' ? 'red' : 'ring')],
-        [/\b(gray)\b/gi, 'grey'],
-        [/\b(toward)\b/gi, 'towards'],
-      ];
-      let usCount = 0;
-      for (const [pat, repl] of usToUk) {
-        const before = completeHtml;
-        if (typeof repl === 'function') completeHtml = completeHtml.replace(pat, repl as any);
-        else completeHtml = completeHtml.replace(pat, repl);
-        if (completeHtml !== before) usCount++;
+      const enforced = enforceGrammarRules(completeHtml, brand?.grammarRules);
+      if (enforced.fixes.length) {
+        fixes.push(...enforced.fixes);
+        checks.push(`grammar & style scan: ${enforced.fixes.join('; ')}`);
       }
-      if (usCount) fixes.push(`applied ${usCount} British English correction(s)`);
-      checks.push(`British English: ${usCount} correction(s)`);
+      completeHtml = enforced.text;
     }
 
     // Internal link validation
@@ -2328,6 +2866,19 @@ Keep the JSON compact — no whitespace, no code fences.`;
       });
       if (strippedLinks) { completeHtml = newHtml; fixes.push(`stripped ${strippedLinks} invalid internal link(s)`); }
       checks.push(`link validation: ${strippedLinks} stripped`);
+    }
+
+    // Populate dynamic template fields with REAL data (feat-auto-populate-dynamic-fields).
+    {
+      const populated = populateDynamicFields(completeHtml, {
+        products: realProducts,
+        relatedArticles: relatedList,
+      });
+      if (populated.fixes.length) {
+        completeHtml = populated.html;
+        fixes.push(...populated.fixes);
+        checks.push(`dynamic template fields: ${populated.fixes.join('; ')}`);
+      }
     }
 
     // AI quality scan
@@ -2383,7 +2934,9 @@ Keep the JSON compact — no whitespace, no code fences.`;
     emit({ type: 'completeness', ...completeness });
 
     // --- Phase 4: Blocks & done -------------------------------------------
-    const blocks = parseHtmlIntoBlocks(completeHtml, title || originalTitle || '', primaryKeyword || '');
+    // Blocks are built LAST, from the final curated/cleaned/SEO-ready HTML.
+    emit({ type: 'status', message: 'Structuring content blocks from the final, SEO-ready draft…', percent: 98 });
+    const blocks = autoGenerateBlocks(completeHtml, title || originalTitle || '', primaryKeyword || '', requestedBlocks);
     const h1Match = /<h1\b[^>]*>([\s\S]*?)<\/h1>/i.exec(completeHtml);
     const articleTitle = h1Match ? stripHtml(h1Match[1]).trim() : '';
 
@@ -2715,6 +3268,7 @@ RULES (always apply):
 - Keep the focus keyphrase "${primaryKeyword || title}" at a natural ${density} density, in the first 100 words and in at least one heading.
 - Keep paragraphs under 150 words and sentences readable (average under 20 words). Use transition words.
 - Keep it human, specific and natural — never generic AI phrasing.
+${grammarRulesPrompt(brand)}
 - Aim for approximately ${targetWordCount && targetWordCount > 0 ? targetWordCount : 900} words${mode === 'shorten' ? ' (or fewer if the current text is already over)' : ''}.
 - Return ONLY the raw HTML body — no markdown, no code fences.`;
 
@@ -2844,6 +3398,7 @@ app.post('/api/ai/rewrite-block', async (req, res) => {
     const systemInstruction = `You are a professional copywriter for "${brand?.name || 'a brand'}".
 Brand Voice & Tone Guidelines: ${brand?.voiceGuidelines || 'Professional, clear, engaging'}.
 ${bannedWordsText}
+${grammarRulesPrompt(brand)}
 Tone for THIS block: ${tone}.
 ${lengthRule}
 Creativity level: ${creativity}.
@@ -3510,6 +4065,18 @@ app.post('/api/wp/sync-content', async (req, res) => {
       slug: contentItem.slug || undefined,
     };
 
+    // Blog Number → WordPress slug (hidden, not the title). The blog number
+    // (e.g. DTP001) is appended to the slug so it lives in the URL for internal
+    // tracking without ever appearing in the visible title. If the slug already
+    // ends with the number, leave it untouched (idempotent re-pushes).
+    if (contentItem.blogNumber) {
+      const baseSlug = String(contentItem.slug || '').replace(/\/+$/, '');
+      const num = String(contentItem.blogNumber).toLowerCase();
+      if (baseSlug && !baseSlug.toLowerCase().endsWith(`-${num}`)) {
+        payload.slug = `${baseSlug}-${num}`;
+      }
+    }
+
     // --- Template: explicit choice wins; blog posts default to the site's
     // Elementor header/footer template --------------------------------------
     // The theme's default single-post template renders the article in a narrow
@@ -3911,6 +4478,172 @@ function wcAuthUrl(wpUrl: string, key: string, secret: string, path: string): st
   const base = wpUrl.replace(/\/+$/, '') + '/wp-json/wc/v3' + path;
   const sep = base.includes('?') ? '&' : '?';
   return `${base}${sep}consumer_key=${encodeURIComponent(key)}&consumer_secret=${encodeURIComponent(secret)}`;
+}
+
+// ── Dynamic template fields (Carol's feat-auto-populate-dynamic-fields) ──────
+// The generated article should populate the template's dynamic sections with
+// REAL data — real products from the store catalog, real related articles from
+// the content register, and the agreed CTA — instead of leaving placeholders.
+// These helpers fetch real products and rewrite the generated HTML so the
+// product-recommendation / related / CTA sections carry real, clickable data.
+
+/** Fetch real products for a brand from its WooCommerce store (cached 5 min). */
+async function fetchBrandProducts(brand: any): Promise<any[]> {
+  const wpUrl = String(brand?.wpUrl || '').trim().replace(/\/+$/, '');
+  if (!wpUrl) return [];
+  const cacheKey = wpUrl;
+  const cached = wcProductCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < 5 * 60 * 1000) return cached.data;
+  try {
+    const wcRes = await fetch(`${wpUrl}/wp-json/wc/store/v1/products?per_page=20&status=publish`, {
+      headers: { 'User-Agent': 'FGOS/1.0' },
+    });
+    if (!wcRes.ok) return [];
+    const raw = await wcRes.json();
+    const products = (Array.isArray(raw) ? raw : []).map((p: any) => ({
+      id: p.id,
+      name: p.name,
+      slug: p.slug,
+      permalink: p.permalink,
+      shortDescription: (p.short_description || '').replace(/<[^>]+>/g, '').trim(),
+      price: p.prices?.price || '',
+      currency: p.prices?.currency_code || 'GBP',
+      image: p.images?.[0]?.src || '',
+      categories: (p.categories || []).map((c: any) => c.name).filter(Boolean),
+    }));
+    wcProductCache.set(cacheKey, { data: products, at: Date.now() });
+    return products;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Populate the dynamic template fields in generated HTML with real data.
+ *  - Replaces any `product-recommendation` placeholder with a real product card.
+ *  - Rewrites related-article links to point at real content-register articles.
+ *  - Ensures the CTA section carries the agreed CTA text.
+ * Returns the updated HTML plus a list of human-readable fixes for the log.
+ */
+function populateDynamicFields(
+  html: string,
+  opts: { products?: any[]; relatedArticles?: any[]; cta?: string },
+): { html: string; fixes: string[] } {
+  const fixes: string[] = [];
+  let out = html;
+  const products = opts.products || [];
+  const related = opts.relatedArticles || [];
+
+  // 1) Replace product-recommendation placeholders with a real product card.
+  const prodRe = /<div[^>]*class="[^"]*product-recommendation[^"]*"[^>]*>([\s\S]*?)<\/div>/gi;
+  let prodCount = 0;
+  out = out.replace(prodRe, (full: string, inner: string) => {
+    // Pick the most relevant real product: prefer one whose name/category matches
+    // the placeholder text; otherwise fall back to the first product.
+    const hint = stripHtml(inner).toLowerCase();
+    let product = products.find((p: any) =>
+      hint && (p.name.toLowerCase().includes(hint) || hint.includes(p.name.toLowerCase()) ||
+        (p.categories || []).some((c: string) => hint.includes(c.toLowerCase())))
+    );
+    if (!product) product = products[0];
+    if (!product) return full; // no real product available — leave placeholder
+    prodCount++;
+    const price = product.price ? ` · ${product.currency || '£'}${product.price}` : '';
+    const img = product.image
+      ? `<img src="${escapeHtmlAttr(product.image)}" alt="${escapeHtmlAttr(product.name)}" loading="lazy" />`
+      : '';
+    const link = product.permalink || '#';
+    return `<div class="product-recommendation">
+  <div class="product-card">
+    ${img}
+    <div class="product-card-body">
+      <h4>${escapeHtmlAttr(product.name)}</h4>
+      <p>${escapeHtmlAttr(product.shortDescription || product.name)}</p>
+      <a class="product-card-link" href="${escapeHtmlAttr(link)}" target="_blank" rel="noopener">View product${price}</a>
+    </div>
+  </div>
+</div>`;
+  });
+  if (prodCount) fixes.push(`populated ${prodCount} product recommendation(s) with real store products`);
+
+  // 2) Rewrite related-article links to point at real content-register articles.
+  //    Only rewrite links whose href is a generic /blog/ path (not an external
+  //    URL and not already a real article slug).
+  if (related.length) {
+    const knownSlugs = new Set(related.map((r: any) => (r.slug || '').toLowerCase().replace(/^\/+|\/+$/g, '')));
+    const aRe = /<a\b([^>]*)href="([^"]*)"([^>]*)>([\s\S]*?)<\/a>/gi;
+    let linkCount = 0;
+    out = out.replace(aRe, (full: string, pre: string, href: string, post: string, anchor: string) => {
+      const clean = href.replace(/^https?:\/\/[^/]+/i, '').replace(/^\/+|\/+$/g, '').toLowerCase();
+      // Only touch internal /blog/ paths that don't already match a real article.
+      if (!/^blog\//.test(clean)) return full;
+      const slugPart = clean.replace(/^blog\//, '');
+      if (knownSlugs.has(slugPart)) return full;
+      // Find a real related article whose slug/title overlaps the anchor text.
+      const anchorLower = stripHtml(anchor).toLowerCase();
+      const match = related.find((r: any) =>
+        (r.slug && anchorLower.includes(r.slug.toLowerCase().replace(/-/g, ' '))) ||
+        (r.title && anchorLower.includes(r.title.toLowerCase()))
+      ) || related[0];
+      if (!match) return full;
+      const slug = (match.slug || '').replace(/^\/+|\/+$/g, '');
+      if (!slug) return full;
+      linkCount++;
+      return `<a${pre}href="/blog/${escapeHtmlAttr(slug)}"${post}>${anchor}</a>`;
+    });
+    if (linkCount) fixes.push(`rewired ${linkCount} internal link(s) to real content-register articles`);
+  }
+
+  // 3) Ensure the CTA section carries the agreed CTA text.
+  if (opts.cta && opts.cta.trim()) {
+    const ctaText = opts.cta.trim();
+    // If a CTA band exists but is empty/placeholder, fill it.
+    const ctaRe = /(<div[^>]*class="[^"]*cta[^"]*"[^>]*>)([\s\S]*?)(<\/div>)/gi;
+    let ctaCount = 0;
+    out = out.replace(ctaRe, (full: string, open: string, inner: string, close: string) => {
+      const stripped = stripHtml(inner).trim();
+      if (stripped.length > 0 && !/\[.*\]/.test(stripped)) return full; // already has real content
+      ctaCount++;
+      return `${open}<p>${escapeHtmlAttr(ctaText)}</p>${close}`;
+    });
+    if (ctaCount) fixes.push(`filled ${ctaCount} empty CTA section(s) with the agreed call-to-action`);
+  }
+
+  return { html: out, fixes };
+}
+
+/**
+ * Build the "DYNAMIC TEMPLATE FIELDS" prompt section that tells the AI which
+ * real products, related articles and CTA to use when populating the template's
+ * dynamic sections. Returns an empty string when there is nothing to populate.
+ */
+function buildDynamicFieldsPrompt(products: any[], related: any[], cta?: string): string {
+  const lines: string[] = [];
+  if (products.length) {
+    lines.push(
+      'DYNAMIC TEMPLATE FIELDS — populate these with the REAL data below (do not invent products or articles):',
+    );
+    lines.push(
+      'REAL PRODUCTS AVAILABLE (use these in the product recommendation section, with their real names and links):\n' +
+        products
+          .slice(0, 6)
+          .map((p) => `- ${p.name}${p.price ? ` (${p.currency || '£'}${p.price})` : ''}${p.permalink ? ` — ${p.permalink}` : ''}`)
+          .join('\n'),
+    );
+  }
+  if (related.length) {
+    lines.push(
+      'REAL RELATED ARTICLES (link to these existing articles on the site for the related-articles section, using their real slugs):\n' +
+        related
+          .map((r) => `- ${r.title || r.slug}${r.slug ? ` — /blog/${String(r.slug).replace(/^\/+|\/+$/g, '')}` : ''}`)
+          .join('\n'),
+    );
+  }
+  if (cta && cta.trim()) {
+    lines.push(`AGREED CALL TO ACTION: "${cta.trim()}" — use this exact text in the CTA section.`);
+  }
+  if (!lines.length) return '';
+  return `\n${lines.join('\n')}`;
 }
 
 // GET /api/wc/products — authenticated product list (richer data than public Store API)
@@ -5635,6 +6368,14 @@ app.post('/api/autoblog/check-publish', async (req, res) => {
     const results: { itemId: string; success: boolean; message: string; wpPostId?: number }[] = [];
 
     for (const item of dueItems) {
+      // ENFORCE the schedule server-side: never publish an item before its
+      // scheduled time (or one with no schedule at all). This is a safety net
+      // even if a client sends the wrong items.
+      const sched = item.scheduledPublishAt ? new Date(item.scheduledPublishAt).getTime() : null;
+      if (!sched || sched > Date.now()) {
+        results.push({ itemId: item.id, success: false, message: 'Not due yet — scheduled time not reached' });
+        continue;
+      }
       const brand = brands?.find((b: any) => b.id === (item.autoBlogOverrides?.brandId || item.brandId));
       if (!brand || !brand.wpUrl || !brand.wpUsername) {
         results.push({ itemId: item.id, success: false, message: 'No valid brand connection' });

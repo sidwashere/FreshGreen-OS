@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { ContentItem, Brand, AutoBlogOverrides } from '../types';
+import { GenerationInfoPanel } from './GenerationInfoPanel';
 import {
   FileSpreadsheet,
   RefreshCw,
@@ -36,7 +37,7 @@ interface AutoBlogSchedulerProps {
     title: string,
     brandId: string,
     contentType: 'post' | 'page',
-    opts?: { primaryKeyword?: string; secondaryKeywords?: string[]; sheetContext?: any; seoBrief?: string; initialPrompt?: string }
+    opts?: { primaryKeyword?: string; secondaryKeywords?: string[]; sheetContext?: any; seoBrief?: string; initialPrompt?: string; sourceSheetId?: string }
   ) => void;
   onDeleteItem: (item: ContentItem) => Promise<{ success: boolean; message?: string }>;
   onEditItem: (item: ContentItem) => void;
@@ -263,6 +264,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
   const [selectedTab, setSelectedTab] = useState<string>('');
   const [sheetRows, setSheetRows] = useState<SheetRow[]>([]);
   const [sheetHeaders, setSheetHeaders] = useState<string[]>([]);
+  const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -279,6 +281,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
     setSelectedTab('');
     setSheetRows([]);
     setSheetHeaders([]);
+    setSelectedRows(new Set());
     setConnStatus(null);
     setError(null);
   }, [selectedBrandId]);
@@ -304,6 +307,8 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
   const [expandedItem, setExpandedItem] = useState<string | null>(null);
   const [generating, setGenerating] = useState<Set<string>>(new Set());
   const [publishing, setPublishing] = useState<Set<string>>(new Set());
+  // Live generation info per item id (for the streaming status panel)
+  const [genState, setGenState] = useState<Record<string, any>>({});
   const [importing, setImporting] = useState(false);
   const [importProgress, setImportProgress] = useState<{ done: number; total: number } | null>(null);
   const [resyncing, setResyncing] = useState(false);
@@ -446,6 +451,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
       if (data.error) throw new Error(data.error);
       setSheetRows(data.rows || []);
       setSheetHeaders(data.headers || []);
+      setSelectedRows(new Set());
     } catch (err: any) {
       if (err?.name === 'AbortError') return; // Swallowed — new request superseded this one
       setError(err.message || 'Failed to fetch sheet');
@@ -476,6 +482,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
       if (data.error) throw new Error(data.error);
       setSheetRows(data.rows || []);
       setSheetHeaders(data.headers || []);
+      setSelectedRows(new Set());
     } catch (err: any) {
       if (err?.name === 'AbortError') return;
       // On failure, restore previous data so the UI doesn't go blank
@@ -513,6 +520,17 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
     return () => clearInterval(interval);
   }, [sheetUrl]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Auto-load sheet tabs on mount if a sheet URL is already saved, so the
+  // preview + row checklist are ready without re-clicking Connect.
+  const autoLoadedRef = React.useRef(false);
+  useEffect(() => {
+    if (autoLoadedRef.current) return;
+    if (sheetUrl.trim() && tabs.length === 0 && !loading) {
+      autoLoadedRef.current = true;
+      handleFetchSheet();
+    }
+  }, [sheetUrl, tabs.length, loading]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Auto-retry: if connection was lost, attempt recovery every 30s ──
   useEffect(() => {
     if (!sheetUrl.trim()) return;
@@ -532,13 +550,18 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
 
   const handleImportRows = async () => {
     if (sheetRows.length === 0) return;
+    // Import only the user-selected rows (fall back to all rows if none selected)
+    const rowsToImport = selectedRows.size > 0
+      ? sheetRows.filter((_, idx) => selectedRows.has(idx))
+      : sheetRows;
+    if (rowsToImport.length === 0) return;
     setImporting(true); setError(null); setImportProgress({ done: 0, total: 0 });
     try {
       const resp = await fetch('/api/autoblog/import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          rows: sheetRows,
+          rows: rowsToImport,
           brandId: selectedBrandId,
           sheetId: sheetUrl,
           sheetName: tabs.find((t) => t.gid === selectedTab)?.name || 'Sheet1',
@@ -566,6 +589,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
             seoBrief: row.seoBrief,
             initialPrompt: row.initialPrompt,
             sheetContext: row.sheetContext,
+            sourceSheetId: sheetUrl,
           }
         );
 
@@ -577,6 +601,8 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
         kind: 'ok',
         text: `Imported ${createdCount} post(s) • ${data.skipped.length} skipped (duplicates/empty)`,
       });
+      // Clear the selection after a successful import
+      setSelectedRows(new Set());
     } catch (err: any) {
       setError(err.message || 'Import failed');
     } finally {
@@ -620,6 +646,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
               seoBrief: row['Search Intent'] || row['One Line Summary'] || '',
               initialPrompt: row['One Line Summary'] || row['Blog Title'] || '',
               sheetContext: row,
+              sourceSheetId: sheetUrl,
             }
           );
           createdCount++;
@@ -640,6 +667,13 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
   // ── Generate content for a single item ─────────────────────────────
   const handleGenerate = async (item: ContentItem) => {
     setGenerating((prev) => new Set(prev).add(item.id));
+    // Auto-expand so the live status panel is visible
+    setExpandedItem(item.id);
+    // Reset live generation state for this item
+    setGenState((prev) => ({
+      ...prev,
+      [item.id]: { phase: 'Connecting to the model…', percent: 0, words: 0, text: '', elapsed: 0, lastUpdate: Date.now(), stalled: false, generationInfo: null, history: [] },
+    }));
     try {
       // Step 1: Generate SEO keywords
       const kwResp = await fetch('/api/ai/suggest-keywords', {
@@ -652,7 +686,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
       });
       const kwData = await kwResp.json();
 
-      // Step 2: Generate article via streaming endpoint (non-streaming fetch for simplicity)
+      // Step 2: Generate article via streaming endpoint (NDJSON)
       const genResp = await fetch('/api/ai/generate-article', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -668,15 +702,138 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
           byokKeys: JSON.parse(localStorage.getItem('fgos_byok_keys') || '{}'),
         }),
       });
-      const genData = await genResp.json();
 
-      if (genData.error) throw new Error(genData.error);
+      if (!genResp.body) throw new Error('No response body');
+
+      const reader = genResp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      let streamedText = '';
+      let completed = false;
+      let streamError: string | null = null;
+      let genData: any = null;
+
+      const patch = (fn: (prev: any) => any) => {
+        setGenState((prev) => ({ ...prev, [item.id]: fn(prev[item.id] || { phase: '', percent: 0, words: 0, text: '', elapsed: 0, lastUpdate: Date.now(), stalled: false, generationInfo: null, history: [] }) }));
+      };
+
+      const handleEvent = (evt: any) => {
+        if (evt.type === 'generationInfo') {
+          patch((prev) => ({ ...prev, generationInfo: evt, history: prev.history || [] }));
+        } else if (evt.type === 'status') {
+          patch((prev) => ({
+            ...prev,
+            phase: evt.message || evt.phase || '',
+            percent: evt.percent ?? prev.percent,
+            stalled: false,
+            history: [...(prev.history || []), { message: evt.message || '', percent: evt.percent ?? prev.percent, at: Date.now() }],
+          }));
+        } else if (evt.type === 'stream') {
+          streamedText += evt.text || '';
+          patch((prev) => ({
+            ...prev,
+            phase: evt.phase || prev.phase || 'Writing…',
+            percent: evt.percent ?? prev.percent,
+            words: evt.words ?? streamedText.split(/\s+/).filter(Boolean).length,
+            text: streamedText,
+            stalled: false,
+            history: evt.phase ? [...(prev.history || []), { message: evt.phase, percent: evt.percent ?? prev.percent, at: Date.now() }] : prev.history,
+          }));
+        } else if (evt.type === 'heartbeat') {
+          patch((prev) => ({ ...prev, elapsed: evt.elapsed ?? prev.elapsed, stalled: false }));
+        } else if (evt.type === 'image') {
+          patch((prev) => ({ ...prev, phase: evt.role === 'hero' ? 'Hero image ready…' : 'Both images ready.', percent: evt.role === 'hero' ? 90 : 92, stalled: false }));
+        } else if (evt.type === 'error') {
+          streamError = evt.error || 'Generation failed.';
+        } else if (evt.type === 'done') {
+          completed = true;
+          genData = evt.data || {};
+        }
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          try { handleEvent(JSON.parse(line)); } catch { /* skip malformed */ }
+        }
+      }
+
+      if (streamError) throw new Error(streamError);
+      if (!completed || !genData) throw new Error('Generation ended without completing.');
+
+      let bodyHtml = genData.articleHtml || genData.bodyHtml || item.bodyHtml;
+      let blocks = genData.blocks || item.blocks;
+
+      // Step 3: Auto-humanise the draft (only when the setting is enabled)
+      if (autoHumanize && bodyHtml) {
+        patch((prev) => ({
+          ...prev,
+          phase: 'Humanising the draft…',
+          percent: 97,
+          stalled: false,
+          history: [...(prev.history || []), { message: 'Humanising the draft…', percent: 97, at: Date.now() }],
+        }));
+        try {
+          const hResp = await fetch('/api/ai/humanize-draft', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              html: bodyHtml,
+              brand: brands.find((b) => b.id === item.brandId),
+              byokKeys: JSON.parse(localStorage.getItem('fgos_byok_keys') || '{}'),
+            }),
+          });
+          const hData = await hResp.json();
+          if (hData.success && hData.humanized && hData.changed) {
+            bodyHtml = hData.humanized;
+            if (hData.blocks && hData.blocks.length) blocks = hData.blocks;
+            patch((prev) => ({
+              ...prev,
+              phase: 'Draft humanised.',
+              percent: 98,
+              stalled: false,
+              history: [...(prev.history || []), { message: 'Draft humanised.', percent: 98, at: Date.now() }],
+            }));
+          } else if (hData.success) {
+            patch((prev) => ({
+              ...prev,
+              phase: 'Humaniser made no changes.',
+              percent: 98,
+              stalled: false,
+              history: [...(prev.history || []), { message: 'Humaniser made no changes.', percent: 98, at: Date.now() }],
+            }));
+          } else {
+            patch((prev) => ({
+              ...prev,
+              phase: 'Humanisation skipped (no change).',
+              percent: 98,
+              stalled: false,
+              history: [...(prev.history || []), { message: 'Humanisation skipped.', percent: 98, at: Date.now() }],
+            }));
+          }
+        } catch (hErr: any) {
+          // Humanisation is best-effort — don't fail the whole generation if it errors
+          patch((prev) => ({
+            ...prev,
+            phase: 'Humanisation failed — keeping raw draft.',
+            percent: 98,
+            stalled: false,
+            history: [...(prev.history || []), { message: 'Humanisation failed — keeping raw draft.', percent: 98, at: Date.now() }],
+          }));
+        }
+      }
 
       // Update the item with generated content
       const updatedItem: ContentItem = {
         ...item,
-        bodyHtml: genData.articleHtml || genData.bodyHtml || item.bodyHtml,
-        blocks: genData.blocks || item.blocks,
+        bodyHtml,
+        blocks,
         primaryKeyword: kwData.primaryKeyword || item.primaryKeyword,
         secondaryKeywords: kwData.secondaryKeywords || item.secondaryKeywords,
         seoBrief: kwData.seoBrief || item.seoBrief,
@@ -689,7 +846,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
       };
 
       onSaveItem(updatedItem);
-      setNotice({ kind: 'ok', text: `Generated: "${item.title}"` });
+      setNotice({ kind: 'ok', text: autoHumanize ? `Generated & humanised: "${item.title}"` : `Generated: "${item.title}"` });
     } catch (err: any) {
       setNotice({ kind: 'err', text: `Generation failed: ${err.message}` });
     } finally {
@@ -698,6 +855,14 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
         next.delete(item.id);
         return next;
       });
+      // Keep the final genState briefly so the panel can show completion, then clear
+      setTimeout(() => {
+        setGenState((prev) => {
+          const next = { ...prev };
+          delete next[item.id];
+          return next;
+        });
+      }, 3000);
     }
   };
 
@@ -705,6 +870,12 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
   const handleSchedule = (item: ContentItem, date: string, time: string) => {
     const dt = new Date(`${date}T${time || '09:00'}:00`);
     if (isNaN(dt.getTime())) { setNotice({ kind: 'err', text: 'Invalid date/time' }); return; }
+    // ENFORCE the schedule: never allow scheduling in the past — otherwise the
+    // auto-publish interval would fire immediately and the post goes live early.
+    if (dt.getTime() <= Date.now()) {
+      setNotice({ kind: 'err', text: `Cannot schedule "${item.title}" in the past — pick a future date/time.` });
+      return;
+    }
     onSaveItem({
       ...item,
       scheduledPublishAt: dt.toISOString(),
@@ -717,7 +888,10 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
   const handleScheduleAll = () => {
     const drafts = autoBlogItems.filter((i) => i.status === 'Draft_Ready' && !i.scheduledPublishAt);
     if (drafts.length === 0) return;
-    const startDateMs = new Date(startDate).getTime();
+    // Parse the start date as LOCAL midnight (not UTC) so the first post lands on
+    // the intended calendar day regardless of timezone.
+    const startDateMs = new Date(`${startDate}T00:00:00`).getTime();
+    if (isNaN(startDateMs)) { setNotice({ kind: 'err', text: 'Invalid start date' }); return; }
     drafts.forEach((item, i) => {
       const schedDate = new Date(startDateMs + i * cadenceDays * 86_400_000);
       onSaveItem({
@@ -829,6 +1003,22 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
     if (!iso) return '';
     const d = new Date(iso);
     return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  };
+
+  // Local-time helpers for the date/time inputs — keeps the displayed value in
+  // the user's own timezone so the stored schedule matches what they see.
+  const localDateInput = (iso?: string) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  };
+  const localTimeInput = (iso?: string) => {
+    if (!iso) return '09:00';
+    const d = new Date(iso);
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   };
 
   return (
@@ -978,7 +1168,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
 
             {sheetRows.length > 0 && (
               <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 space-y-3">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between flex-wrap gap-2">
                   <div>
                     <p className="text-sm font-bold text-slate-900">
                       {tabs.find((t) => t.gid === selectedTab)?.name || 'Sheet'} — {sheetRows.length} rows
@@ -987,43 +1177,118 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
                       Columns: {sheetHeaders.join(' · ')}
                     </p>
                   </div>
+                  {/* Row selection controls */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] font-semibold text-violet-700 bg-violet-100 px-2 py-1 rounded-lg">
+                      {selectedRows.size} selected
+                    </span>
+                    <button
+                      onClick={() => setSelectedRows(new Set(sheetRows.map((_, i) => i)))}
+                      className="text-[11px] font-semibold px-2 py-1 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 transition"
+                    >
+                      Select All
+                    </button>
+                    <button
+                      onClick={() => setSelectedRows(new Set())}
+                      className="text-[11px] font-semibold px-2 py-1 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 transition"
+                    >
+                      Clear
+                    </button>
+                  </div>
                 </div>
-                {/* Preview table */}
-                <div className="overflow-x-auto">
+                {/* Preview table — all rows, scrollable */}
+                <div className="overflow-auto max-h-[420px] border border-slate-200 rounded-lg">
                   <table className="w-full text-[11px] border-collapse">
-                    <thead>
+                    <thead className="sticky top-0 z-10">
                       <tr>
-                        {sheetHeaders.slice(0, 6).map((h) => (
+                        <th className="text-left px-2 py-1.5 bg-slate-100 text-slate-600 font-bold border-b border-slate-200 w-8">
+                          <input
+                            type="checkbox"
+                            checked={selectedRows.size === sheetRows.length && sheetRows.length > 0}
+                            onChange={(e) => setSelectedRows(e.target.checked ? new Set(sheetRows.map((_, i) => i)) : new Set())}
+                            className="rounded border-slate-300 text-violet-600 focus:ring-violet-500"
+                            title="Select all rows"
+                          />
+                        </th>
+                        {sheetHeaders.map((h) => (
                           <th key={h} className="text-left px-2 py-1.5 bg-slate-100 text-slate-600 font-bold border-b border-slate-200 whitespace-nowrap">
                             {h}
                           </th>
                         ))}
-                        {sheetHeaders.length > 6 && (
-                          <th className="text-left px-2 py-1.5 bg-slate-100 text-slate-400 font-bold border-b border-slate-200">
-                            +{sheetHeaders.length - 6} more
-                          </th>
-                        )}
                       </tr>
                     </thead>
                     <tbody>
-                      {sheetRows.slice(0, 3).map((row, i) => (
-                        <tr key={i} className="border-b border-slate-100">
-                          {sheetHeaders.slice(0, 6).map((h) => (
-                            <td key={h} className="px-2 py-1.5 text-slate-700 max-w-[150px] truncate whitespace-nowrap">
-                              {row[h] || '—'}
+                      {sheetRows.map((row, i) => {
+                        const title = row['Blog Title'] || row['Title'] || row['Headline'] || '';
+                        const alreadyImported = autoBlogItems.some((it) => it.title === title);
+                        const rowStatus = row['Status'] || '';
+                        const isSelected = selectedRows.has(i);
+                        return (
+                          <tr
+                            key={i}
+                            onClick={() => {
+                              const next = new Set(selectedRows);
+                              if (next.has(i)) next.delete(i); else next.add(i);
+                              setSelectedRows(next);
+                            }}
+                            className={`border-b border-slate-100 cursor-pointer transition ${
+                              isSelected ? 'bg-violet-50' : 'hover:bg-slate-50'
+                            } ${alreadyImported ? 'opacity-60' : ''}`}
+                          >
+                            <td className="px-2 py-1.5" onClick={(e) => e.stopPropagation()}>
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={() => {
+                                  const next = new Set(selectedRows);
+                                  if (next.has(i)) next.delete(i); else next.add(i);
+                                  setSelectedRows(next);
+                                }}
+                                className="rounded border-slate-300 text-violet-600 focus:ring-violet-500"
+                              />
                             </td>
-                          ))}
-                          {sheetHeaders.length > 6 && (
-                            <td className="px-2 py-1.5 text-slate-400">…</td>
-                          )}
-                        </tr>
-                      ))}
+                            {sheetHeaders.map((h) => {
+                              const val = row[h] || '';
+                              // Highlight the title column
+                              if (h === 'Blog Title' || h === 'Title' || h === 'Headline') {
+                                return (
+                                  <td key={h} className="px-2 py-1.5 text-slate-900 font-semibold max-w-[220px]">
+                                    <span className="line-clamp-2">{val || '—'}</span>
+                                    {alreadyImported && (
+                                      <span className="block text-[9px] font-bold text-amber-600 mt-0.5">Already imported</span>
+                                    )}
+                                  </td>
+                                );
+                              }
+                              // Status column gets a badge
+                              if (h === 'Status' && val) {
+                                const st = val.toLowerCase();
+                                const stColor = st.includes('publish') || st.includes('live')
+                                  ? 'bg-emerald-100 text-emerald-700'
+                                  : st.includes('plan') || st.includes('draft')
+                                    ? 'bg-slate-100 text-slate-600'
+                                    : 'bg-violet-100 text-violet-700';
+                                return (
+                                  <td key={h} className="px-2 py-1.5">
+                                    <span className={`inline-block text-[10px] font-bold px-1.5 py-0.5 rounded-full ${stColor}`}>{val}</span>
+                                  </td>
+                                );
+                              }
+                              return (
+                                <td key={h} className="px-2 py-1.5 text-slate-700 max-w-[200px]">
+                                  <span className="line-clamp-2">{val || '—'}</span>
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
-                {sheetRows.length > 3 && (
-                  <p className="text-[10px] text-slate-400 text-center">Showing 3 of {sheetRows.length} rows</p>
-                )}
+                <p className="text-[10px] text-slate-400 text-center">
+                  Showing all {sheetRows.length} rows — tick the rows you want to import, or use Select All.
+                </p>
                 <button
                   onClick={handleImportRows}
                   disabled={importing}
@@ -1032,7 +1297,9 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
                   {importing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
                   {importing && importProgress
                     ? `Importing ${importProgress.done} / ${importProgress.total}…`
-                    : `Import ${sheetRows.length} Rows as Planned Posts`
+                    : selectedRows.size > 0
+                      ? `Import ${selectedRows.size} Selected Row${selectedRows.size > 1 ? 's' : ''} as Planned Posts`
+                      : `Import All ${sheetRows.length} Rows as Planned Posts`
                   }
                 </button>
               </div>
@@ -1422,6 +1689,15 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
                 {/* Expanded details */}
                 {isExpanded && (
                   <div className="border-t border-slate-100 p-4 bg-slate-50/50 space-y-3">
+                    {/* Live generation status panel (streaming) */}
+                    {genState[item.id] && (
+                      <GenerationInfoPanel
+                        genState={genState[item.id]}
+                        brandColor={brand?.primaryColor || '#7c3aed'}
+                        targetWordCount={defaultWordCount}
+                      />
+                    )}
+
                     {/* Keywords */}
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
                       <div>
@@ -1449,11 +1725,11 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
                           <label className="block text-[11px] font-medium text-slate-500 mb-1">Publish Date</label>
                           <input
                             type="date"
-                            defaultValue={item.scheduledPublishAt ? new Date(item.scheduledPublishAt).toISOString().split('T')[0] : startDate}
+                            defaultValue={item.scheduledPublishAt ? localDateInput(item.scheduledPublishAt) : startDate}
                             onChange={(e) => {
                               if (e.target.value) {
                                 const time = item.scheduledPublishAt
-                                  ? new Date(item.scheduledPublishAt).toTimeString().slice(0, 5)
+                                  ? localTimeInput(item.scheduledPublishAt)
                                   : '09:00';
                                 handleSchedule(item, e.target.value, time);
                               }
@@ -1465,10 +1741,10 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
                           <label className="block text-[11px] font-medium text-slate-500 mb-1">Time</label>
                           <input
                             type="time"
-                            defaultValue={item.scheduledPublishAt ? new Date(item.scheduledPublishAt).toTimeString().slice(0, 5) : '09:00'}
+                            defaultValue={item.scheduledPublishAt ? localTimeInput(item.scheduledPublishAt) : '09:00'}
                             onChange={(e) => {
                               const date = item.scheduledPublishAt
-                                ? new Date(item.scheduledPublishAt).toISOString().split('T')[0]
+                                ? localDateInput(item.scheduledPublishAt)
                                 : startDate;
                               if (e.target.value) handleSchedule(item, date, e.target.value);
                             }}

@@ -117,5 +117,20 @@ service cloud.firestore {
       allow update: if isSignedIn() && isValidId(featureId) && existing().userId == request.auth.uid && incoming().userId == request.auth.uid;
       allow delete: if isSignedIn() && isValidId(featureId) && existing().userId == request.auth.uid;
     }
+
+    match /blog_register/{entryId} {
+      function isValidRegisterEntry(data) {
+        return data.size() >= 5
+          && data.blogNumber is string && data.blogNumber.size() <= 16
+          && data.brandId is string
+          && data.userId == request.auth.uid;
+      }
+
+      allow get: if isSignedIn() && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && existing().userId == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(entryId) && isValidRegisterEntry(incoming());
+      allow update: if isSignedIn() && isValidId(entryId) && existing().userId == request.auth.uid && incoming().userId == request.auth.uid;
+      allow delete: if isSignedIn() && isValidId(entryId) && existing().userId == request.auth.uid;
+    }
   }
 }

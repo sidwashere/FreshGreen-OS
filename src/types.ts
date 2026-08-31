@@ -36,6 +36,37 @@ export interface Brand {
    * used for product listings. */
   wcConsumerKey?: string;
   wcConsumerSecret?: string;
+  /** Blog number prefix / brand code, e.g. "DTP", "OC", "HP". Used to build
+   * the per-brand blog reference number (e.g. DTP001). User-editable; falls
+   * back to a default derived from the brand slug when absent. */
+  brandCode?: string;
+  /** Per-brand grammar & style rules (Carol's feat-grammar-rules). Each rule is
+   * independently toggleable; when absent, the global defaults apply. Custom
+   * free-text rules can be appended per brand. */
+  grammarRules?: GrammarRules;
+}
+
+/** Per-brand grammar & style rules injected into every content-generation
+ * prompt and enforced deterministically after generation. Every field is
+ * optional at the Brand level; `resolveGrammarRules` merges stored overrides
+ * with the global defaults so a brand can never lose the baseline rules. */
+export interface GrammarRules {
+  /** Never begin a sentence with "And" or "But". */
+  noAndButStarts?: boolean;
+  /** Write in British English (colour, favourite, analyse, etc.). */
+  britishEnglish?: boolean;
+  /** Natural, flowing sentence construction with varied rhythm. */
+  naturalFlow?: boolean;
+  /** Avoid unnecessary repetition of ideas, phrases and keywords. */
+  noRepetition?: boolean;
+  /** Avoid obvious AI-style phrasing and clichés. */
+  noAiClichés?: boolean;
+  /** Keep sentences readable (no sentence over 25 words, average under 20). */
+  shortSentences?: boolean;
+  /** Output should read as polished, publish-ready prose. */
+  publishReady?: boolean;
+  /** Additional free-text rules specific to this brand. */
+  customRules?: string[];
 }
 
 /** Per-brand blog visual identity. Every field is optional at the Brand level;
@@ -225,6 +256,10 @@ export interface ContentItem {
   lastAutoPublishedAt?: string;
   /** Error message from the most recent auto-publish attempt. */
   lastAutoPublishError?: string;
+  /** Blog reference number, e.g. "DTP001". Assigned automatically per brand
+   *  (prefix + 3-digit sequence starting at 001). Never duplicated. Used for
+   *  internal tracking and written into the WordPress slug (not the title). */
+  blogNumber?: string;
 }
 
 /** Complete context from a single Google Sheet row. Every field maps to a

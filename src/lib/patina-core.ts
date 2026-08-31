@@ -41,6 +41,15 @@ Avoid generic AI phrasing. Preserve all HTML tags exactly.
 Tone: ${this.tone}
 ${this.bannedWords.length ? 'Banned words: ' + this.bannedWords.join(', ') : ''}
 
+GRAMMAR & STYLE RULES (apply to every sentence):
+- NEVER begin a sentence with "And" or "But". Use "However", "In addition", "Additionally", "Yet", "Although", "Despite this", or restructure the sentence instead.
+- Write in natural, flowing British English with correct grammar and punctuation throughout.
+- Construct sentences naturally and vary their length and rhythm — avoid repetitive, mechanical or formulaic phrasing.
+- Avoid unnecessary repetition: do not restate the same idea, phrase or keyword in consecutive sentences.
+- Avoid obvious AI-style phrasing and clichés (e.g. "in today's fast-paced world", "it's important to note", "delve into", "unlock", "elevate", "game-changer", "seamlessly"). Write like a human expert, not a template.
+- Keep sentences readable: no sentence longer than 25 words, average under 20 words.
+- The final copy should require very little editorial correction — it should read as polished, publish-ready prose.
+
 HTML Content:
 ${html}`;
 

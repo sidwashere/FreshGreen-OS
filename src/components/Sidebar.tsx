@@ -42,7 +42,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       items: [
         {
           id: 'pipeline',
-          label: 'Production Pipeline',
+          label: 'Dashboard',
           icon: LayoutDashboard,
           badge: plannedCount + draftCount > 0 ? plannedCount + draftCount : null,
           description: 'Command center & planning'
@@ -60,10 +60,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
         },
         {
           id: 'content-hub',
-          label: 'Blog Content',
+          label: 'Blog Manager',
           icon: Library,
           badge: contentCount > 0 ? contentCount : null,
-          description: 'Drafts, live posts & stats'
+          description: 'Posts, register & stats'
         },
         {
           id: 'nano-banana',
