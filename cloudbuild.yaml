@@ -1,0 +1,26 @@
+steps:
+  # Build the container image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/fgos', '.']
+
+  # Push the image to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/fgos']
+
+  # Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'fgos'
+      - '--image=gcr.io/$PROJECT_ID/fgos'
+      - '--platform=managed'
+      - '--region=europe-west1'
+      - '--allow-unauthenticated'
+      - '--set-env-vars=NODE_ENV=production'
+      - '--memory=512Mi'
+      - '--cpu=1'
+
+images:
+  - 'gcr.io/$PROJECT_ID/fgos'
