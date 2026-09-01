@@ -31,6 +31,8 @@ export const BrandManager: React.FC<BrandManagerProps> = ({
   const [sitePages, setSitePages] = useState<Array<{ id: number; title: string; link: string; type: 'page' | 'post'; template: string }>>([]);
   const [pagesError, setPagesError] = useState<string | null>(null);
 
+  // Fetch pages/posts DIRECTLY from the browser to bypass Cloud Run's blocked egress IP.
+  // The user's browser uses their real IP which is not blocked by QUIC.cloud/Hostinger CDN.
   const fetchPagesFromWp = async () => {
     if (!editingBrand?.wpUrl || !editingBrand?.wpUsername) {
       setPagesError('WordPress URL and Username are required to fetch site pages.');
@@ -38,24 +40,73 @@ export const BrandManager: React.FC<BrandManagerProps> = ({
     }
     setFetchingPages(true);
     setPagesError(null);
+    setSitePages([]);
     try {
-      const res = await fetch('/api/wp/list-site-pages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          wpUrl: editingBrand.wpUrl,
-          wpUsername: editingBrand.wpUsername,
-          wpAppPassword: editingBrand.wpAppPassword,
+      const cleanUrl = editingBrand.wpUrl.replace(/\/+$/, '');
+      const wpUA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+      const authHeader = 'Basic ' + btoa(`${editingBrand.wpUsername}:${editingBrand.wpAppPassword || ''}`);
+
+      // Fetch pages and posts in parallel from WordPress REST API directly (browser-side)
+      const [pagesRes, postsRes] = await Promise.all([
+        fetch(`${cleanUrl}/wp-json/wp/v2/pages?per_page=50&_fields=id,title,link,slug,type,template,status`, {
+          headers: { 'Authorization': authHeader, 'User-Agent': wpUA, 'Accept': 'application/json' },
+          signal: AbortSignal.timeout(20000),
         }),
-      });
-      const data = await res.json();
-      if (data.success && Array.isArray(data.items)) {
-        setSitePages(data.items);
-      } else {
-        setPagesError(data.message || 'Could not list site pages from WordPress.');
+        fetch(`${cleanUrl}/wp-json/wp/v2/posts?per_page=50&_fields=id,title,link,slug,type,template,status`, {
+          headers: { 'Authorization': authHeader, 'User-Agent': wpUA, 'Accept': 'application/json' },
+          signal: AbortSignal.timeout(20000),
+        }),
+      ]);
+
+      // Surface HTTP errors with diagnostic detail
+      if (!pagesRes.ok || !postsRes.ok) {
+        const pagesStatus = pagesRes.status;
+        const postsStatus = postsRes.status;
+        const pageCount = pagesRes.ok ? 0 : 0;
+        let msg = `WordPress returned errors — Pages: ${pagesStatus}, Posts: ${postsStatus}. `;
+        if (pagesStatus === 401 || postsStatus === 401) msg += 'Check your App Password has read access. ';
+        if (pagesStatus === 403 || postsStatus === 403) msg += 'Access forbidden — your IP may be blocked by QUIC.cloud/Hostinger CDN. ';
+        if (pagesStatus >= 500 || postsStatus >= 500) msg += 'WordPress site is having server issues. ';
+        setPagesError(msg.trim());
+        return;
       }
+
+      const pages: any[] = await pagesRes.json();
+      const posts: any[] = await postsRes.json();
+
+      const items = [
+        ...(Array.isArray(pages) ? pages : []).map((p: any) => ({
+          id: p.id,
+          title: (p.title?.rendered || p.slug || 'Untitled').trim(),
+          link: p.link || '',
+          slug: p.slug || '',
+          type: 'page' as const,
+          template: p.template || 'default',
+          status: p.status || 'publish',
+        })),
+        ...(Array.isArray(posts) ? posts : []).map((p: any) => ({
+          id: p.id,
+          title: (p.title?.rendered || p.slug || 'Untitled').trim(),
+          link: p.link || '',
+          slug: p.slug || '',
+          type: 'post' as const,
+          template: p.template || 'default',
+          status: p.status || 'publish',
+        })),
+      ];
+
+      if (items.length === 0) {
+        setPagesError('No published pages or posts found. Make sure your WordPress REST API is enabled and pages are published.');
+        return;
+      }
+
+      setSitePages(items);
     } catch (err: any) {
-      setPagesError(err?.message || 'Failed to connect to WordPress site.');
+      if (err?.name === 'AbortError') {
+        setPagesError('Request timed out after 20s — your WordPress site may be blocking the connection or is too slow to respond.');
+      } else {
+        setPagesError(err?.message || 'Failed to fetch pages from WordPress. Check the browser console for details.');
+      }
     } finally {
       setFetchingPages(false);
     }
