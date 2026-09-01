@@ -4056,8 +4056,11 @@ function stripBlogStyleKit(html: string): string {
   let content = html;
 
   // 1. Remove the fg-art outer wrapper and keep inner content only
-  const outerRe = /<div[^>]*class=["'][^"']*\bfg-art\b[^"']*["'][^>]*>[\s\S]*?<\/div>\s*$/i;
-  content = content.replace(outerRe, '').trim();
+  const outerRe = /<div[^>]*class=["'][^"']*\bfg-art\b[^"']*["'][^>]*>([\s\S]*?)<\/div>\s*$/i;
+  const match = content.match(outerRe);
+  if (match) {
+    content = match[1]; // Keep the inner content, discard the wrapper
+  }
 
   // 2. Remove any <style> blocks injected by scopedStyles()
   content = content.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
@@ -4126,6 +4129,8 @@ async function applyMasterTemplateLayout(
     // This removes the fg-art wrapper, scoped CSS, fg-* classes, and conflicting
     // inline styles so only the template's layout governs the final output.
     const cleanBody = stripBlogStyleKit(newArticleBody);
+    console.log('[MasterTemplate] newArticleBody length:', newArticleBody?.length, '| cleanBody length:', cleanBody?.length);
+    console.log('[MasterTemplate] cleanBody preview:', (cleanBody || '').substring(0, 200));
 
     if (!rawMasterContent.trim()) {
       return { content: cleanBody, templateSlug: masterTemplateSlug };
