@@ -9,6 +9,7 @@ import { NanoBananaStudioModal } from './components/NanoBananaStudioModal';
 import { AutoBlogScheduler } from './components/AutoBlogScheduler';
 import { SettingsTab } from './components/SettingsTab';
 import { FeatureTracker } from './components/FeatureTracker';
+import { ActivityLogView } from './components/ActivityLog';
 import { LoginScreen } from './components/LoginScreen';
 import { INITIAL_BRANDS, INITIAL_CONTENT } from './data/initialData';
 import { Brand, ContentItem, PipelineStatus, AppUser, FeatureRequest } from './types';
@@ -836,6 +837,13 @@ export default function App() {
                 onCreateNewItem={handleCreateNewItem}
                 onDeleteItem={handleDeleteItem}
                 onEditItem={handleEditItem}
+              />
+            )}
+
+            {activeTab === 'activity-log' && (
+              <ActivityLogView
+                brands={brands}
+                selectedBrandId={selectedBrandId}
               />
             )}
 

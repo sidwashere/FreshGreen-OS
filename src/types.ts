@@ -44,6 +44,12 @@ export interface Brand {
    * independently toggleable; when absent, the global defaults apply. Custom
    * free-text rules can be appended per brand. */
   grammarRules?: GrammarRules;
+  /** Master Layout Template Page/Post ID selected from WordPress to clone and reuse
+   * for consecutive blog posts/pages. */
+  masterTemplateId?: number;
+  masterTemplateType?: 'page' | 'post';
+  masterTemplateTitle?: string;
+  masterTemplateUrl?: string;
   /** What the "Related Products/Services" section should recommend for this
    *  brand. Universal across themes: 'products' (WooCommerce store), 'services'
    *  (care/consultancy services), 'books' (bookshop), or 'none' (no product

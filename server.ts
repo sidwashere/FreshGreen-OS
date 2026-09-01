@@ -22,6 +22,13 @@ import {
 
 dotenv.config();
 
+const DEFAULT_WP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+const DEFAULT_WP_HEADERS = {
+  'User-Agent': DEFAULT_WP_USER_AGENT,
+  'Accept': 'application/json, text/plain, */*',
+  'Accept-Language': 'en-US,en;q=0.9',
+};
+
 const GEMINI_TEXT_MODEL = 'gemini-3.5-flash';
 const GEMINI_TEXT_FALLBACK_MODEL = 'gemini-flash-latest';
 // Free-tier quota buckets are per-model, so we fall through the chain when one
@@ -3982,8 +3989,9 @@ app.post('/api/wp/test-connection', async (req, res) => {
         method: 'GET',
         headers: {
           'Authorization': authHeader,
-          'User-Agent': 'FGOS/1.0',
-          'Accept': 'application/json'
+          'X-HTTP-Authorization': authHeader,
+          'X-Authorization': authHeader,
+          ...DEFAULT_WP_HEADERS,
         },
         signal: controller.signal
       });
@@ -4035,6 +4043,130 @@ app.post('/api/wp/test-connection', async (req, res) => {
     }
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err.message || 'WordPress connection attempt failed.' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// MASTER TEMPLATE CLONING ENGINE
+// Allows a user to select a Master Page or Post from their WordPress site
+// (regardless of theme) and use its exact layout/wrapper for consecutive blogs.
+// ---------------------------------------------------------------------------
+async function applyMasterTemplateLayout(
+  cleanUrl: string,
+  authHeader: string,
+  masterTemplateId: number,
+  masterTemplateType: 'page' | 'post',
+  newArticleTitle: string,
+  newArticleBody: string
+): Promise<{ content: string; templateSlug?: string }> {
+  try {
+    const endpoint = masterTemplateType === 'page' ? 'pages' : 'posts';
+    const masterRes = await fetch(`${cleanUrl}/wp-json/wp/v2/${endpoint}/${masterTemplateId}?context=edit`, {
+      headers: {
+        'Authorization': authHeader,
+        ...DEFAULT_WP_HEADERS,
+      },
+      signal: AbortSignal.timeout(15000),
+    });
+
+    if (!masterRes.ok) {
+      console.warn(`[MasterTemplate] Could not fetch master template #${masterTemplateId} (${masterRes.status})`);
+      return { content: newArticleBody };
+    }
+
+    const masterDoc = await masterRes.json();
+    const rawMasterContent = masterDoc.content?.raw || masterDoc.content?.rendered || '';
+    const masterTemplateSlug = masterDoc.template || '';
+
+    if (!rawMasterContent.trim()) {
+      return { content: newArticleBody, templateSlug: masterTemplateSlug };
+    }
+
+    // 1. Gutenberg / Block-based Master Layout
+    if (rawMasterContent.includes('<!-- wp:')) {
+      let clonedContent = rawMasterContent;
+      const escTitle = newArticleTitle.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      
+      // Update H1/H2 heading in master if present
+      if (/<!-- wp:heading [^>]*-->\s*<h[12][^>]*>.*?<\/h[12]>\s*<!-- \/wp:heading -->/i.test(clonedContent)) {
+        clonedContent = clonedContent.replace(
+          /(<!-- wp:heading [^>]*-->\s*<h[12][^>]*>).*?(<\/h[12]>\s*<!-- \/wp:heading -->)/i,
+          `$1${escTitle}$2`
+        );
+      }
+
+      // If master contains post-content or main group, replace or wrap inner body
+      if (clonedContent.includes('fgos-master-cloned-layout')) {
+        return { content: clonedContent, templateSlug: masterTemplateSlug };
+      }
+
+      const blockWrappedBody = `<!-- wp:group {"className":"fgos-master-cloned-layout","layout":{"type":"constrained"}} -->\n<div className="wp-block-group fgos-master-cloned-layout">\n${newArticleBody}\n</div>\n<!-- /wp:group -->`;
+
+      return {
+        content: `${clonedContent}\n\n${blockWrappedBody}`,
+        templateSlug: masterTemplateSlug,
+      };
+    }
+
+    // 2. Elementor / HTML Container Layout
+    const wrapperMatch = rawMasterContent.match(/(<div[^>]*class=["'][^"']*(?:entry-content|elementor-inner|site-main|container)[^"']*["'][^>]*>)([\s\S]*?)(<\/div>)/i);
+    if (wrapperMatch) {
+      const openTag = wrapperMatch[1];
+      const closeTag = wrapperMatch[3];
+      return { content: openTag + '\n' + newArticleBody + '\n' + closeTag, templateSlug: masterTemplateSlug };
+    }
+
+    return { content: newArticleBody, templateSlug: masterTemplateSlug };
+  } catch (err: any) {
+    console.error('[MasterTemplate] Error applying master template:', err?.message || err);
+    return { content: newArticleBody };
+  }
+}
+
+// Endpoint: Fetch available WordPress pages and posts to choose as Master Template
+app.post('/api/wp/list-site-pages', async (req, res) => {
+  try {
+    const { wpUrl, wpUsername, wpAppPassword } = req.body;
+    if (!wpUrl || !wpUsername) {
+      return res.status(400).json({ success: false, message: 'wpUrl and wpUsername required.' });
+    }
+
+    const cleanUrl = wpUrl.replace(/\/+$/, '');
+    const authHeader = 'Basic ' + Buffer.from(`${wpUsername}:${wpAppPassword || ''}`).toString('base64');
+    const headers = { 'Authorization': authHeader, ...DEFAULT_WP_HEADERS };
+
+    const [pagesRes, postsRes] = await Promise.all([
+      fetch(`${cleanUrl}/wp-json/wp/v2/pages?per_page=50&_fields=id,title,link,slug,type,template,status`, { headers, signal: AbortSignal.timeout(15000) }),
+      fetch(`${cleanUrl}/wp-json/wp/v2/posts?per_page=50&_fields=id,title,link,slug,type,template,status`, { headers, signal: AbortSignal.timeout(15000) }),
+    ]);
+
+    const pages = pagesRes.ok ? await pagesRes.json() : [];
+    const posts = postsRes.ok ? await postsRes.json() : [];
+
+    const items = [
+      ...(Array.isArray(pages) ? pages : []).map((p: any) => ({
+        id: p.id,
+        title: (p.title?.rendered || p.slug || 'Untitled Page').trim(),
+        link: p.link,
+        slug: p.slug,
+        type: 'page' as const,
+        template: p.template || 'default',
+        status: p.status,
+      })),
+      ...(Array.isArray(posts) ? posts : []).map((p: any) => ({
+        id: p.id,
+        title: (p.title?.rendered || p.slug || 'Untitled Post').trim(),
+        link: p.link,
+        slug: p.slug,
+        type: 'post' as const,
+        template: p.template || 'default',
+        status: p.status,
+      })),
+    ];
+
+    return res.json({ success: true, items, total: items.length });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message || 'Could not fetch site pages.' });
   }
 });
 
@@ -4091,28 +4223,25 @@ app.post('/api/wp/sync-content', async (req, res) => {
       };
     }
 
-    // --- Template: explicit choice wins; blog posts default to the site's
-    // Elementor header/footer template --------------------------------------
-    // The theme's default single-post template renders the article in a narrow
-    // column with a plain title bar, which is why published posts look
-    // "pasted generically". Blog posts without an explicit template get the
-    // same template as the site's pages (elementor_header_footer) so the
-    // article's own styling carries the design. Because that template does not
-    // render the theme's title bar, a styled H1 is injected when the body has
-    // none, so the post always keeps a visible title.
-    const explicitTemplate = contentItem.wpTemplate && contentItem.wpTemplate !== 'default'
-      ? contentItem.wpTemplate
-      : '';
-    const isBlogPost = contentItem.contentType !== 'page';
-    const wpTemplate = explicitTemplate || (isBlogPost ? 'elementor_header_footer' : '');
-    if (wpTemplate) {
-      payload.template = mapWpTemplate(wpTemplate);
-      const mappedTemplate = mapWpTemplate(wpTemplate);
-      const bodyHasH1 = /<h1\b/i.test(payload.content || '');
-      if (mappedTemplate !== 'default' && !bodyHasH1 && String(contentItem.title || '').trim()) {
-        const escTitle = String(contentItem.title)
-          .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-        payload.content = `<h1 style="font-size:clamp(1.8rem,4vw,2.4rem);font-weight:800;line-height:1.15;margin:0 0 0.4em;color:#111;">${escTitle}</h1>\n` + payload.content;
+    // --- Master Template Layout Cloning (Clones user-chosen master page/post) ---
+    const masterId = Number(req.body.masterTemplateId || brand.masterTemplateId) || null;
+    const masterType = (req.body.masterTemplateType || brand.masterTemplateType || 'page') as 'page' | 'post';
+    if (masterId) {
+      try {
+        const cloned = await applyMasterTemplateLayout(
+          cleanUrl,
+          authHeader,
+          masterId,
+          masterType,
+          contentItem.title || '',
+          payload.content || ''
+        );
+        payload.content = cloned.content;
+        if (cloned.templateSlug) {
+          payload.template = mapWpTemplate(cloned.templateSlug);
+        }
+      } catch (masterErr) {
+        console.warn('[Sync] Master template clone failed, proceeding with default content layout:', masterErr);
       }
     }
 
@@ -4287,7 +4416,7 @@ app.post('/api/wp/sync-content', async (req, res) => {
       if (!targetId && contentItem.slug) {
         const searchUrl = `${cleanUrl}${endpoint}?slug=${encodeURIComponent(contentItem.slug)}&status=any`;
         const searchRes = await fetch(searchUrl, {
-          headers: { "Authorization": authHeader, "User-Agent": "FGOS/1.0" }
+          headers: { "Authorization": authHeader, ...DEFAULT_WP_HEADERS }
         });
         if (searchRes.ok) {
           const matches = await searchRes.json();
@@ -4304,7 +4433,7 @@ app.post('/api/wp/sync-content', async (req, res) => {
         // (or belongs to another site). Probe first so publish never dies on a
         // dead id — fall back to creating a fresh post instead.
         const probe = await fetch(`${cleanUrl}${endpoint}/${targetId}?context=edit`, {
-          headers: { "Authorization": authHeader, "User-Agent": "FGOS/1.0" }
+          headers: { "Authorization": authHeader, ...DEFAULT_WP_HEADERS }
         });
         if (probe.status === 404) {
           targetId = undefined;
@@ -4317,7 +4446,7 @@ app.post('/api/wp/sync-content', async (req, res) => {
         headers: {
           "Authorization": authHeader,
           "Content-Type": "application/json",
-          "User-Agent": "FGOS/1.0"
+          ...DEFAULT_WP_HEADERS
         },
         body: JSON.stringify(payload)
       });
@@ -4381,7 +4510,7 @@ app.post('/api/wp/get-post', async (req, res) => {
       headers: {
         'Authorization': authHeader,
         'Content-Type': 'application/json',
-        'User-Agent': 'FGOS/1.0'
+        ...DEFAULT_WP_HEADERS
       }
     });
     if (!wpRes.ok) {
@@ -4409,7 +4538,7 @@ app.post('/api/wp/list-posts', async (req, res) => {
     const wpRes = await fetch(
       `${cleanUrl}/wp-json/wp/v2/posts?per_page=${n}&status=publish&orderby=date&order=desc&_fields=id,title,link,slug,_embedded&_embed=wp:featuredmedia`,
       {
-        headers: { 'Authorization': authHeader, 'Content-Type': 'application/json', 'User-Agent': 'FGOS/1.0' },
+        headers: { 'Authorization': authHeader, 'Content-Type': 'application/json', ...DEFAULT_WP_HEADERS },
       },
     );
     if (!wpRes.ok) {
@@ -4456,7 +4585,7 @@ app.get('/api/wp/products', async (req, res) => {
       return res.json({ success: true, products: cached.data, cached: true });
     }
     const wcRes = await fetch(`${cleanUrl}/wp-json/wc/store/v1/products?per_page=20&status=publish`, {
-      headers: { 'User-Agent': 'FGOS/1.0' },
+      headers: DEFAULT_WP_HEADERS,
     });
     if (!wcRes.ok) {
       return res.status(wcRes.status).json({ success: false, message: `WooCommerce API Error (${wcRes.status})` });
@@ -4510,7 +4639,7 @@ async function fetchBrandProducts(brand: any): Promise<any[]> {
   if (cached && Date.now() - cached.at < 5 * 60 * 1000) return cached.data;
   try {
     const wcRes = await fetch(`${wpUrl}/wp-json/wc/store/v1/products?per_page=20&status=publish`, {
-      headers: { 'User-Agent': 'FGOS/1.0' },
+      headers: DEFAULT_WP_HEADERS,
     });
     if (!wcRes.ok) return [];
     const raw = await wcRes.json();
@@ -4620,7 +4749,7 @@ app.get('/api/wc/products', async (req, res) => {
     if (search) url.searchParams.set('search', search);
 
     const wcRes = await fetch(url.toString(), {
-      headers: { 'User-Agent': 'FGOS/1.0' },
+      headers: DEFAULT_WP_HEADERS,
     });
     if (!wcRes.ok) {
       const body = await wcRes.text();
@@ -4674,7 +4803,7 @@ app.get('/api/wc/orders', async (req, res) => {
     const url = wcAuthUrl(wpUrl, key, secret, `/orders?per_page=${perPage}&page=${page}&orderby=date&order=desc`);
 
     const wcRes = await fetch(url, {
-      headers: { 'User-Agent': 'FGOS/1.0' },
+      headers: DEFAULT_WP_HEADERS,
     });
     if (!wcRes.ok) {
       const body = await wcRes.text();
@@ -4718,13 +4847,13 @@ app.get('/api/wc/reports', async (req, res) => {
 
     const [salesRes, ordersRes, customersRes] = await Promise.all([
       fetch(wcAuthUrl(wpUrl, key, secret, '/reports/sales'), {
-        headers: { 'User-Agent': 'FGOS/1.0' },
+        headers: DEFAULT_WP_HEADERS,
       }),
       fetch(wcAuthUrl(wpUrl, key, secret, '/reports/orders/totals'), {
-        headers: { 'User-Agent': 'FGOS/1.0' },
+        headers: DEFAULT_WP_HEADERS,
       }),
       fetch(wcAuthUrl(wpUrl, key, secret, '/reports/customers/totals'), {
-        headers: { 'User-Agent': 'FGOS/1.0' },
+        headers: DEFAULT_WP_HEADERS,
       }),
     ]);
 
@@ -4755,7 +4884,7 @@ app.get('/api/wc/categories', async (req, res) => {
     const url = wcAuthUrl(wpUrl, key, secret, '/products/categories?per_page=100');
 
     const wcRes = await fetch(url, {
-      headers: { 'User-Agent': 'FGOS/1.0' },
+      headers: DEFAULT_WP_HEADERS,
     });
     if (!wcRes.ok) {
       const body = await wcRes.text();
@@ -4788,7 +4917,7 @@ app.get('/api/wc/test', async (req, res) => {
     }
 
     const wcRes = await fetch(wcAuthUrl(wpUrl, key, secret, '/system_status'), {
-      headers: { 'User-Agent': 'FGOS/1.0' },
+      headers: DEFAULT_WP_HEADERS,
     });
 
     if (wcRes.ok) {
@@ -4831,7 +4960,7 @@ app.post('/api/wp/delete-post', async (req, res) => {
         headers: {
           'Authorization': authHeader,
           'Content-Type': 'application/json',
-          'User-Agent': 'FGOS/1.0'
+          ...DEFAULT_WP_HEADERS
         }
       });
 
@@ -4982,7 +5111,7 @@ async function uploadImageToWp(
       'Authorization': authHeader,
       'Content-Disposition': `attachment; filename="${fileExt}.${(fileMime.split('/')[1] || 'jpg').replace('jpeg', 'jpg')}"`,
       'Content-Type': fileMime,
-      'User-Agent': 'FGOS/1.0'
+      ...DEFAULT_WP_HEADERS
     },
     body: imageBuffer
   });
@@ -5082,7 +5211,7 @@ app.post('/api/wp/install-snippet', async (req, res) => {
     }
     const cleanUrl = brand.wpUrl.replace(/\/+$/, '');
     const authHeader = 'Basic ' + Buffer.from(`${brand.wpUsername}:${brand.wpAppPassword}`).toString('base64');
-    const headers = { 'Authorization': authHeader, 'Content-Type': 'application/json', 'User-Agent': 'FGOS/1.0' };
+        const headers = { 'Authorization': authHeader, 'Content-Type': 'application/json', ...DEFAULT_WP_HEADERS };
     const snippetName = 'FGOS Style Preserver';
     const snippetDescription = 'Allows <style> tags, HTML5 elements, and disables wpautop for article content from FGOS (Fresh Green Operating System).';
 
@@ -5148,7 +5277,7 @@ app.post('/api/wp/install-snippet-all', async (req, res) => {
       try {
         const cleanUrl = brand.wpUrl.replace(/\/+$/, '');
         const authHeader = 'Basic ' + Buffer.from(`${brand.wpUsername}:${brand.wpAppPassword}`).toString('base64');
-        const headers = { 'Authorization': authHeader, 'Content-Type': 'application/json', 'User-Agent': 'FGOS/1.0' };
+    const headers = { 'Authorization': authHeader, 'Content-Type': 'application/json', ...DEFAULT_WP_HEADERS };
         const snippetName = 'FGOS Style Preserver';
 
         let existingId: number | null = null;
@@ -5449,7 +5578,7 @@ app.post('/api/wp/preview', async (req, res) => {
       try {
         const endpoint = contentItem.contentType === 'page' ? 'pages' : 'posts';
         const wpRes = await fetch(`${baseUrl}/wp-json/wp/v2/${endpoint}/${contentItem.wpPostId}?context=view`, {
-          headers: { 'Authorization': authHeader, 'User-Agent': 'FGOS/1.0' },
+          headers: { 'Authorization': authHeader, ...DEFAULT_WP_HEADERS },
           signal: AbortSignal.timeout(15000),
         });
         if (wpRes.ok) {
@@ -5546,10 +5675,13 @@ const WP_OVERVIEW_CACHE_TTL = 20 * 1000; // 20s so 60s polling stays live
 function wpAuthHeaders(username?: string, appPassword?: string): Record<string, string> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'User-Agent': 'FGOS/1.0',
+    ...DEFAULT_WP_HEADERS,
   };
   if (username && appPassword) {
-    headers['Authorization'] = 'Basic ' + Buffer.from(`${username}:${appPassword}`).toString('base64');
+    const basic = 'Basic ' + Buffer.from(`${username}:${appPassword}`).toString('base64');
+    headers['Authorization'] = basic;
+    headers['X-HTTP-Authorization'] = basic;
+    headers['X-Authorization'] = basic;
   }
   return headers;
 }
@@ -5578,7 +5710,7 @@ app.post('/api/wp/overview', async (req, res) => {
         // join with & so the URL stays valid.
         const sep = endpoint.includes('?') ? '&' : '?';
         const r = await fetch(`${baseUrl}/wp-json/wp/v2/${endpoint}${sep}per_page=1`, {
-          headers: useAuth ? headers : undefined,
+          headers: useAuth ? headers : DEFAULT_WP_HEADERS,
           // Slow shared hosts (sleeping VPS, cold starts) can take >15s per call
           signal: AbortSignal.timeout(25000),
         });
@@ -5600,7 +5732,7 @@ app.post('/api/wp/overview', async (req, res) => {
     let wpRestMs: number | null = null;
     let siteInfo: { name?: string; description?: string; url?: string; home?: string } | null = null;
     try {
-      const r = await fetch(`${baseUrl}/wp-json/`, { signal: AbortSignal.timeout(25000) });
+      const r = await fetch(`${baseUrl}/wp-json/`, { headers: DEFAULT_WP_HEADERS, signal: AbortSignal.timeout(25000) });
       wpRestMs = Date.now() - apiStart;
       if (r.ok) {
         try {
@@ -5656,7 +5788,7 @@ app.post('/api/wp/overview', async (req, res) => {
     try {
       const r = await fetch(
         `${baseUrl}/wp-json/wp/v2/posts?per_page=100&status=publish&_fields=${postFields}`,
-        { signal: AbortSignal.timeout(25000) }
+        { headers: DEFAULT_WP_HEADERS, signal: AbortSignal.timeout(25000) }
       );
       if (r.ok) recentPosts = await r.json();
     } catch {
@@ -5687,7 +5819,7 @@ app.post('/api/wp/overview', async (req, res) => {
     try {
       const r = await fetch(
         `${baseUrl}/wp-json/wp/v2/comments?per_page=10&orderby=date&order=desc&_fields=id,author_name,date,status,content,post`,
-        { signal: AbortSignal.timeout(25000) }
+        { headers: DEFAULT_WP_HEADERS, signal: AbortSignal.timeout(25000) }
       );
       if (r.ok) recentComments = await r.json();
     } catch {

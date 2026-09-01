@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { doc, getDoc, setDoc, onSnapshot } from 'firebase/firestore';
+import { db } from '../lib/firebase';
 import { ContentItem, Brand, AutoBlogOverrides } from '../types';
 import { GenerationInfoPanel } from './GenerationInfoPanel';
 import {

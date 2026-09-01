@@ -10,7 +10,8 @@ import {
   LayoutDashboard,
   Library,
   CalendarClock,
-  ListChecks
+  ListChecks,
+  Activity
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -91,6 +92,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
     {
       label: 'Administration',
       items: [
+        {
+          id: 'activity-log',
+          label: 'Activity Log',
+          icon: Activity,
+          description: 'System audit, events & REST API logs'
+        },
         {
           id: 'features',
           label: 'Feature Tracker',

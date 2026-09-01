@@ -27,6 +27,39 @@ export const BrandManager: React.FC<BrandManagerProps> = ({
   const [newTemplateSlug, setNewTemplateSlug] = useState('');
   const [newCustomRule, setNewCustomRule] = useState('');
   const [brandToDelete, setBrandToDelete] = useState<string | null>(null);
+  const [fetchingPages, setFetchingPages] = useState(false);
+  const [sitePages, setSitePages] = useState<Array<{ id: number; title: string; link: string; type: 'page' | 'post'; template: string }>>([]);
+  const [pagesError, setPagesError] = useState<string | null>(null);
+
+  const fetchPagesFromWp = async () => {
+    if (!editingBrand?.wpUrl || !editingBrand?.wpUsername) {
+      setPagesError('WordPress URL and Username are required to fetch site pages.');
+      return;
+    }
+    setFetchingPages(true);
+    setPagesError(null);
+    try {
+      const res = await fetch('/api/wp/list-site-pages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          wpUrl: editingBrand.wpUrl,
+          wpUsername: editingBrand.wpUsername,
+          wpAppPassword: editingBrand.wpAppPassword,
+        }),
+      });
+      const data = await res.json();
+      if (data.success && Array.isArray(data.items)) {
+        setSitePages(data.items);
+      } else {
+        setPagesError(data.message || 'Could not list site pages from WordPress.');
+      }
+    } catch (err: any) {
+      setPagesError(err?.message || 'Failed to connect to WordPress site.');
+    } finally {
+      setFetchingPages(false);
+    }
+  };
 
   // Resolved style kit for the brand being edited (defaults merged in).
   const kit = resolveBlogStyle(editingBrand);
@@ -589,7 +622,100 @@ export const BrandManager: React.FC<BrandManagerProps> = ({
               </div>
             </div>
 
-            {/* Section 3: AI Gemini Tone of Voice Guidelines */}
+            {/* Section 2.7: Master Layout Template Cloner */}
+            <div className="p-4 rounded-xl bg-indigo-50/70 border border-indigo-200/80 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-2 text-indigo-950 font-semibold text-sm">
+                  <LayoutTemplate className="w-4 h-4 text-indigo-600" />
+                  <span>Master Page/Post Layout Template (Universal Theme Cloner)</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={fetchPagesFromWp}
+                  disabled={fetchingPages}
+                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-sm transition flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  {fetchingPages ? 'Fetching Site Pages...' : 'Fetch Pages & Posts'}
+                </button>
+              </div>
+
+              <p className="text-[11px] text-indigo-900/80 leading-relaxed -mt-1">
+                Select a published page or post from <strong>{editingBrand.name}</strong> to use as the master layout template.
+                When FGOS generates or publishes consecutive blogs, it clones that page's exact container widths, Elementor/Kadence wrappers,
+                and theme styling so every post matches your website's exact design.
+              </p>
+
+              {pagesError && (
+                <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-xs font-medium">
+                  {pagesError}
+                </div>
+              )}
+
+              {sitePages.length > 0 ? (
+                <div className="space-y-2">
+                  <label className="block text-xs font-semibold text-slate-700">Choose Master Template Page or Post:</label>
+                  <select
+                    value={editingBrand.masterTemplateId || ''}
+                    onChange={(e) => {
+                      const selectedId = Number(e.target.value);
+                      const match = sitePages.find((p) => p.id === selectedId);
+                      if (match) {
+                        setEditingBrand({
+                          ...editingBrand,
+                          masterTemplateId: match.id,
+                          masterTemplateType: match.type,
+                          masterTemplateTitle: match.title,
+                          masterTemplateUrl: match.link,
+                        });
+                      } else {
+                        setEditingBrand({
+                          ...editingBrand,
+                          masterTemplateId: undefined,
+                          masterTemplateType: undefined,
+                          masterTemplateTitle: undefined,
+                          masterTemplateUrl: undefined,
+                        });
+                      }
+                    }}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-white text-slate-800"
+                  >
+                    <option value="">-- No Master Template (Use Default Theme Post Layout) --</option>
+                    {sitePages.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        [{item.type.toUpperCase()}] {item.title} (ID: #{item.id})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : null}
+
+              {editingBrand.masterTemplateId ? (
+                <div className="p-3 rounded-lg bg-white border border-indigo-200 text-xs flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <span className="font-semibold text-slate-900 block">
+                      Active Master Template: {editingBrand.masterTemplateTitle || `#${editingBrand.masterTemplateId}`}
+                    </span>
+                    <span className="text-slate-500 font-mono text-[10px]">
+                      Type: {editingBrand.masterTemplateType || 'page'} | ID: #{editingBrand.masterTemplateId}
+                    </span>
+                  </div>
+                  {editingBrand.masterTemplateUrl && (
+                    <a
+                      href={editingBrand.masterTemplateUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-2.5 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-semibold text-[11px] transition"
+                    >
+                      View Live Layout ↗
+                    </a>
+                  )}
+                </div>
+              ) : (
+                <div className="text-[11px] text-slate-500 italic">
+                  No master layout page selected yet. Click "Fetch Pages & Posts" to pick a page to duplicate.
+                </div>
+              )}
+            </div>
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center justify-between">
                 <span className="flex items-center gap-1.5">
