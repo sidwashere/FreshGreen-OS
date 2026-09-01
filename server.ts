@@ -4055,6 +4055,20 @@ app.post('/api/wp/test-connection', async (req, res) => {
 function stripBlogStyleKit(html: string): string {
   let content = html;
 
+  // 0. Remove the article frame (header, footer, hero) which conflict with the master template
+  // Remove frameHead (<header class="fg-frame-head"...>...</header>)
+  content = content.replace(/<header[^>]*class=["'][^"']*\bfg-frame-head\b[^"']*["'][^>]*>[\s\S]*?<\/header>/gi, '');
+  
+  // Remove frameFoot related posts (<section class="fg-related"...>...</section>)
+  content = content.replace(/<section[^>]*class=["'][^"']*\bfg-related\b[^"']*["'][^>]*>[\s\S]*?<\/section>/gi, '');
+  
+  // Remove frameFoot CTA (it doesn't have a class, but it contains "Explore more from")
+  content = content.replace(/<section[^>]*>[\s\S]*?Explore more from[\s\S]*?<\/section>/gi, '');
+  
+  // Remove hero section (<section class="fg-hero"...>...</section>)
+  // The master template usually has its own featured image, so we don't want to duplicate it.
+  content = content.replace(/<section[^>]*class=["'][^"']*\bfg-hero\b[^"']*["'][^>]*>[\s\S]*?<\/section>/gi, '');
+
   // 1. Remove the fg-art outer wrapper and keep inner content only
   const outerRe = /<div[^>]*class=["'][^"']*\bfg-art\b[^"']*["'][^>]*>([\s\S]*?)<\/div>\s*$/i;
   const match = content.match(outerRe);
