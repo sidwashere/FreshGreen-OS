@@ -413,6 +413,20 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   const metricValue = (v: number | null) => (v === null ? '—' : v.toLocaleString());
 
+  // ---- Metric insights: interpret each headline number so the dashboard
+  // tells the user what it MEANS, not just what it is. Each insight carries a
+  // tone (good / warn / alert / neutral) that drives a colour-coded chip.
+  type InsightTone = 'good' | 'warn' | 'alert' | 'neutral';
+  const insightChip = (text: string, tone: InsightTone) => {
+    const tones: Record<InsightTone, string> = {
+      good: 'bg-emerald-50 text-emerald-700 border-emerald-100',
+      warn: 'bg-amber-50 text-amber-700 border-amber-100',
+      alert: 'bg-red-50 text-red-700 border-red-100',
+      neutral: 'bg-slate-50 text-slate-600 border-slate-200',
+    };
+    return { text, tone, cls: tones[tone] };
+  };
+
   // Filter items
   const filteredItems = useMemo(() => {
     return items.filter((item) => {
@@ -911,6 +925,59 @@ export const Dashboard: React.FC<DashboardProps> = ({
     return { comments, pending, recent, posts, cadence: +(cadence / n).toFixed(1) };
   }, [trafficSignals]);
 
+  // Metric insights — interpret each headline number so the dashboard tells
+  // the user what it MEANS, not just what it is. Each insight carries a tone
+  // (good / warn / alert / neutral) that drives a colour-coded chip.
+  const metricInsights = useMemo(() => {
+    // Live Published Posts — interpret against the 12-month cadence.
+    let live: ReturnType<typeof insightChip>;
+    if (livePostsTotal === null) {
+      live = insightChip('Waiting for first sync', 'neutral');
+    } else if (cadenceTotal >= 12) {
+      live = insightChip(`${cadenceTotal} posts published in the last 12 months — healthy cadence`, 'good');
+    } else if (cadenceTotal >= 6) {
+      live = insightChip(`${cadenceTotal} posts in the last 12 months — building momentum`, 'warn');
+    } else if (cadenceTotal > 0) {
+      live = insightChip(`Only ${cadenceTotal} posts in the last 12 months — consider publishing more`, 'alert');
+    } else {
+      live = insightChip('No posts published in the last 12 months', 'alert');
+    }
+
+    // Drafts Awaiting — drafts are work-in-progress that needs attention.
+    let drafts: ReturnType<typeof insightChip>;
+    if (draftTotal === null) {
+      drafts = insightChip('Needs WP auth to count', 'neutral');
+    } else if (draftTotal > 0) {
+      drafts = insightChip(`${draftTotal} draft${draftTotal === 1 ? '' : 's'} ready to review & publish`, 'warn');
+    } else {
+      drafts = insightChip('No drafts waiting — all clear', 'good');
+    }
+
+    // Total Comments — engagement signal.
+    let comments: ReturnType<typeof insightChip>;
+    if (trafficTotals.recent > 0) {
+      comments = insightChip(`${trafficTotals.recent.toLocaleString()} new comment${trafficTotals.recent === 1 ? '' : 's'} in the last 30 days`, 'good');
+    } else if (pendingComments && pendingComments > 0) {
+      comments = insightChip(`${pendingComments.toLocaleString()} comment${pendingComments === 1 ? '' : 's'} awaiting moderation`, 'warn');
+    } else if (commentsTotal === null) {
+      comments = insightChip('No comment data yet', 'neutral');
+    } else {
+      comments = insightChip('No recent engagement — consider a fresh post', 'warn');
+    }
+
+    // Media Library Items — asset base.
+    let media: ReturnType<typeof insightChip>;
+    if (mediaTotal === null) {
+      media = insightChip('No media data yet', 'neutral');
+    } else if (mediaTotal > 0) {
+      media = insightChip(`${mediaTotal.toLocaleString()} assets across ${pagesTotal === null ? '—' : pagesTotal.toLocaleString()} pages`, 'neutral');
+    } else {
+      media = insightChip('No media uploaded yet', 'neutral');
+    }
+
+    return { live, drafts, comments, media };
+  }, [livePostsTotal, draftTotal, commentsTotal, mediaTotal, pagesTotal, cadenceTotal, trafficTotals.recent, pendingComments]);
+
   // ---- Cross-site speed summary ----
   const perfSummary = useMemo(() => {
     const vals = brandList
@@ -1002,10 +1069,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
       {/* Metrics Row — every value fetched live from WordPress */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
         {[
-          { label: 'Live Published Posts', value: metricValue(livePostsTotal), subtext: livePostsTotal === null ? 'Waiting for first sync' : 'Direct from WP REST API', icon: Activity, color: 'text-white', bg: 'bg-white/20', badge: 'Live', isPrimary: true, details: `Posts with status "publish" across ${brandList.length} site${brandList.length === 1 ? '' : 's'}. Fetched via the WP REST API — counts update every 60 seconds.` },
-          { label: 'Drafts Awaiting', value: metricValue(draftTotal), subtext: draftTotal === null ? 'Needs WP auth' : 'On the live site', icon: FileText, color: 'text-blue-600', bg: 'bg-blue-50', badge: 'Live', details: 'Posts currently sitting as drafts on WordPress. Requires Application Password access to count — otherwise shown as "—".' },
-          { label: 'Total Comments', value: metricValue(commentsTotal), subtext: trafficTotals.recent > 0 ? `${trafficTotals.recent.toLocaleString()} new in last 30 days` : (pendingComments ? `${pendingComments.toLocaleString()} awaiting moderation` : 'User engagement'), icon: MessageSquare, color: 'text-emerald-600', bg: 'bg-emerald-50', badge: 'Live', details: `Approved comments on published content, plus live engagement signals: ${trafficTotals.recent.toLocaleString()} comments landed in the last 30 days and ${pendingComments === 0 ? 'none' : (pendingComments ?? '?')} are awaiting moderation across ${brandList.length} site${brandList.length === 1 ? '' : 's'}.` },
-          { label: 'Media Library Items', value: metricValue(mediaTotal), subtext: pagesTotal !== null ? `${pagesTotal.toLocaleString()} pages · ${categoriesTotal === null ? '—' : categoriesTotal.toLocaleString()} categories · ${usersTotal === null ? '—' : usersTotal.toLocaleString()} users` : 'Images and assets', icon: ImageIcon, color: 'text-purple-600', bg: 'bg-purple-50', badge: 'Live', details: 'Attachments in the WordPress media library, plus live page, category and user counts across the sites in scope.' }
+          { label: 'Live Published Posts', value: metricValue(livePostsTotal), subtext: livePostsTotal === null ? 'Waiting for first sync' : 'Direct from WP REST API', icon: Activity, color: 'text-white', bg: 'bg-white/20', badge: 'Live', isPrimary: true, insight: metricInsights.live, details: `Posts with status "publish" across ${brandList.length} site${brandList.length === 1 ? '' : 's'}. Fetched via the WP REST API — counts update every 60 seconds.` },
+          { label: 'Drafts Awaiting', value: metricValue(draftTotal), subtext: draftTotal === null ? 'Needs WP auth' : 'On the live site', icon: FileText, color: 'text-blue-600', bg: 'bg-blue-50', badge: 'Live', isPrimary: false, insight: metricInsights.drafts, details: 'Posts currently sitting as drafts on WordPress. Requires Application Password access to count — otherwise shown as "—".' },
+          { label: 'Total Comments', value: metricValue(commentsTotal), subtext: trafficTotals.recent > 0 ? `${trafficTotals.recent.toLocaleString()} new in last 30 days` : (pendingComments ? `${pendingComments.toLocaleString()} awaiting moderation` : 'User engagement'), icon: MessageSquare, color: 'text-emerald-600', bg: 'bg-emerald-50', badge: 'Live', isPrimary: false, insight: metricInsights.comments, details: `Approved comments on published content, plus live engagement signals: ${trafficTotals.recent.toLocaleString()} comments landed in the last 30 days and ${pendingComments === 0 ? 'none' : (pendingComments ?? '?')} are awaiting moderation across ${brandList.length} site${brandList.length === 1 ? '' : 's'}.` },
+          { label: 'Media Library Items', value: metricValue(mediaTotal), subtext: pagesTotal !== null ? `${pagesTotal.toLocaleString()} pages · ${categoriesTotal === null ? '—' : categoriesTotal.toLocaleString()} categories · ${usersTotal === null ? '—' : usersTotal.toLocaleString()} users` : 'Images and assets', icon: ImageIcon, color: 'text-purple-600', bg: 'bg-purple-50', badge: 'Live', isPrimary: false, insight: metricInsights.media, details: 'Attachments in the WordPress media library, plus live page, category and user counts across the sites in scope.' }
         ].map((metric, idx) => (
           <div 
             key={idx} 
@@ -1013,7 +1080,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
             title={metric.details}
             className={`p-6 rounded-[24px] border cursor-pointer ${metric.isPrimary ? 'bg-[#185e46] border-[#134937] text-white shadow-lg shadow-[#185e46]/20' : 'bg-white border-slate-200/60 shadow-sm'} flex flex-col justify-between hover:shadow-md transition group relative overflow-hidden`}
           >
-            <div className="flex items-center justify-between mb-4">
+            {/* subtle decorative glow on the primary card */}
+            {metric.isPrimary && (
+              <div className="pointer-events-none absolute -top-16 -right-16 w-48 h-48 rounded-full bg-white/10 blur-2xl" />
+            )}
+            <div className="flex items-center justify-between mb-4 relative">
               <div className={`p-3 rounded-2xl ${metric.bg}`}>
                 <metric.icon className={`w-5 h-5 ${metric.color}`} />
               </div>
@@ -1021,10 +1092,21 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 {metric.badge}
               </span>
             </div>
-            <div>
+            <div className="relative">
               <div className={`text-4xl font-extrabold tracking-tight mb-2 ${metric.isPrimary ? 'text-white' : 'text-slate-900'}`}>{metric.value}</div>
               <div className={`text-[13px] font-bold ${metric.isPrimary ? 'text-emerald-50' : 'text-slate-900'}`}>{metric.label}</div>
               <div className={`text-[11px] font-medium mt-1 ${metric.isPrimary ? 'text-emerald-200' : 'text-slate-500'}`}>{metric.subtext}</div>
+
+              {/* Insight chip — interprets the number */}
+              <div className={`mt-3 inline-flex items-center gap-1.5 text-[10px] font-bold px-2.5 py-1 rounded-full border ${metric.isPrimary ? 'bg-white/15 text-white border-white/20' : metric.insight.cls}`}>
+                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                  metric.isPrimary ? 'bg-white' :
+                  metric.insight.tone === 'good' ? 'bg-emerald-500' :
+                  metric.insight.tone === 'warn' ? 'bg-amber-500' :
+                  metric.insight.tone === 'alert' ? 'bg-red-500' : 'bg-slate-400'
+                }`} />
+                {metric.insight.text}
+              </div>
             </div>
             
             {/* Expanded Insight Details */}
@@ -1426,7 +1508,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
           <div className="bg-white p-6 rounded-[24px] border border-slate-200/60 shadow-sm">
             <div className="flex items-center justify-between mb-2 flex-wrap gap-3">
               <div>
-                <h2 className="text-lg font-bold text-slate-900">Content Activity</h2>
+                <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                  <BarChart3 className="w-5 h-5 text-indigo-500" /> Content Activity
+                </h2>
                 <p className="text-sm text-slate-500">Posts published vs drafts edited per day, straight from each site's WP REST API. <span className="text-xs text-slate-400 ml-1">Updated: {lastSyncTime ? new Date(lastSyncTime).toLocaleTimeString() : '…'}</span></p>
               </div>
               <div className="flex items-center gap-1 bg-slate-100 rounded-xl p-1">
@@ -1444,6 +1528,22 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 ))}
               </div>
             </div>
+            {/* Summary insight line */}
+            {chartHasData && (
+              <div className="flex flex-wrap items-center gap-2 mt-1 mb-1">
+                <span className="text-[11px] font-bold text-indigo-600 bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded-full">
+                  {publishingPulse.totalPublished} published
+                </span>
+                <span className="text-[11px] font-bold text-emerald-600 bg-emerald-50 border border-emerald-100 px-2 py-0.5 rounded-full">
+                  {publishingPulse.totalEdited} drafts edited
+                </span>
+                {publishingPulse.bestDay && publishingPulse.bestDay.published > 0 && (
+                  <span className="text-[11px] font-bold text-slate-500 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-full">
+                    Best day: {publishingPulse.bestDay.published} on {publishingPulse.bestDay.name}
+                  </span>
+                )}
+              </div>
+            )}
             <div className="h-72 w-full mt-4">
               {chartHasData ? (
                 <ResponsiveContainer width="100%" height="100%">
@@ -2180,83 +2280,113 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
           {/* Real Activity Feed */}
           <div className="bg-white p-6 rounded-[24px] border border-slate-200/60 shadow-sm">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-lg font-bold text-slate-900">Activity Feed</h2>
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                  <Activity className="w-5 h-5 text-indigo-500" /> Activity Feed
+                </h2>
+                <p className="text-xs text-slate-500 mt-1">Latest comments and post changes from each connected site.</p>
+              </div>
               <span className="text-[10px] font-bold text-slate-400 bg-slate-100 px-2 py-1 rounded-full border border-slate-200">
                 {activityFeed.length} events
               </span>
             </div>
+
+            {/* Breakdown chips */}
+            {activityFeed.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2 mb-4">
+                <span className="text-[10px] font-bold text-indigo-600 bg-indigo-50 border border-indigo-100 px-2 py-1 rounded-full">
+                  {activityFeed.filter((e) => e.kind === 'published').length} published
+                </span>
+                <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 border border-emerald-100 px-2 py-1 rounded-full">
+                  {activityFeed.filter((e) => e.kind === 'edited').length} edited
+                </span>
+                <span className="text-[10px] font-bold text-sky-600 bg-sky-50 border border-sky-100 px-2 py-1 rounded-full">
+                  {activityFeed.filter((e) => e.kind === 'comment').length} comments
+                </span>
+              </div>
+            )}
+
             {activityFeed.length === 0 ? (
-              <div className="text-center py-10">
+              <div className="text-center py-10 border-2 border-dashed border-slate-200 rounded-[20px] bg-slate-50/50">
                 <MessageSquare className="w-8 h-8 text-slate-300 mx-auto mb-2" />
                 <p className="text-sm text-slate-500">No activity detected yet.</p>
                 <p className="text-xs text-slate-400 mt-1">Comments and post changes from each connected site appear here as they're found.</p>
               </div>
             ) : (
-              <div className="space-y-1 max-h-[480px] overflow-y-auto pr-1">
-                {activityFeed.map((e) => (
-                  <div key={e.id} className="flex items-start gap-3 p-2.5 rounded-xl hover:bg-slate-50 transition group" title={e.kind === 'comment'
-                    ? `New comment by ${e.author} on "${e.title}" (${e.brandName}) — ${timeAgo(e.date)}.`
-                    : e.kind === 'published'
-                    ? `Post published to WordPress: "${e.title}" (${e.brandName}) — ${timeAgo(e.date)}.`
-                    : `Draft edited: "${e.title}" (${e.brandName}) — ${timeAgo(e.date)}.`}>
-                    <div
-                      className="w-8 h-8 rounded-[10px] flex items-center justify-center shrink-0"
-                      style={{ backgroundColor: `${e.brandColor || '#185e46'}18`, color: e.brandColor || '#185e46' }}
-                    >
-                      {e.kind === 'comment' ? <MessageSquare className="w-3.5 h-3.5" /> : e.kind === 'published' ? <Zap className="w-3.5 h-3.5" /> : <FileText className="w-3.5 h-3.5" />}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-[12px] font-bold text-slate-800 leading-snug">
-                        {e.kind === 'comment' ? (
-                          <><span className="text-slate-500 font-semibold">{e.author}</span> commented on <span className="text-indigo-600">{e.title}</span></>
-                        ) : e.kind === 'published' ? (
-                          <><span className="text-slate-500 font-semibold">Published</span> {e.title}</>
-                        ) : (
-                          <><span className="text-slate-500 font-semibold">Edited draft</span> {e.title}</>
-                        )}
-                      </p>
-                      {e.kind === 'comment' && e.snippet && (
-                        <p className="text-[11px] text-slate-400 mt-0.5 truncate">“{e.snippet}”</p>
-                      )}
-                      <div className="flex items-center gap-2 mt-1">
-                        <span className="text-[9px] font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded-full">{e.brandName}</span>
-                        <span className="text-[10px] text-slate-400">{timeAgo(e.date)}</span>
+              <div className="relative max-h-[480px] overflow-y-auto pr-1">
+                {/* timeline connector */}
+                <div className="absolute left-[19px] top-3 bottom-3 w-px bg-slate-200" />
+                <div className="space-y-1">
+                  {activityFeed.map((e) => (
+                    <div key={e.id} className="relative flex items-start gap-3 p-2.5 rounded-xl hover:bg-slate-50 transition group" title={e.kind === 'comment'
+                      ? `New comment by ${e.author} on "${e.title}" (${e.brandName}) — ${timeAgo(e.date)}.`
+                      : e.kind === 'published'
+                      ? `Post published to WordPress: "${e.title}" (${e.brandName}) — ${timeAgo(e.date)}.`
+                      : `Draft edited: "${e.title}" (${e.brandName}) — ${timeAgo(e.date)}.`}>
+                      <div
+                        className="relative z-10 w-8 h-8 rounded-[10px] flex items-center justify-center shrink-0 ring-4 ring-white"
+                        style={{ backgroundColor: `${e.brandColor || '#185e46'}18`, color: e.brandColor || '#185e46' }}
+                      >
+                        {e.kind === 'comment' ? <MessageSquare className="w-3.5 h-3.5" /> : e.kind === 'published' ? <Zap className="w-3.5 h-3.5" /> : <FileText className="w-3.5 h-3.5" />}
                       </div>
-                      {(e.kind === 'published' || e.kind === 'edited') && e.wpPostId != null && (
-                        <div className="flex items-center gap-1.5 mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                          <button
-                            onClick={() => void openWpPostInEditor(e)}
-                            disabled={openingFeedId === String(e.wpPostId)}
-                            title={items.find((i) => String(i.wpPostId) === String(e.wpPostId))
-                              ? 'Open this post in the Blog Editor — see its live/draft state and publish options'
-                              : 'Import this post into the app, then open it in the Blog Editor'}
-                            className="flex items-center gap-1 px-2 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-600 text-[10px] font-bold transition disabled:opacity-50"
-                          >
-                            <Pencil className="w-3 h-3" /> {openingFeedId === String(e.wpPostId) ? 'Opening…' : 'Edit'}
-                          </button>
-                          <button
-                            onClick={() => void trashWpPost({ id: e.wpPostId, brandId: e.brandId, title: e.title })}
-                            title={`Trash this WordPress post (${e.wpLiveUrl || 'no link'}) — recoverable in WP for 30 days`}
-                            className="flex items-center gap-1 px-2 py-1 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 text-[10px] font-bold transition"
-                          >
-                            <Trash2 className="w-3 h-3" /> Trash
-                          </button>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[12px] font-bold text-slate-800 leading-snug">
+                          {e.kind === 'comment' ? (
+                            <><span className="text-slate-500 font-semibold">{e.author}</span> commented on <span className="text-indigo-600">{e.title}</span></>
+                          ) : e.kind === 'published' ? (
+                            <><span className="text-slate-500 font-semibold">Published</span> {e.title}</>
+                          ) : (
+                            <><span className="text-slate-500 font-semibold">Edited draft</span> {e.title}</>
+                          )}
+                        </p>
+                        {e.kind === 'comment' && e.snippet && (
+                          <p className="text-[11px] text-slate-400 mt-0.5 truncate">“{e.snippet}”</p>
+                        )}
+                        <div className="flex items-center gap-2 mt-1">
+                          <span className="text-[9px] font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded-full">{e.brandName}</span>
+                          <span className="text-[10px] text-slate-400">{timeAgo(e.date)}</span>
                         </div>
-                      )}
+                        {(e.kind === 'published' || e.kind === 'edited') && e.wpPostId != null && (
+                          <div className="flex items-center gap-1.5 mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button
+                              onClick={() => void openWpPostInEditor(e)}
+                              disabled={openingFeedId === String(e.wpPostId)}
+                              title={items.find((i) => String(i.wpPostId) === String(e.wpPostId))
+                                ? 'Open this post in the Blog Editor — see its live/draft state and publish options'
+                                : 'Import this post into the app, then open it in the Blog Editor'}
+                              className="flex items-center gap-1 px-2 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-600 text-[10px] font-bold transition disabled:opacity-50"
+                            >
+                              <Pencil className="w-3 h-3" /> {openingFeedId === String(e.wpPostId) ? 'Opening…' : 'Edit'}
+                            </button>
+                            <button
+                              onClick={() => void trashWpPost({ id: e.wpPostId, brandId: e.brandId, title: e.title })}
+                              title={`Trash this WordPress post (${e.wpLiveUrl || 'no link'}) — recoverable in WP for 30 days`}
+                              className="flex items-center gap-1 px-2 py-1 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 text-[10px] font-bold transition"
+                            >
+                              <Trash2 className="w-3 h-3" /> Trash
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  ))}
+                </div>
               </div>
             )}
           </div>
 
           <div className="bg-white p-6 rounded-[24px] border border-slate-200/60 shadow-sm">
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-bold text-slate-900">Live WordPress Posts</h2>
-              <button className="text-slate-400 hover:text-slate-600" title="Recent posts pulled straight from each connected WordPress site. Click a post to import it into the editor.">
-                <Globe className="w-5 h-5" />
-              </button>
+              <div>
+                <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                  <Globe className="w-5 h-5 text-sky-500" /> Live WordPress Posts
+                </h2>
+                <p className="text-xs text-slate-500 mt-1">Recent posts pulled straight from each connected site. Click a post to import it into the editor.</p>
+              </div>
+              <span className="text-[10px] font-bold text-slate-400 bg-slate-100 px-2 py-1 rounded-full border border-slate-200">
+                {livePosts.filter(p => selectedBrandId === 'all' || p.brandId === selectedBrandId).length} live
+              </span>
             </div>
 
             {/* Quick stats + search */}
@@ -2289,9 +2419,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
               </div>
             )}
 
-            <div className="space-y-4 max-h-[600px] overflow-y-auto pr-2">
+            <div className="space-y-2 max-h-[600px] overflow-y-auto pr-2">
               {livePosts.length === 0 ? (
-                <div className="text-center py-8">
+                <div className="text-center py-8 border-2 border-dashed border-slate-200 rounded-[20px] bg-slate-50/50">
+                  <Globe className="w-8 h-8 text-slate-300 mx-auto mb-2" />
                   <p className="text-sm text-slate-500">No live posts fetched yet.</p>
                   <p className="text-xs text-slate-400 mt-1">Click "Sync Data" to fetch recent posts directly from connected WordPress properties.</p>
                 </div>
