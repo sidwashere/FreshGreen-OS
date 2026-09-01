@@ -14,7 +14,7 @@ import { INITIAL_BRANDS, INITIAL_CONTENT } from './data/initialData';
 import { Brand, ContentItem, PipelineStatus, AppUser, FeatureRequest } from './types';
 import { initAuth, db, USE_EMULATORS, adminCreateAccount, usernameToEmail } from './lib/firebase';
 import { User } from 'firebase/auth';
-import { collection, query, where, onSnapshot, doc, setDoc, deleteDoc, getDoc } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, doc, setDoc, deleteDoc, getDoc, getDocs } from 'firebase/firestore';
 import { BlogRegisterEntry, buildRegisterEntry, nextBlogNumber, collectUsedNumbers } from './lib/blogRegister';
 
 /** Firestore rejects `undefined` field values, so strip them before writing. */
@@ -158,13 +158,14 @@ export default function App() {
       if (localStorage.getItem(storageKey)) return;
 
       try {
-        const userDocRef = doc(db, 'users', user.uid);
-        const userDoc = await getDoc(userDocRef);
-        
-        if (!userDoc.exists() || !userDoc.data().isSeeded) {
-          // Mark as seeded first to avoid race conditions
-          await setDoc(userDocRef, { isSeeded: true }, { merge: true });
+        // Determine if this user has already been seeded by checking whether
+        // their brands actually exist — more reliable than the isSeeded flag,
+        // which could be set even if a previous seed attempt failed partway.
+        const brandsQuery = query(collection(db, 'brands'), where('userId', '==', user.uid));
+        const brandsSnap = await getDocs(brandsQuery);
+        const alreadySeeded = brandsSnap.size > 0;
 
+        if (!alreadySeeded) {
           // Brand/content docs are scoped to the user (prefix the seed id with
           // the uid) so every account gets its own workspace copy — global ids
           // would collide: a second user's seed would be a denied update of the
@@ -326,6 +327,10 @@ export default function App() {
               console.debug('Carol account creation skipped:', err?.message || err);
             }
           }
+
+          // Only mark as seeded AFTER all seed data is written successfully,
+          // so a partial failure can be retried on the next load.
+          await setDoc(doc(db, 'users', user.uid), { isSeeded: true }, { merge: true });
         }
         localStorage.setItem(storageKey, 'true');
       } catch (err) {
