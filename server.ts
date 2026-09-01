@@ -4047,6 +4047,50 @@ app.post('/api/wp/test-connection', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// STRIP BLOG STYLE KIT — removes the fg-art wrapper, scoped <style> tags,
+// fg-* CSS classes and conflicting inline styles injected by blocksToHtml().
+// When a master template is applied, only the template's own layout/styling
+// governs the final output — preventing overlapping images and tint overlays.
+// ---------------------------------------------------------------------------
+function stripBlogStyleKit(html: string): string {
+  let content = html;
+
+  // 1. Remove the fg-art outer wrapper and keep inner content only
+  const outerRe = /<div[^>]*class=["'][^"']*\bfg-art\b[^"']*["'][^>]*>[\s\S]*?<\/div>\s*$/i;
+  content = content.replace(outerRe, '').trim();
+
+  // 2. Remove any <style> blocks injected by scopedStyles()
+  content = content.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
+
+  // 3. Remove all fg-* CSS classes from elements (fg-art, fg-share, fg-related, etc.)
+  content = content.replace(/\sclass=["'][^"']*\bfg-\w+[^"']*["']/gi, '');
+
+  // 4. Remove inline fg- CSS custom properties
+  content = content.replace(/\sstyle=["'][^"']*--fg-\w+[^"']*["']/gi, '');
+
+  // 5. Remove max-width / margin / padding overrides from the fg-art wrapper scope
+  //    that conflict with the master template's own container
+  const conflictStyles = [
+    /max-width:\s*800px\s*!important/gi,
+    /max-width:\s*800px/gi,
+    /margin:\s*0\s+auto\s*!important/gi,
+    /margin:\s*0\s+auto/gi,
+    /padding:\s*0\s*!important/gi,
+    /padding:\s*0/gi,
+    /box-sizing:\s*border-box\s*!important/gi,
+    /box-sizing:\s*border-box/gi,
+    /background:\s*transparent\s*!important/gi,
+    /background:\s*transparent/gi,
+    /font-family:[^;]*!important/gi,
+    /line-height:\s*1\.7\s*!important/gi,
+  ];
+  for (const s of conflictStyles) {
+    content = content.replace(s, '');
+  }
+
+  return content.trim();
+}
+
 // MASTER TEMPLATE CLONING ENGINE
 // Allows a user to select a Master Page or Post from their WordPress site
 // (regardless of theme) and use its exact layout/wrapper for consecutive blogs.
@@ -4078,8 +4122,13 @@ async function applyMasterTemplateLayout(
     const rawMasterContent = masterDoc.content?.raw || masterDoc.content?.rendered || '';
     const masterTemplateSlug = masterDoc.template || '';
 
+    // Strip ALL Blog Style Kit styling before injecting into the master layout.
+    // This removes the fg-art wrapper, scoped CSS, fg-* classes, and conflicting
+    // inline styles so only the template's layout governs the final output.
+    const cleanBody = stripBlogStyleKit(newArticleBody);
+
     if (!rawMasterContent.trim()) {
-      return { content: newArticleBody, templateSlug: masterTemplateSlug };
+      return { content: cleanBody, templateSlug: masterTemplateSlug };
     }
 
     // 1. Gutenberg / Block-based Master Layout
@@ -4100,7 +4149,7 @@ async function applyMasterTemplateLayout(
         return { content: clonedContent, templateSlug: masterTemplateSlug };
       }
 
-      const blockWrappedBody = `<!-- wp:group {"className":"fgos-master-cloned-layout","layout":{"type":"constrained"}} -->\n<div className="wp-block-group fgos-master-cloned-layout">\n${newArticleBody}\n</div>\n<!-- /wp:group -->`;
+      const blockWrappedBody = `<!-- wp:group {"className":"fgos-master-cloned-layout","layout":{"type":"constrained"}} -->\n<div className="wp-block-group fgos-master-cloned-layout">\n${cleanBody}\n</div>\n<!-- /wp:group -->`;
 
       return {
         content: `${clonedContent}\n\n${blockWrappedBody}`,
@@ -4113,10 +4162,10 @@ async function applyMasterTemplateLayout(
     if (wrapperMatch) {
       const openTag = wrapperMatch[1];
       const closeTag = wrapperMatch[3];
-      return { content: openTag + '\n' + newArticleBody + '\n' + closeTag, templateSlug: masterTemplateSlug };
+      return { content: openTag + '\n' + cleanBody + '\n' + closeTag, templateSlug: masterTemplateSlug };
     }
 
-    return { content: newArticleBody, templateSlug: masterTemplateSlug };
+    return { content: cleanBody, templateSlug: masterTemplateSlug };
   } catch (err: any) {
     console.error('[MasterTemplate] Error applying master template:', err?.message || err);
     return { content: newArticleBody };
