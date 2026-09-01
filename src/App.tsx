@@ -334,8 +334,8 @@ export default function App() {
         }
         localStorage.setItem(storageKey, 'true');
       } catch (err) {
-        // Silently handle offline or permission errors during initial seed check
-        console.debug("Skipped seeding check due to network or permissions.");
+        // Log the actual error so seeding failures are visible in the console
+        console.error("[Seed] Seeding check failed:", err);
       }
     };
     
