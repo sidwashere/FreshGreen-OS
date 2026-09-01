@@ -143,9 +143,26 @@ export const initAuth = (
           if (onAuthFailure) onAuthFailure();
         }
       } else {
-        // Production: no auto-login — let the login screen handle auth.
-        // Signal "auth resolved, no user" so App.tsx can show the login UI.
-        if (onAuthFailure) onAuthFailure();
+        // Production: auto-login as owner (same as emulator mode) so the app
+        // is immediately usable without a login screen. Creates the owner
+        // account in real Firebase Auth on first run if it doesn't exist yet.
+        // NOTE: this means anyone who visits the deployed URL is signed in as
+        // the owner/admin. Acceptable for this private internal tool.
+        try {
+          const email = usernameToEmail(AUTO_AUTH_USERNAME);
+          try {
+            await signInWithEmailAndPassword(auth, email, AUTO_AUTH_PASSWORD);
+          } catch (err: any) {
+            if (err?.code === 'auth/user-not-found') {
+              await createUserWithEmailAndPassword(auth, email, AUTO_AUTH_PASSWORD);
+            } else {
+              throw err;
+            }
+          }
+        } catch (err: any) {
+          console.error('[AutoAuth] automatic sign-in failed:', err?.message || err);
+          if (onAuthFailure) onAuthFailure();
+        }
       }
     }
   });
