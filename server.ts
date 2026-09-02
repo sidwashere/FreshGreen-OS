@@ -4063,7 +4063,12 @@ function blocksToCleanHtml(blocks: any[]): string {
 
     const title = (block.title || '').trim();
     const content = (block.content || '').trim();
-    
+    const hasFaq = block.type === 'faq' && Array.isArray(block.faqItems) && block.faqItems.length > 0;
+
+    // Skip blocks that would render nothing meaningful (no content, no FAQ).
+    // A title-only block would otherwise produce a dangling empty heading.
+    if (!content && !hasFaq) return '';
+
     let html = '';
 
     // Render heading if present
@@ -4073,20 +4078,10 @@ function blocksToCleanHtml(blocks: any[]): string {
       html += `<h2>${escTitle}</h2>\n`;
     }
 
-    // Render image if present (image_banner)
-    if (block.imageUrl) {
-      const src = block.imageUrl.trim();
-      const alt = (block.imageAlt || title || 'Article image').replace(/"/g, '&quot;');
-      const caption = (block.imageCaption || '').trim();
-      
-      // Add fg-art-secondary class so the sync engine knows this is the secondary image
-      // and doesn't inject a duplicate one.
-      html += `<figure class="fg-art-secondary">\n  <img src="${src}" alt="${alt}" loading="lazy" />\n`;
-      if (caption) {
-        html += `  <figcaption>${caption.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</figcaption>\n`;
-      }
-      html += `</figure>\n`;
-    }
+    // NOTE: no in-body images are rendered here. Master-template publishes
+    // carry exactly one image — the WordPress featured image — so image
+    // blocks (image_banner) are intentionally dropped to avoid any secondary
+    // or duplicate image in the body.
 
     // Render content
     if (content) {
@@ -4113,7 +4108,7 @@ function blocksToCleanHtml(blocks: any[]): string {
     }
 
     // Render FAQ items
-    if (block.type === 'faq' && block.faqItems && block.faqItems.length > 0) {
+    if (hasFaq) {
       html += `<div class="faq-section">\n`;
       for (const item of block.faqItems) {
         if (item.question && item.answer) {
@@ -4387,44 +4382,47 @@ app.post('/api/wp/sync-content', async (req, res) => {
       }
     }
 
-    // Secondary (in-body) image: embed as an idempotent figure so the article
-    // body carries a second topic-matched image even without a body <img>.
-    const bodyHasSecondary = /fg-art-secondary/.test(payload.content || '');
-    const storedSecondary = String(contentItem.secondaryImageUrl || '').trim();
-    let secondarySrc = storedSecondary;
-    if (!secondarySrc && !bodyHasSecondary && !blocksHaveRealImage) {
-      try {
-        const gen = await generateAiImage({
-          prompt: `${buildImageTopicContext(contentItem, brand)}\n\nImage prompt: ${contentItem.primaryKeyword || contentItem.title} lifestyle detail photo`,
-          aspectRatio: '4:3',
-          byokKeys: imageKeys,
-        });
-        if (!gen.isPlaceholder) secondarySrc = gen.imageUrl;
-      } catch (genErr: any) {
-        console.warn('[Sync] secondary image generation skipped:', String(genErr?.message || genErr).slice(0, 140));
-      }
-    }
-    if (secondarySrc && !bodyHasSecondary) {
-      let embedSrc = secondarySrc;
-      if (/^data:image/i.test(secondarySrc)) {
+    // Secondary (in-body) image: only for the default fg-art layout. Master
+    // template publishes carry exactly one image (the WordPress featured
+    // image) — no secondary image is generated or injected.
+    if (!masterId) {
+      const bodyHasSecondary = /fg-art-secondary/.test(payload.content || '');
+      const storedSecondary = String(contentItem.secondaryImageUrl || '').trim();
+      let secondarySrc = storedSecondary;
+      if (!secondarySrc && !bodyHasSecondary && !blocksHaveRealImage) {
         try {
-          const up = await uploadImageToWp(brand, { dataBase64: secondarySrc, filename: 'article-image-2' });
-          embedSrc = up.wpMediaUrl;
-          imagesReturn.secondaryUrl = up.wpMediaUrl;
-          imagesReturn.secondaryMediaId = up.wpMediaId;
-        } catch (secErr: any) {
-          console.warn('[Sync] secondary image upload skipped:', String(secErr?.message || secErr).slice(0, 140));
+          const gen = await generateAiImage({
+            prompt: `${buildImageTopicContext(contentItem, brand)}\n\nImage prompt: ${contentItem.primaryKeyword || contentItem.title} lifestyle detail photo`,
+            aspectRatio: '4:3',
+            byokKeys: imageKeys,
+          });
+          if (!gen.isPlaceholder) secondarySrc = gen.imageUrl;
+        } catch (genErr: any) {
+          console.warn('[Sync] secondary image generation skipped:', String(genErr?.message || genErr).slice(0, 140));
         }
-      } else {
-        imagesReturn.secondaryUrl = secondarySrc;
       }
-      payload.content = embedSecondaryFigure(
-        payload.content || '',
-        embedSrc,
-        // Alt text must be a full descriptive sentence, not a raw keyword fragment.
-        // "natural treats for our" is not a usable alt — generate a meaningful description.
-        `${String(contentItem.primaryKeyword || '').trim() || String(contentItem.title || '').trim() || 'Article'} — ${brand?.name || 'article'} illustration`.replace(/["<>]/g, ''),
-      );
+      if (secondarySrc && !bodyHasSecondary) {
+        let embedSrc = secondarySrc;
+        if (/^data:image/i.test(secondarySrc)) {
+          try {
+            const up = await uploadImageToWp(brand, { dataBase64: secondarySrc, filename: 'article-image-2' });
+            embedSrc = up.wpMediaUrl;
+            imagesReturn.secondaryUrl = up.wpMediaUrl;
+            imagesReturn.secondaryMediaId = up.wpMediaId;
+          } catch (secErr: any) {
+            console.warn('[Sync] secondary image upload skipped:', String(secErr?.message || secErr).slice(0, 140));
+          }
+        } else {
+          imagesReturn.secondaryUrl = secondarySrc;
+        }
+        payload.content = embedSecondaryFigure(
+          payload.content || '',
+          embedSrc,
+          // Alt text must be a full descriptive sentence, not a raw keyword fragment.
+          // "natural treats for our" is not a usable alt — generate a meaningful description.
+          `${String(contentItem.primaryKeyword || '').trim() || String(contentItem.title || '').trim() || 'Article'} — ${brand?.name || 'article'} illustration`.replace(/["<>]/g, ''),
+        );
+      }
     }
 
     // --- Image hosting guarantee -------------------------------------------------
