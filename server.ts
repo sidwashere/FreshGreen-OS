@@ -3894,10 +3894,14 @@ app.post('/api/ai/test-provider', async (req, res) => {
 
   try {
     if (provider === 'gemini') {
-      const ai = getGeminiClient();
-      if (!ai) {
+      // Resolve the Gemini key the same way the rest of the system does:
+      // the saved BYOK key (Settings > AI Models) first, then the server env
+      // vars. The test button must validate the key that actually gets used.
+      const resolvedKey = byokKeys?.gemini || process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
+      if (!resolvedKey) {
         return finish({ ok: false, provider, model: model || GEMINI_TEXT_MODEL, error: 'No Gemini API key configured on the server (GEMINI_API_KEY).' });
       }
+      const ai = new GoogleGenAI({ apiKey: resolvedKey, httpOptions: { headers: { 'User-Agent': 'aistudio-build' } } });
       const response = await ai.models.generateContent({
         model: model || GEMINI_TEXT_MODEL,
         contents: 'Reply with exactly: OK',
