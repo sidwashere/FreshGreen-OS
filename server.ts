@@ -4047,65 +4047,78 @@ app.post('/api/wp/test-connection', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// STRIP BLOG STYLE KIT — removes the fg-art wrapper, scoped <style> tags,
-// fg-* CSS classes and conflicting inline styles injected by blocksToHtml().
-// When a master template is applied, only the template's own layout/styling
-// governs the final output — preventing overlapping images and tint overlays.
+// GENERATE CLEAN HTML FROM BLOCKS
+// When a master template is used, we completely bypass the Blog Style Kit
+// and generate pure, semantic HTML (h2, p, ul, figure) with no inline styles,
+// no classes, and no wrappers. This allows the master template's theme CSS
+// to fully govern the layout and typography.
 // ---------------------------------------------------------------------------
-function stripBlogStyleKit(html: string): string {
-  let content = html;
+function blocksToCleanHtml(blocks: any[]): string {
+  if (!blocks || !blocks.length) return '';
 
-  // 0. Remove the article frame (header, footer, hero) which conflict with the master template
-  // Remove frameHead (<header class="fg-frame-head"...>...</header>)
-  content = content.replace(/<header[^>]*class=["'][^"']*\bfg-frame-head\b[^"']*["'][^>]*>[\s\S]*?<\/header>/gi, '');
-  
-  // Remove frameFoot related posts (<section class="fg-related"...>...</section>)
-  content = content.replace(/<section[^>]*class=["'][^"']*\bfg-related\b[^"']*["'][^>]*>[\s\S]*?<\/section>/gi, '');
-  
-  // Remove frameFoot CTA (it doesn't have a class, but it contains "Explore more from")
-  content = content.replace(/<section[^>]*>[\s\S]*?Explore more from[\s\S]*?<\/section>/gi, '');
-  
-  // Remove hero section (<section class="fg-hero"...>...</section>)
-  // The master template usually has its own featured image, so we don't want to duplicate it.
-  content = content.replace(/<section[^>]*class=["'][^"']*\bfg-hero\b[^"']*["'][^>]*>[\s\S]*?<\/section>/gi, '');
+  return blocks.map(block => {
+    const title = (block.title || '').trim();
+    const content = (block.content || '').trim();
+    
+    let html = '';
 
-  // 1. Remove the fg-art outer wrapper and keep inner content only
-  const outerRe = /<div[^>]*class=["'][^"']*\bfg-art\b[^"']*["'][^>]*>([\s\S]*?)<\/div>\s*$/i;
-  const match = content.match(outerRe);
-  if (match) {
-    content = match[1]; // Keep the inner content, discard the wrapper
-  }
+    // Render heading if present
+    if (title) {
+      // Escape HTML entities in title
+      const escTitle = title.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      html += `<h2>${escTitle}</h2>\n`;
+    }
 
-  // 2. Remove any <style> blocks injected by scopedStyles()
-  content = content.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
+    // Render image if present (hero or image_banner)
+    if (block.imageUrl) {
+      const src = block.imageUrl.trim();
+      const alt = (block.imageAlt || title || 'Article image').replace(/"/g, '&quot;');
+      const caption = (block.imageCaption || '').trim();
+      
+      html += `<figure>\n  <img src="${src}" alt="${alt}" loading="lazy" />\n`;
+      if (caption) {
+        html += `  <figcaption>${caption.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</figcaption>\n`;
+      }
+      html += `</figure>\n`;
+    }
 
-  // 3. Remove all fg-* CSS classes from elements (fg-art, fg-share, fg-related, etc.)
-  content = content.replace(/\sclass=["'][^"']*\bfg-\w+[^"']*["']/gi, '');
+    // Render content
+    if (content) {
+      // Handle bullet points
+      const lines = content.split('\n').map(l => l.trim()).filter(Boolean);
+      const isBullet = (l: string) => /^[•\-*]\s*/.test(l);
+      
+      if (lines.some(isBullet)) {
+        let inList = false;
+        for (const line of lines) {
+          if (isBullet(line)) {
+            if (!inList) { html += `<ul>\n`; inList = true; }
+            html += `  <li>${line.replace(/^[•\-*]\s*/, '')}</li>\n`;
+          } else {
+            if (inList) { html += `</ul>\n`; inList = false; }
+            html += `<p>${line}</p>\n`;
+          }
+        }
+        if (inList) html += `</ul>\n`;
+      } else {
+        // Standard paragraphs
+        html += lines.map(line => `<p>${line}</p>\n`).join('');
+      }
+    }
 
-  // 4. Remove inline fg- CSS custom properties
-  content = content.replace(/\sstyle=["'][^"']*--fg-\w+[^"']*["']/gi, '');
+    // Render FAQ items
+    if (block.type === 'faq' && block.faqItems && block.faqItems.length > 0) {
+      html += `<div class="faq-section">\n`;
+      for (const item of block.faqItems) {
+        if (item.question && item.answer) {
+          html += `  <h3>${item.question}</h3>\n  <p>${item.answer}</p>\n`;
+        }
+      }
+      html += `</div>\n`;
+    }
 
-  // 5. Remove max-width / margin / padding overrides from the fg-art wrapper scope
-  //    that conflict with the master template's own container
-  const conflictStyles = [
-    /max-width:\s*800px\s*!important/gi,
-    /max-width:\s*800px/gi,
-    /margin:\s*0\s+auto\s*!important/gi,
-    /margin:\s*0\s+auto/gi,
-    /padding:\s*0\s*!important/gi,
-    /padding:\s*0/gi,
-    /box-sizing:\s*border-box\s*!important/gi,
-    /box-sizing:\s*border-box/gi,
-    /background:\s*transparent\s*!important/gi,
-    /background:\s*transparent/gi,
-    /font-family:[^;]*!important/gi,
-    /line-height:\s*1\.7\s*!important/gi,
-  ];
-  for (const s of conflictStyles) {
-    content = content.replace(s, '');
-  }
-
-  return content.trim();
+    return html;
+  }).filter(Boolean).join('\n');
 }
 
 // MASTER TEMPLATE CLONING ENGINE
@@ -4118,8 +4131,11 @@ async function applyMasterTemplateLayout(
   masterTemplateId: number,
   masterTemplateType: 'page' | 'post',
   newArticleTitle: string,
-  newArticleBody: string
+  blocks: any[]
 ): Promise<{ content: string; templateSlug?: string }> {
+  // Generate clean, semantic HTML from blocks (bypassing Blog Style Kit entirely)
+  const cleanBody = blocksToCleanHtml(blocks);
+
   try {
     const endpoint = masterTemplateType === 'page' ? 'pages' : 'posts';
     const masterRes = await fetch(`${cleanUrl}/wp-json/wp/v2/${endpoint}/${masterTemplateId}?context=edit`, {
@@ -4132,19 +4148,12 @@ async function applyMasterTemplateLayout(
 
     if (!masterRes.ok) {
       console.warn(`[MasterTemplate] Could not fetch master template #${masterTemplateId} (${masterRes.status})`);
-      return { content: newArticleBody };
+      return { content: cleanBody };
     }
 
     const masterDoc = await masterRes.json();
     const rawMasterContent = masterDoc.content?.raw || masterDoc.content?.rendered || '';
     const masterTemplateSlug = masterDoc.template || '';
-
-    // Strip ALL Blog Style Kit styling before injecting into the master layout.
-    // This removes the fg-art wrapper, scoped CSS, fg-* classes, and conflicting
-    // inline styles so only the template's layout governs the final output.
-    const cleanBody = stripBlogStyleKit(newArticleBody);
-    console.log('[MasterTemplate] newArticleBody length:', newArticleBody?.length, '| cleanBody length:', cleanBody?.length);
-    console.log('[MasterTemplate] cleanBody preview:', (cleanBody || '').substring(0, 200));
 
     if (!rawMasterContent.trim()) {
       return { content: cleanBody, templateSlug: masterTemplateSlug };
@@ -4302,7 +4311,7 @@ app.post('/api/wp/sync-content', async (req, res) => {
           masterId,
           masterType,
           contentItem.title || '',
-          payload.content || ''
+          contentItem.blocks || []
         );
         payload.content = cloned.content;
         if (cloned.templateSlug) {
