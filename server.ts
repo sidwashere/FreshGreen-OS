@@ -4057,6 +4057,10 @@ function blocksToCleanHtml(blocks: any[]): string {
   if (!blocks || !blocks.length) return '';
 
   return blocks.map(block => {
+    // Skip the hero block entirely when using a master template,
+    // because the template already handles the H1 title and featured image.
+    if (block.type === 'hero') return '';
+
     const title = (block.title || '').trim();
     const content = (block.content || '').trim();
     
@@ -4069,13 +4073,15 @@ function blocksToCleanHtml(blocks: any[]): string {
       html += `<h2>${escTitle}</h2>\n`;
     }
 
-    // Render image if present (hero or image_banner)
+    // Render image if present (image_banner)
     if (block.imageUrl) {
       const src = block.imageUrl.trim();
       const alt = (block.imageAlt || title || 'Article image').replace(/"/g, '&quot;');
       const caption = (block.imageCaption || '').trim();
       
-      html += `<figure>\n  <img src="${src}" alt="${alt}" loading="lazy" />\n`;
+      // Add fg-art-secondary class so the sync engine knows this is the secondary image
+      // and doesn't inject a duplicate one.
+      html += `<figure class="fg-art-secondary">\n  <img src="${src}" alt="${alt}" loading="lazy" />\n`;
       if (caption) {
         html += `  <figcaption>${caption.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</figcaption>\n`;
       }
