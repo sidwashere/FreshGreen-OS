@@ -4,6 +4,7 @@ import ReactQuill from 'react-quill-new';
 import 'react-quill-new/dist/quill.snow.css';
 import { ContentItem, Brand, VisualBlock, VisualBlockType, PipelineStatus, GenerationLogEntry, AiModelPref, BlockTune, CardItem, CarouselSlide } from '../types';
 import { figureHtmlFor as figureHtmlForLib, rebuildArticleHtml, syncImageMarkers } from '../lib/blogHtml';
+import { tipLabel } from '../lib/tipLabel';
 import { countWords, deriveWpState, syncItemToWp, refreshWpState } from '../lib/wpSync';
 import { SeoPanel } from './SeoPanel';
 import { GenerationInfoPanel } from './GenerationInfoPanel';
@@ -1190,7 +1191,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
     const newBlock: VisualBlock = {
       id: `block-${uid()}`,
       type,
-      title: type === 'hero' ? 'New Hero Heading' : type === 'faq' ? 'FAQ Section' : type === 'image_banner' ? '' : type === 'cta_band' ? 'Ready to make a change?' : type === 'quote' ? '' : type === 'cards' ? 'Why choose us' : type === 'carousel' ? 'Explore the range' : type === 'daniels_tip' ? "Daniel's Tip" : type === 'newsletter' ? 'Stay in the Loop' : type === 'paragraph' ? '' : 'Section Title',
+      title: type === 'hero' ? 'New Hero Heading' : type === 'faq' ? 'FAQ Section' : type === 'image_banner' ? '' : type === 'cta_band' ? 'Ready to make a change?' : type === 'quote' ? '' : type === 'cards' ? 'Why choose us' : type === 'carousel' ? 'Explore the range' : type === 'daniels_tip' ? tipLabel(brand) : type === 'newsletter' ? 'Stay in the Loop' : type === 'paragraph' ? '' : 'Section Title',
       subtitle: type === 'cta_band' ? 'No-pressure, expert-led guidance' : type === 'newsletter' ? 'Get the latest tips delivered to your inbox.' : 'Section Subtitle',
       content: type === 'image_banner' ? '' : type === 'quote' ? 'A powerful sentence worth quoting…' : type === 'cta_band' ? 'A short, warm call to action that invites the reader to take the next step.' : type === 'daniels_tip' ? 'A practical, actionable tip that benefits from being highlighted.' : type === 'newsletter' ? '' : 'Write content here...',
       buttonText: 'Learn More',
@@ -2194,7 +2195,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                   <option value="cards">+ Card grid</option>
                   <option value="quote">+ Quote</option>
                   <option value="callout">+ Callout</option>
-                  <option value="daniels_tip">+ Daniel's Tip</option>
+                  <option value="daniels_tip">+ {tipLabel(brand)}</option>
                   <option value="newsletter">+ Newsletter</option>
                   <option value="faq">+ FAQ</option>
                   <option value="carousel">+ Carousel</option>
@@ -2904,7 +2905,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                 <button onClick={() => handleAddBlock('quote')} className="px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-xl text-sm font-semibold transition shadow-sm">+ Quote</button>
                 <button onClick={() => handleAddBlock('cta_band')} className="px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-xl text-sm font-semibold transition shadow-sm">+ CTA Band</button>
                 <button onClick={() => handleAddBlock('carousel')} className="px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-xl text-sm font-semibold transition shadow-sm">+ Carousel</button>
-                <button onClick={() => handleAddBlock('daniels_tip')} className="px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-xl text-sm font-semibold transition shadow-sm">+ Daniel's Tip</button>
+                <button onClick={() => handleAddBlock('daniels_tip')} className="px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-xl text-sm font-semibold transition shadow-sm">+ {tipLabel(brand)}</button>
                 <button onClick={() => handleAddBlock('newsletter')} className="px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-xl text-sm font-semibold transition shadow-sm">+ Newsletter</button>
               </div>
             </div>

@@ -1,4 +1,5 @@
 import { BlogStyleKit, Brand, VisualBlock } from '../types';
+import { tipLabel, isDanielsBrand } from './tipLabel';
 
 // ---------------------------------------------------------------------------
 // Brand "blog style kit" → rich, responsive article HTML.
@@ -488,16 +489,19 @@ function renderProductCta(block: VisualBlock, kit: BlogStyleKit): string {
 }
 
 // ---------------------------------------------------------------------------
-// Daniel's Tip — branded callout box with accent border + subtle background.
-// The steak brand asset can be added later as a decorative element.
+// Tip callout — branded callout box with accent border + subtle background.
+// The label is brand-aware: "Daniel's Tip" for the Daniel's brand, otherwise
+// "Tip of the Day". The badge letter follows the same rule.
 // ---------------------------------------------------------------------------
-function renderDanielsTip(block: VisualBlock, kit: BlogStyleKit): string {
+function renderDanielsTip(block: VisualBlock, kit: BlogStyleKit, brand?: Pick<Brand, 'primaryColor' | 'blogStyle' | 'name' | 'slug'> | null): string {
   const content = (block.content || '').trim();
   if (!content) return '';
+  const label = tipLabel(brand);
+  const badge = isDanielsBrand(brand) ? 'D' : 'T';
   return `<aside style="background:${softTint(kit.primary)};border-left:5px solid ${kit.primary};border-radius:${kit.radius}px;padding:clamp(18px,3vw,28px);margin:0 0 28px;position:relative;">
   <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
-    <span style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:999px;background:${kit.primary};color:#fff;font-size:14px;font-weight:800;">D</span>
-    <span style="font-family:${kit.headingFont};font-weight:800;font-size:17px;color:${kit.primary};letter-spacing:.01em;">Daniel's Tip</span>
+    <span style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:999px;background:${kit.primary};color:#fff;font-size:14px;font-weight:800;">${badge}</span>
+    <span style="font-family:${kit.headingFont};font-weight:800;font-size:17px;color:${kit.primary};letter-spacing:.01em;">${label}</span>
   </div>
   <p style="margin:0;font-size:16px;line-height:1.75;color:${kit.text};">${txt(content)}</p>
 </aside>`;
@@ -651,7 +655,7 @@ function frameFoot(kit: BlogStyleKit, meta: ArticleFrameMeta | undefined): strin
 // ---------------------------------------------------------------------------
 // Block → HTML (the full branded article body)
 // ---------------------------------------------------------------------------
-function renderBlock(block: VisualBlock, kit: BlogStyleKit): string {
+function renderBlock(block: VisualBlock, kit: BlogStyleKit, brand?: Pick<Brand, 'primaryColor' | 'blogStyle' | 'name' | 'slug'> | null): string {
   switch (block.type) {
     case 'hero': return renderHero(block, kit);
     case 'heading': return renderHeading(block, kit);
@@ -663,7 +667,7 @@ function renderBlock(block: VisualBlock, kit: BlogStyleKit): string {
     case 'carousel': return renderCarousel(block, kit);
     case 'product_cta': return renderProductCta(block, kit);
     case 'image_banner': return figureHtmlFor(block, kit.radius);
-    case 'daniels_tip': return renderDanielsTip(block, kit);
+    case 'daniels_tip': return renderDanielsTip(block, kit, brand);
     case 'newsletter': return ''; // Newsletter block removed — no longer rendered
     case 'paragraph':
     default: return renderParagraph(block, kit);
@@ -697,7 +701,7 @@ function stableScope(blocks: VisualBlock[] | undefined, kit: BlogStyleKit): stri
  *  WordPress push path; the editor preview passes no meta and stays frameless. */
 export function blocksToHtml(
   blocks: VisualBlock[] | undefined,
-  brand?: Pick<Brand, 'primaryColor' | 'blogStyle'> | null,
+  brand?: Pick<Brand, 'primaryColor' | 'blogStyle' | 'name' | 'slug'> | null,
   meta?: ArticleFrameMeta,
 ): string {
   const kit = resolveBlogStyle(brand);
@@ -716,7 +720,7 @@ export function blocksToHtml(
   return `<div class="fg-art fg-art-${scope}" style="font-family:${kit.bodyFont} !important;color:${kit.text} !important;line-height:1.7 !important;max-width:800px !important;margin:0 auto !important;padding:0 !important;box-sizing:border-box !important;background:transparent !important;">
 ${scopedStyles(scope, kit)}
 ${head}
-${list.map((b) => renderBlock(b, kit)).join('\n\n')}
+${list.map((b) => renderBlock(b, kit, brand)).join('\n\n')}
 ${foot}
 </div>`;
 }
@@ -732,7 +736,7 @@ ${foot}
 export function rebuildArticleHtml(
   bodyHtml: string | undefined,
   blocks: VisualBlock[] | undefined,
-  brand?: Pick<Brand, 'primaryColor' | 'blogStyle'> | null,
+  brand?: Pick<Brand, 'primaryColor' | 'blogStyle' | 'name' | 'slug'> | null,
   force = false,
 ): string {
   const regionRe = new RegExp(`${ART_REGION_START}[\\s\\S]*?${ART_REGION_END}`);

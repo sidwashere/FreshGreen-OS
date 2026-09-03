@@ -19,6 +19,7 @@ import {
   stripHtml,
   escapeHtmlAttr,
 } from './src/lib/dynamicFields.js';
+import { tipLabel, isDanielsBrand } from './src/lib/tipLabel.js';
 
 dotenv.config();
 
@@ -480,7 +481,7 @@ async function completeWithProvider(
 // Build visual blocks from the final article HTML so the Blocks view is always
 // populated whenever content exists (headings -> sections, FAQ -> faq block,
 // product-ish sections -> product_cta, first h1 -> hero).
-function parseHtmlIntoBlocks(html: string, title?: string, keyword?: string): any[] {
+function parseHtmlIntoBlocks(html: string, title?: string, keyword?: string, brand?: any): any[] {
   if (!html || !stripHtml(html)) return [];
   const blocks: any[] = [];
 
@@ -593,7 +594,7 @@ function parseHtmlIntoBlocks(html: string, title?: string, keyword?: string): an
   while ((tipMatch = tipRe.exec(html)) !== null) {
     const content = stripHtml(tipMatch[1]).trim();
     if (content) {
-      blocks.push({ type: 'daniels_tip', title: "Daniel's Tip", content: content.slice(0, 1000) });
+      blocks.push({ type: 'daniels_tip', title: tipLabel(brand), content: content.slice(0, 1000) });
     }
   }
   const prodRe = /<div[^>]*class="[^"]*product-recommendation[^"]*"[^>]*>([\s\S]*?)<\/div>/gi;
@@ -874,7 +875,7 @@ function ctaBandFromHtml(sectionHtml: string, headingText: string): any | null {
 }
 
 // Build a `daniels_tip` block from a daniels-tip div.
-function danielsTipFromHtml(html: string): any | null {
+function danielsTipFromHtml(html: string, brand?: any): any | null {
   const tipRe = /<div[^>]*class="[^"]*daniels-tip[^"]*"[^>]*>([\s\S]*?)<\/div>/gi;
   let m: RegExpExecArray | null;
   while ((m = tipRe.exec(html)) !== null) {
@@ -883,7 +884,7 @@ function danielsTipFromHtml(html: string): any | null {
       return {
         id: `block-${Date.now()}-tip${Math.floor(Math.random() * 1000)}`,
         type: 'daniels_tip',
-        title: "Daniel's Tip",
+        title: tipLabel(brand),
         content: content.slice(0, 1000),
       };
     }
@@ -943,6 +944,7 @@ function autoGenerateBlocks(
   title?: string,
   keyword?: string,
   requestedBlocks?: string[] | null,
+  brand?: any,
 ): any[] {
   if (!html || !stripHtml(html)) return [];
   const blocks: any[] = [];
@@ -1027,7 +1029,7 @@ function autoGenerateBlocks(
     }
 
     // Daniel's Tip div → daniels_tip block.
-    const tip = danielsTipFromHtml(sectionHtml);
+    const tip = danielsTipFromHtml(sectionHtml, brand);
     if (tip) { sectionBlocks.push(tip); autoTypes.add('daniels_tip'); continue; }
 
     // Product recommendation / product CTA section → product_cta.
@@ -1126,7 +1128,7 @@ function autoGenerateBlocks(
       const placeholder = {
         id: `block-${Date.now()}-req-${type}${Math.floor(Math.random() * 1000)}`,
         type,
-        title: type === 'cta_band' ? 'Ready to make a change?' : type === 'newsletter' ? 'Stay in the Loop' : type === 'daniels_tip' ? "Daniel's Tip" : type === 'cards' ? 'Why choose us' : type === 'carousel' ? 'Explore the range' : type === 'quote' ? '' : type === 'image_banner' ? '' : type === 'faq' ? 'FAQ' : 'Section Title',
+        title: type === 'cta_band' ? 'Ready to make a change?' : type === 'newsletter' ? 'Stay in the Loop' : type === 'daniels_tip' ? tipLabel(brand) : type === 'cards' ? 'Why choose us' : type === 'carousel' ? 'Explore the range' : type === 'quote' ? '' : type === 'image_banner' ? '' : type === 'faq' ? 'FAQ' : 'Section Title',
         subtitle: type === 'cta_band' ? 'No-pressure, expert-led guidance' : type === 'newsletter' ? 'Get the latest tips delivered to your inbox.' : 'Section Subtitle',
         content: type === 'image_banner' ? '' : type === 'quote' ? 'A powerful sentence worth quoting…' : type === 'cta_band' ? 'A short, warm call to action that invites the reader to take the next step.' : type === 'daniels_tip' ? 'A practical, actionable tip that benefits from being highlighted.' : type === 'newsletter' ? '' : 'Write content here...',
         buttonText: type === 'cta_band' ? 'Get Started' : type === 'newsletter' ? 'Subscribe' : type === 'product_cta' ? 'Shop Now' : '',
@@ -1381,7 +1383,7 @@ SEO requirements (scored by an automated SEO analyzer, follow precisely):
 - EXTERNAL LINK RULE: Include at least TWO external links to authoritative, reputable sources that genuinely support your claims (e.g. RSPCA, PDSA, DEFRA, veterinary associations, peer-reviewed studies, government health bodies). Use <a href="https://www.rspca.org.uk/..."> with descriptive anchor text. Never link to spammy or low-quality sites. External links to trusted authorities are scored heavily.
 - E-E-A-T SIGNALS (Experience, Expertise, Authoritativeness, Trustworthiness): Write with first-person experience where natural ("In our experience…", "We've seen…", "When we tested…"), include specific, concrete details and examples rather than generic statements, and reference expert sources. This is scored heavily by the analyzer.
 - If suitable, include an FAQ section using an <h2> with <h3> questions, to target question-based (AEO) search results. The FAQ must grow naturally out of the preceding sections — reuse the article's own terms, examples and claims so the end of the piece reads as one flowing conversation, not a bolted-on list. Each FAQ answer must be a direct, concise answer (1-3 sentences).
-- DANIEL'S TIP: If the article contains a practical, actionable piece of advice that would benefit from being highlighted, wrap it in: <div class="daniels-tip">Your tip here</div>. Use at most ONE tip per article. The tip should be a specific, useful insight — not a generic statement.
+- ${tipLabel(brand).toUpperCase()}: If the article contains a practical, actionable piece of advice that would benefit from being highlighted, wrap it in: <div class="daniels-tip">Your tip here</div>. Use at most ONE tip per article. The tip should be a specific, useful insight — not a generic statement.
 - PRODUCT RECOMMENDATION: If the article topic naturally connects to a product (e.g. a article about dog treats could recommend a specific treat product), add a placeholder at the end of the article: <div class="product-recommendation">Product: [suggest a product category or type that would be relevant]</div>. This helps the system match a real product from the store catalog.
 - Write for humans first: natural, expert, specific. Never stuff keywords or repeat the same phrase back-to-back.
 - ${wordTarget}
@@ -2406,7 +2408,7 @@ Return ONLY the JSON array — no markdown fences, no commentary, no surrounding
     // content structure, images, paragraphs and formatting for the blog.
     const finalHtml = completeHtml;
     emit({ type: 'status', message: 'Structuring content blocks from the final, SEO-ready draft…', percent: 98 });
-    const blocks = autoGenerateBlocks(finalHtml, title, primaryKeyword, requestedBlocks);
+    const blocks = autoGenerateBlocks(finalHtml, title, primaryKeyword, requestedBlocks, brand);
     emit({ type: 'status', message: 'Blocks ready — finishing up…', percent: 99 });
 
     // The AI crafts its own headline (single <h1>) — that is the article's
@@ -2603,7 +2605,7 @@ YOUR TASK: You are ENHANCING an existing published article. You must:
 2. IMPROVE the article's SEO structure: ensure exactly one <h1> with the primary keyword, logical <h2>/<h3> hierarchy with headings every 200-300 words.
 3. IMPROVE readability: shorter paragraphs (under 150 words each), clearer transitions, more engaging opening.
 4. EXPAND thin sections with genuine, useful detail — not filler.
-5. ADD a Daniel's Tip (<div class="daniels-tip">...</div>) if a practical actionable insight exists. At most ONE per article.
+5. ADD a ${tipLabel(brand)} (<div class="daniels-tip">...</div>) if a practical actionable insight exists. At most ONE per article.
 6. ADD a product recommendation placeholder (<div class="product-recommendation">Product: [category]</div>) if the topic connects to a product.
 7. ADD internal links (<a href="/blog/...">) to plausible brand blog paths where relevant.
 8. FIX factual contradictions, unqualified health claims, and any factual errors.
@@ -2643,7 +2645,7 @@ Write the ENHANCED version of this article. Keep the same structure and messages
 - Headline (fresh, compelling, contains primary keyword naturally)
 - SEO structure (h1/h2/h3 hierarchy, keyword density 0.5-2.5%)
 - Readability (shorter paragraphs, better transitions, clearer flow)
-- Completeness (expand thin sections, add Daniel's Tip and product recommendation placeholders where appropriate)
+- Completeness (expand thin sections, add ${tipLabel(brand)} and product recommendation placeholders where appropriate)
 - British English throughout
 - Internal links to plausible /blog/ paths
 - No factual contradictions, all health claims qualified
@@ -2945,7 +2947,7 @@ Keep the JSON compact — no whitespace, no code fences.`;
     // --- Phase 4: Blocks & done -------------------------------------------
     // Blocks are built LAST, from the final curated/cleaned/SEO-ready HTML.
     emit({ type: 'status', message: 'Structuring content blocks from the final, SEO-ready draft…', percent: 98 });
-    const blocks = autoGenerateBlocks(completeHtml, title || originalTitle || '', primaryKeyword || '', requestedBlocks);
+    const blocks = autoGenerateBlocks(completeHtml, title || originalTitle || '', primaryKeyword || '', requestedBlocks, brand);
     const h1Match = /<h1\b[^>]*>([\s\S]*?)<\/h1>/i.exec(completeHtml);
     const articleTitle = h1Match ? stripHtml(h1Match[1]).trim() : '';
 
@@ -3074,7 +3076,7 @@ app.post('/api/ai/humanize-draft', async (req, res) => {
       success: true,
       original: originalHtml,
       humanized: changed ? humanized : originalHtml,
-      blocks: changed ? parseHtmlIntoBlocks(humanized, 'Humanised draft', '') : [],
+      blocks: changed ? parseHtmlIntoBlocks(humanized, 'Humanised draft', '', brand) : [],
       provider: 'gemini',
       model: h.model || GEMINI_TEXT_MODEL,
       changed,
@@ -3318,7 +3320,7 @@ ${bodyHtml}`;
     // Derive blocks from the final HTML so callers (SEO panel, Content Hub fix
     // flow) can apply the improved article in one patch — bodyHtml + blocks
     // always stay in sync, same as the humanise-draft endpoint.
-    const blocks = improvedHtml ? parseHtmlIntoBlocks(improvedHtml, title || 'Refined article', primaryKeyword || '') : [];
+    const blocks = improvedHtml ? parseHtmlIntoBlocks(improvedHtml, title || 'Refined article', primaryKeyword || '', brand) : [];
 
     return res.json({
       success: true,
@@ -4201,7 +4203,7 @@ async function applyMasterTemplateLayout(
     return { content: cleanBody, templateSlug: masterTemplateSlug };
   } catch (err: any) {
     console.error('[MasterTemplate] Error applying master template:', err?.message || err);
-    return { content: newArticleBody };
+    return { content: cleanBody };
   }
 }
 
