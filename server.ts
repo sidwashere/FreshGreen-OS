@@ -592,7 +592,7 @@ function parseHtmlIntoBlocks(html: string, title?: string, keyword?: string, bra
   const tipRe = /<div[^>]*class="[^"]*daniels-tip[^"]*"[^>]*>([\s\S]*?)<\/div>/gi;
   let tipMatch: RegExpExecArray | null;
   while ((tipMatch = tipRe.exec(html)) !== null) {
-    const content = stripHtml(tipMatch[1]).trim();
+    const content = stripTipPrefix(stripHtml(tipMatch[1]));
     if (content) {
       blocks.push({ type: 'daniels_tip', title: tipLabel(brand), content: content.slice(0, 1000) });
     }
@@ -879,7 +879,7 @@ function danielsTipFromHtml(html: string, brand?: any): any | null {
   const tipRe = /<div[^>]*class="[^"]*daniels-tip[^"]*"[^>]*>([\s\S]*?)<\/div>/gi;
   let m: RegExpExecArray | null;
   while ((m = tipRe.exec(html)) !== null) {
-    const content = stripHtml(m[1]).trim();
+    const content = stripTipPrefix(stripHtml(m[1]));
     if (content) {
       return {
         id: `block-${Date.now()}-tip${Math.floor(Math.random() * 1000)}`,
@@ -890,6 +890,16 @@ function danielsTipFromHtml(html: string, brand?: any): any | null {
     }
   }
   return null;
+}
+
+// Strip a leading "Daniel's Tip of the Day:" / "Daniel's Tip:" / "Tip of the
+// Day:" label from tip body text. The AI sometimes writes the label into the
+// tip paragraph itself (leftover from the old "Daniel's Tip" instruction), so
+// we defensively remove it — the callout heading already carries the label.
+function stripTipPrefix(text: string): string {
+  return String(text || '')
+    .replace(/^\s*(?:Daniel'?s\s+)?Tip(?:\s+of\s+the\s+Day)?\s*:\s*/i, '')
+    .trim();
 }
 
 // Build an `faq` block from an FAQ section.

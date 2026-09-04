@@ -498,12 +498,17 @@ function renderDanielsTip(block: VisualBlock, kit: BlogStyleKit, brand?: Pick<Br
   if (!content) return '';
   const label = tipLabel(brand);
   const badge = isDanielsBrand(brand) ? 'D' : 'T';
+  // Defensively strip a leading "Daniel's Tip of the Day:" / "Tip of the Day:"
+  // label from the body text — the callout heading already carries the label.
+  const body = content
+    .replace(/^\s*(?:Daniel'?s\s+)?Tip(?:\s+of\s+the\s+Day)?\s*:\s*/i, '')
+    .trim();
   return `<aside style="background:${softTint(kit.primary)};border-left:5px solid ${kit.primary};border-radius:${kit.radius}px;padding:clamp(18px,3vw,28px);margin:0 0 28px;position:relative;">
   <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
     <span style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:999px;background:${kit.primary};color:#fff;font-size:14px;font-weight:800;">${badge}</span>
     <span style="font-family:${kit.headingFont};font-weight:800;font-size:17px;color:${kit.primary};letter-spacing:.01em;">${label}</span>
   </div>
-  <p style="margin:0;font-size:16px;line-height:1.75;color:${kit.text};">${txt(content)}</p>
+  <p style="margin:0;font-size:16px;line-height:1.75;color:${kit.text};">${txt(body)}</p>
 </aside>`;
 }
 
