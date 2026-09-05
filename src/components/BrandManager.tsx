@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Brand, BlogStyleKit } from '../types';
-import { Building2, Plus, Key, Globe, Palette, ShieldAlert, Sparkles, Check, Trash2, Edit3, Save, RotateCcw, LayoutTemplate, Hash, ListChecks } from 'lucide-react';
+import { Building2, Plus, Key, Globe, Palette, ShieldAlert, Sparkles, Check, Trash2, Edit3, Save, RotateCcw, LayoutTemplate, Hash, ListChecks, Store } from 'lucide-react';
 import { resolveBlogStyle, FONT_STACKS, FONT_STACK_LABELS, shade, DEFAULT_BUTTON_STYLES } from '../lib/blogHtml';
 import { GRAMMAR_RULE_DEFS } from '../lib/grammarRules';
 
@@ -766,6 +766,50 @@ export const BrandManager: React.FC<BrandManagerProps> = ({
                   No master layout page selected yet. Click "Fetch Pages & Posts" to pick a page to duplicate.
                 </div>
               )}
+            </div>
+
+            {/* Section 2.8: Multi-Channel Scoreboard & Order Hub (Base.com) */}
+            <div className="p-4 rounded-xl bg-emerald-50/70 border border-emerald-200/80 space-y-3">
+              <div className="flex items-center space-x-2 text-emerald-950 font-semibold text-sm">
+                <Store className="w-4 h-4 text-emerald-600" />
+                <span>Multi-Channel Scoreboard & Order Hub (Base.com)</span>
+              </div>
+              <p className="text-[11px] text-emerald-900/80 leading-relaxed -mt-1">
+                Map this brand to its Base.com (BaseLinker) order sources and inventory so the Scoreboard shows
+                <strong> this brand's</strong> orders and revenue — one brand at a time. The shared BaseLinker token
+                lives in <strong>Settings → API Keys → baselinker</strong>; you only configure which channels belong
+                to this brand here.
+              </p>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">BaseLinker Inventory ID</label>
+                  <input
+                    type="number"
+                    value={editingBrand.baseInventoryId || ''}
+                    onChange={(e) => setEditingBrand({ ...editingBrand, baseInventoryId: e.target.value ? Number(e.target.value) : undefined })}
+                    placeholder="94059 (Default)"
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm font-mono focus:ring-2 focus:ring-emerald-500 focus:outline-none bg-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Order Source IDs (comma-separated)</label>
+                  <input
+                    type="text"
+                    value={(editingBrand.baseOrderSources || []).join(', ')}
+                    onChange={(e) => {
+                      const ids = e.target.value.split(',').map((s) => s.trim()).filter(Boolean);
+                      setEditingBrand({ ...editingBrand, baseOrderSources: ids });
+                    }}
+                    placeholder="5030531, 21014, 3361"
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm font-mono focus:ring-2 focus:ring-emerald-500 focus:outline-none bg-white"
+                  />
+                </div>
+              </div>
+              <p className="text-[11px] text-emerald-900/70">
+                Leave <strong>Order Source IDs</strong> empty to show all channels for this brand. Find source IDs in the
+                Base.com panel (API → getOrderSources) or via the Scoreboard's "Connected channels" list.
+              </p>
             </div>
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center justify-between">

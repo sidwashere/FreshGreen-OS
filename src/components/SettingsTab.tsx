@@ -19,7 +19,8 @@ const ApiKeysTab: React.FC = () => {
     gemini: '',
     openai: '',
     huggingface: '',
-    replicate: ''
+    replicate: '',
+    baselinker: ''
   });
   
   const [saved, setSaved] = useState(false);
@@ -130,6 +131,20 @@ const ApiKeysTab: React.FC = () => {
               placeholder="r8_..."
             />
             <p className="text-[10px] text-slate-400 mt-1">Used for running custom fine-tuned open-source image models.</p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-semibold text-slate-700 mb-1">Base.com (BaseLinker) API Token</label>
+            <input
+              type="password"
+              value={keys.baselinker}
+              onChange={(e) => setKeys({ ...keys, baselinker: e.target.value })}
+              className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              placeholder="5029343-5070342-..."
+            />
+            <p className="text-[10px] text-slate-400 mt-1">
+              Powers the Multi-Channel Scoreboard &amp; Order Hub. Create in Base.com panel → My account → API (Full permissions). Shared across all brands.
+            </p>
           </div>
         </div>
 

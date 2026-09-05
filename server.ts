@@ -6918,6 +6918,13 @@ app.get('/api/base/scoreboard', async (req, res) => {
     const now = Math.floor(Date.now() / 1000);
     const from = now - days * 86400;
 
+    // Optional brand filter: comma-separated BaseLinker order-source IDs.
+    // When provided, only orders from those sources count toward the scoreboard.
+    const sourceFilter = String(req.query.sources || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+
     // Pull confirmed orders in the window (max 100 per call; loop for more).
     const orders: any[] = [];
     let cursor = from;
@@ -6942,6 +6949,12 @@ app.get('/api/base/scoreboard', async (req, res) => {
 
     for (const o of orders) {
       const mapped = mapBaseOrder(o);
+      // Apply the brand's source filter (match on source id or source key).
+      if (sourceFilter.length > 0) {
+        const srcId = String(mapped.sourceId || '');
+        const srcKey = String(mapped.source || '');
+        if (!sourceFilter.includes(srcId) && !sourceFilter.includes(srcKey)) continue;
+      }
       const dayKey = (mapped.dateConfirmed || mapped.dateAdded || '').slice(0, 10);
       if (dayKey) {
         dayMap[dayKey] = dayMap[dayKey] || { date: dayKey, revenue: 0, orders: 0 };
@@ -6987,6 +7000,12 @@ app.get('/api/base/orders', async (req, res) => {
     const now = Math.floor(Date.now() / 1000);
     const from = now - days * 86400;
 
+    // Optional brand filter: comma-separated BaseLinker order-source IDs.
+    const sourceFilter = String(req.query.sources || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+
     const orders: any[] = [];
     let cursor = from;
     for (let i = 0; i < 20; i++) {
@@ -7001,7 +7020,15 @@ app.get('/api/base/orders', async (req, res) => {
       cursor = (last.date_confirmed || last.date_add || cursor) + 1;
     }
 
-    const mapped = orders.map(mapBaseOrder).sort((a: any, b: any) => (b.dateConfirmed || '').localeCompare(a.dateConfirmed || ''));
+    const mapped = orders
+      .map(mapBaseOrder)
+      .filter((o: any) => {
+        if (sourceFilter.length === 0) return true;
+        const srcId = String(o.sourceId || '');
+        const srcKey = String(o.source || '');
+        return sourceFilter.includes(srcId) || sourceFilter.includes(srcKey);
+      })
+      .sort((a: any, b: any) => (b.dateConfirmed || '').localeCompare(a.dateConfirmed || ''));
     return res.json({ success: true, orders: mapped, count: mapped.length });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err.message || 'Could not fetch BaseLinker orders.', code: err.code });

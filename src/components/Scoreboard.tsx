@@ -111,10 +111,15 @@ const KpiCard: React.FC<{ label: string; value: string; sub?: string; icon: Reac
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
-export const Scoreboard: React.FC = () => {
+interface ScoreboardProps {
+  brands: { id: string; name: string; baseOrderSources?: string[]; baseInventoryId?: number }[];
+}
+
+export const Scoreboard: React.FC<ScoreboardProps> = ({ brands }) => {
   const [token, setToken] = useState<string>('');
   const [tokenReady, setTokenReady] = useState(false);
   const [days, setDays] = useState(7);
+  const [brandId, setBrandId] = useState<string>('all');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [sources, setSources] = useState<SourceInfo[]>([]);
@@ -123,16 +128,24 @@ export const Scoreboard: React.FC = () => {
   const [products, setProducts] = useState<{ count: number; inStock: number; outOfStock: number; totalStock: number } | null>(null);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
 
+  const activeBrand = brands.find((b) => b.id === brandId) || null;
+  const sourceFilter = activeBrand?.baseOrderSources?.length
+    ? activeBrand.baseOrderSources.join(',')
+    : '';
+  const inventoryId = activeBrand?.baseInventoryId || 94059;
+
   const load = useCallback(async () => {
     if (!token) return;
     setLoading(true);
     setError(null);
     try {
+      const srcParam = sourceFilter ? `&sources=${encodeURIComponent(sourceFilter)}` : '';
+      const invParam = activeBrand ? `?inventory_id=${inventoryId}` : '';
       const [statusRes, scoreRes, ordersRes, productsRes] = await Promise.all([
         apiGet<{ sources: SourceInfo[] }>('/api/base/status', token),
-        apiGet<{ totalRevenue: number; totalOrders: number; daily: DailyStat[]; channels: ChannelStat[] }>(`/api/base/scoreboard?days=${days}`, token),
-        apiGet<{ orders: BaseOrder[] }>(`/api/base/orders?days=${days}`, token),
-        apiGet<{ count: number; inStock: number; outOfStock: number; totalStock: number }>('/api/base/products', token),
+        apiGet<{ totalRevenue: number; totalOrders: number; daily: DailyStat[]; channels: ChannelStat[] }>(`/api/base/scoreboard?days=${days}${srcParam}`, token),
+        apiGet<{ orders: BaseOrder[] }>(`/api/base/orders?days=${days}${srcParam}`, token),
+        apiGet<{ count: number; inStock: number; outOfStock: number; totalStock: number }>(`/api/base/products${invParam}`, token),
       ]);
       setSources(statusRes.sources || []);
       setScore(scoreRes);
@@ -144,7 +157,7 @@ export const Scoreboard: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [token, days]);
+  }, [token, days, sourceFilter, inventoryId, activeBrand]);
 
   // Resolve the BaseLinker token from Firestore apiKeys (settings/global).
   useEffect(() => {
@@ -179,10 +192,24 @@ export const Scoreboard: React.FC = () => {
             Multi-Channel Scoreboard
           </h1>
           <p className="text-sm text-slate-500 mt-1">
-            Live orders & revenue across every sales channel via Base.com (BaseLinker).
+            {activeBrand
+              ? `Live orders & revenue for ${activeBrand.name} via Base.com (BaseLinker).`
+              : 'Live orders & revenue across every sales channel via Base.com (BaseLinker).'}
           </p>
         </div>
         <div className="flex items-center gap-3">
+          {/* Brand selector — one brand at a time */}
+          <select
+            value={brandId}
+            onChange={(e) => setBrandId(e.target.value)}
+            className="px-3 py-2 rounded-lg border border-slate-200 bg-white text-sm font-medium text-slate-700 focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+            title="Show one brand's orders & revenue at a time"
+          >
+            <option value="all">All brands</option>
+            {brands.map((b) => (
+              <option key={b.id} value={b.id}>{b.name}</option>
+            ))}
+          </select>
           <div className="flex rounded-lg border border-slate-200 overflow-hidden">
             {[7, 30, 90].map((d) => (
               <button

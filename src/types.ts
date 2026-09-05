@@ -56,6 +56,12 @@ export interface Brand {
    *  section). Defaults to 'products' when the brand has WooCommerce products,
    *  else 'none'. */
   recommendationType?: 'products' | 'services' | 'books' | 'none';
+  /** Multi-Channel Scoreboard & Order Hub (Base.com/BaseLinker) config.
+   *  One shared BaseLinker token lives in settings/global -> apiKeys.baselinker;
+   *  each brand maps to the order sources + inventory that belong to it so the
+   *  scoreboard can show one brand at a time. */
+  baseOrderSources?: string[];   // BaseLinker order-source IDs for this brand
+  baseInventoryId?: number;      // BaseLinker inventory id (default 94059)
 }
 
 /** Per-brand grammar & style rules injected into every content-generation

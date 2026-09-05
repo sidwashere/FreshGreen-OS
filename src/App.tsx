@@ -842,7 +842,7 @@ export default function App() {
             )}
 
             {activeTab === 'scoreboard' && (
-              <Scoreboard />
+              <Scoreboard brands={brands} />
             )}
 
             {activeTab === 'activity-log' && (
