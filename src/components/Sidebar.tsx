@@ -1,5 +1,5 @@
 import React from 'react';
-import { 
+import {
   Kanban, 
   FileEdit, 
   Sparkles, 
@@ -11,7 +11,8 @@ import {
   Library,
   CalendarClock,
   ListChecks,
-  Activity
+  Activity,
+  BarChart3
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -79,6 +80,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
     {
       label: 'Distribution',
       items: [
+        {
+          id: 'scoreboard',
+          label: 'Scoreboard & Orders',
+          icon: BarChart3,
+          badge: 'Live',
+          badgeColor: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30',
+          description: 'Multi-channel sales & order hub'
+        },
         {
           id: 'autoblog',
           label: 'AutoBlog Scheduler',

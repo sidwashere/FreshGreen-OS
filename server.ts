@@ -6812,6 +6812,257 @@ class WordPressConnector
 });
 
 // ==========================================
+// 3b. BASE.COM (BaseLinker) — Multi-Channel Scoreboard & Order Hub
+// ==========================================
+
+/** Call the BaseLinker connector API. Token comes from the client (Firestore
+ *  apiKeys.baselinker) or the BASELINKER_TOKEN env var. */
+async function baseLinkerCall(token: string, method: string, parameters: any = {}) {
+  const res = await fetch('https://api.baselinker.com/connector.php', {
+    method: 'POST',
+    headers: {
+      'X-BLToken': token,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ method, parameters: JSON.stringify(parameters) }),
+  });
+  if (!res.ok) {
+    throw new Error(`BaseLinker HTTP ${res.status}`);
+  }
+  const data = await res.json();
+  if (data.status !== 'SUCCESS') {
+    const err: any = new Error(data.error_message || `BaseLinker ${method} failed`);
+    err.code = data.error_code;
+    throw err;
+  }
+  return data;
+}
+
+/** Resolve the BaseLinker token: query param (client passes Firestore key) → env. */
+function baseToken(req: express.Request): string {
+  const fromQuery = String(req.query.token || '').trim();
+  return fromQuery || process.env.BASELINKER_TOKEN || '';
+}
+
+/** Normalise a BaseLinker order into a compact scoreboard row. */
+function mapBaseOrder(o: any): any {
+  const items = Array.isArray(o.products) ? o.products : [];
+  const itemTotal = items.reduce((sum: number, p: any) => sum + (Number(p.price_brutto) || 0) * (Number(p.quantity) || 0), 0);
+  const delivery = Number(o.delivery_price) || 0;
+  return {
+    orderId: o.order_id,
+    source: o.order_source,
+    sourceId: o.order_source_id,
+    dateAdded: o.date_add ? new Date(o.date_add * 1000).toISOString() : null,
+    dateConfirmed: o.date_confirmed ? new Date(o.date_confirmed * 1000).toISOString() : null,
+    statusId: o.order_status_id,
+    complete: !!o.order_complete,
+    paymentDone: !!o.payment_done,
+    paymentMethod: o.payment_method || null,
+    currency: o.currency || 'GBP',
+    itemTotal: Math.round(itemTotal * 100) / 100,
+    deliveryPrice: Math.round(delivery * 100) / 100,
+    total: Math.round((itemTotal + delivery) * 100) / 100,
+    itemCount: items.reduce((n: number, p: any) => n + (Number(p.quantity) || 0), 0),
+    buyer: {
+      name: o.user_login || null,
+      email: o.email || null,
+      phone: o.phone || null,
+    },
+    delivery: {
+      fullname: o.delivery_fullname || null,
+      city: o.delivery_city || null,
+      postcode: o.delivery_postcode || null,
+      country: o.delivery_country || null,
+      method: o.delivery_method || null,
+    },
+    products: items.map((p: any) => ({
+      name: p.name || null,
+      sku: p.sku || null,
+      ean: p.ean || null,
+      quantity: Number(p.quantity) || 0,
+      priceBrutto: Number(p.price_brutto) || 0,
+    })),
+  };
+}
+
+// GET /api/base/status — connection check + connected order sources
+app.get('/api/base/status', async (req, res) => {
+  try {
+    const token = baseToken(req);
+    if (!token) {
+      return res.status(400).json({ success: false, message: 'BaseLinker token is not configured. Add it in Settings → API Keys (baselinker).' });
+    }
+    const data = await baseLinkerCall(token, 'getOrderSources');
+    const sources = data.sources || {};
+    const flat: { key: string; label: string; id: string }[] = [];
+    for (const [group, entries] of Object.entries(sources)) {
+      for (const [id, label] of Object.entries(entries as Record<string, string>)) {
+        flat.push({ key: group, label, id });
+      }
+    }
+    return res.json({ success: true, sources: flat, raw: sources });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not reach BaseLinker.', code: err.code });
+  }
+});
+
+// GET /api/base/scoreboard?days=7 — daily revenue + orders by channel
+app.get('/api/base/scoreboard', async (req, res) => {
+  try {
+    const token = baseToken(req);
+    if (!token) {
+      return res.status(400).json({ success: false, message: 'BaseLinker token is not configured. Add it in Settings → API Keys (baselinker).' });
+    }
+    const days = Math.min(Math.max(Number(req.query.days) || 7, 1), 90);
+    const now = Math.floor(Date.now() / 1000);
+    const from = now - days * 86400;
+
+    // Pull confirmed orders in the window (max 100 per call; loop for more).
+    const orders: any[] = [];
+    let cursor = from;
+    for (let i = 0; i < 20; i++) {
+      const data = await baseLinkerCall(token, 'getOrders', {
+        date_confirmed_from: cursor,
+        get_unconfirmed_orders: false,
+      });
+      const batch = data.orders || [];
+      orders.push(...batch);
+      if (batch.length < 100) break;
+      // Advance past the last confirmed date (+1s to avoid re-downloading).
+      const last = batch[batch.length - 1];
+      cursor = (last.date_confirmed || last.date_add || cursor) + 1;
+    }
+
+    // Aggregate per day + per channel.
+    const dayMap: Record<string, { date: string; revenue: number; orders: number }> = {};
+    const channelMap: Record<string, { source: string; revenue: number; orders: number }> = {};
+    let totalRevenue = 0;
+    let totalOrders = 0;
+
+    for (const o of orders) {
+      const mapped = mapBaseOrder(o);
+      const dayKey = (mapped.dateConfirmed || mapped.dateAdded || '').slice(0, 10);
+      if (dayKey) {
+        dayMap[dayKey] = dayMap[dayKey] || { date: dayKey, revenue: 0, orders: 0 };
+        dayMap[dayKey].revenue += mapped.total;
+        dayMap[dayKey].orders += 1;
+      }
+      const src = mapped.source || 'unknown';
+      channelMap[src] = channelMap[src] || { source: src, revenue: 0, orders: 0 };
+      channelMap[src].revenue += mapped.total;
+      channelMap[src].orders += 1;
+      totalRevenue += mapped.total;
+      totalOrders += 1;
+    }
+
+    // Fill missing days with zeros so the chart is continuous.
+    const daily: { date: string; revenue: number; orders: number }[] = [];
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date((now - i * 86400) * 1000).toISOString().slice(0, 10);
+      daily.push(dayMap[d] || { date: d, revenue: 0, orders: 0 });
+    }
+
+    return res.json({
+      success: true,
+      days,
+      totalRevenue: Math.round(totalRevenue * 100) / 100,
+      totalOrders,
+      daily,
+      channels: Object.values(channelMap).map((c: any) => ({ ...c, revenue: Math.round(c.revenue * 100) / 100 })),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not fetch BaseLinker scoreboard.', code: err.code });
+  }
+});
+
+// GET /api/base/orders?days=7 — recent orders queue
+app.get('/api/base/orders', async (req, res) => {
+  try {
+    const token = baseToken(req);
+    if (!token) {
+      return res.status(400).json({ success: false, message: 'BaseLinker token is not configured. Add it in Settings → API Keys (baselinker).' });
+    }
+    const days = Math.min(Math.max(Number(req.query.days) || 7, 1), 90);
+    const now = Math.floor(Date.now() / 1000);
+    const from = now - days * 86400;
+
+    const orders: any[] = [];
+    let cursor = from;
+    for (let i = 0; i < 20; i++) {
+      const data = await baseLinkerCall(token, 'getOrders', {
+        date_confirmed_from: cursor,
+        get_unconfirmed_orders: false,
+      });
+      const batch = data.orders || [];
+      orders.push(...batch);
+      if (batch.length < 100) break;
+      const last = batch[batch.length - 1];
+      cursor = (last.date_confirmed || last.date_add || cursor) + 1;
+    }
+
+    const mapped = orders.map(mapBaseOrder).sort((a: any, b: any) => (b.dateConfirmed || '').localeCompare(a.dateConfirmed || ''));
+    return res.json({ success: true, orders: mapped, count: mapped.length });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not fetch BaseLinker orders.', code: err.code });
+  }
+});
+
+// GET /api/base/products — catalog + stock summary
+app.get('/api/base/products', async (req, res) => {
+  try {
+    const token = baseToken(req);
+    if (!token) {
+      return res.status(400).json({ success: false, message: 'BaseLinker token is not configured. Add it in Settings → API Keys (baselinker).' });
+    }
+    const inventoryId = Number(req.query.inventory_id) || 94059;
+    const products: any[] = [];
+    let page = 1;
+    for (let i = 0; i < 20; i++) {
+      const data = await baseLinkerCall(token, 'getInventoryProductsList', { inventory_id: inventoryId, page });
+      const batch = data.products || {};
+      const entries = Object.values(batch);
+      products.push(...entries);
+      if (entries.length < 100) break;
+      page += 1;
+    }
+
+    let totalStock = 0;
+    let inStock = 0;
+    const mapped = products.map((p: any) => {
+      const stockVals = Object.values(p.stock || {}) as number[];
+      const stock = stockVals.reduce((s: number, v: number) => s + (Number(v) || 0), 0);
+      const priceVals = Object.values(p.prices || {}) as number[];
+      const price = priceVals.length ? Number(priceVals[0]) || 0 : 0;
+      totalStock += stock;
+      if (stock > 0) inStock += 1;
+      return {
+        id: p.id,
+        sku: p.sku || null,
+        name: p.name || null,
+        ean: p.ean || null,
+        asin: p.asin || null,
+        stock,
+        price,
+        parentId: p.parent_id || 0,
+      };
+    });
+
+    return res.json({
+      success: true,
+      inventoryId,
+      count: mapped.length,
+      inStock,
+      outOfStock: mapped.length - inStock,
+      totalStock,
+      products: mapped,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not fetch BaseLinker products.', code: err.code });
+  }
+});
+
+// ==========================================
 // 4. SERVER BOOTSTRAP & VITE MIDDLEWARE
 // ==========================================
 

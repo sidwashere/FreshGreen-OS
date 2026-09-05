@@ -10,6 +10,7 @@ import { AutoBlogScheduler } from './components/AutoBlogScheduler';
 import { SettingsTab } from './components/SettingsTab';
 import { FeatureTracker } from './components/FeatureTracker';
 import { ActivityLogView } from './components/ActivityLog';
+import { Scoreboard } from './components/Scoreboard';
 import { LoginScreen } from './components/LoginScreen';
 import { INITIAL_BRANDS, INITIAL_CONTENT } from './data/initialData';
 import { Brand, ContentItem, PipelineStatus, AppUser, FeatureRequest } from './types';
@@ -838,6 +839,10 @@ export default function App() {
                 onDeleteItem={handleDeleteItem}
                 onEditItem={handleEditItem}
               />
+            )}
+
+            {activeTab === 'scoreboard' && (
+              <Scoreboard />
             )}
 
             {activeTab === 'activity-log' && (
