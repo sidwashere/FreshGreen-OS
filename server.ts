@@ -7090,6 +7090,365 @@ app.get('/api/base/products', async (req, res) => {
 });
 
 // ==========================================
+// 3c. CRM & AUTOMATION SYNC ENGINE (MailerLite + WooCommerce)
+// ==========================================
+
+/** MailerLite group IDs (created via API, see daniels_petfoods_automation_specs.md). */
+const MAILERLITE_GROUPS: Record<string, string> = {
+  'Pet Food Buyers': '184914413448333113',
+  'Dog Walking Customers': '184914414424557090',
+  'General Visitors': '184914415107179867',
+  'Walk Booked': '184965010420663911',
+  'Walk Completed': '184965010431149676',
+  'New Subs': '184904579319596877',
+  'Pet Care Guide Requests': '192620928360777470',
+  'Contact Enquiries': '192618765795460301',
+};
+
+/** Call the MailerLite API (new API: connect.mailerlite.com, Bearer auth).
+ *  Token from client (Firestore apiKeys.mailerlite) or MAILERLITE_API_KEY env. */
+async function mailerLiteCall(token: string, method: string, path: string, body?: any) {
+  const res = await fetch(`https://connect.mailerlite.com/api${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  let data: any = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = null; }
+  if (!res.ok) {
+    const err: any = new Error(data?.message || data?.error?.message || `MailerLite HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  return data;
+}
+
+/** Resolve the MailerLite token: query/body param → env. */
+function mailerToken(req: express.Request): string {
+  const fromQuery = String(req.query.token || req.body?.token || '').trim();
+  return fromQuery || process.env.MAILERLITE_API_KEY || '';
+}
+
+/** Find a subscriber id by exact email (new API search is fuzzy). */
+async function mailerFindSubscriber(token: string, email: string): Promise<string | null> {
+  const search = await mailerLiteCall(token, 'GET', `/subscribers?query=${encodeURIComponent(email)}`);
+  const list = Array.isArray(search?.data) ? search.data : [];
+  const match = list.find((s: any) => String(s.email).toLowerCase() === String(email).toLowerCase());
+  return match?.id ? String(match.id) : null;
+}
+
+/** Upsert a subscriber (create or update by email) and optionally add to groups. */
+async function mailerUpsertSubscriber(token: string, email: string, name: string, groupIds: string[] = []) {
+  const payload: any = { email, status: 'active' };
+  if (name) payload.fields = { name };
+  if (groupIds.length) payload.groups = groupIds;
+  const data = await mailerLiteCall(token, 'POST', '/subscribers', payload);
+  return data?.data || data;
+}
+
+// GET /api/crm/mailerlite/status — connection check + groups with counts
+app.get('/api/crm/mailerlite/status', async (req, res) => {
+  try {
+    const token = mailerToken(req);
+    if (!token) {
+      return res.status(400).json({ success: false, message: 'MailerLite token is not configured. Add it in Settings → API Keys → mailerlite.' });
+    }
+    const groups = await mailerLiteCall(token, 'GET', '/groups');
+    const flat = (Array.isArray(groups?.data) ? groups.data : []).map((g: any) => ({
+      id: String(g.id),
+      name: g.name,
+      total: g.active_count || 0,
+      active: g.active_count || 0,
+      unsubscribed: g.unsubscribed_count || 0,
+      bounced: g.bounced_count || 0,
+      unconfirmed: g.unconfirmed_count || 0,
+      sent: g.sent_count || 0,
+      opened: g.opens_count || 0,
+      clicked: g.clicks_count || 0,
+    }));
+    return res.json({ success: true, groups: flat, count: flat.length });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not reach MailerLite.', status: err.status });
+  }
+});
+
+// GET /api/crm/mailerlite/subscribers?group_id=&limit= — subscribers in a group
+app.get('/api/crm/mailerlite/subscribers', async (req, res) => {
+  try {
+    const token = mailerToken(req);
+    if (!token) {
+      return res.status(400).json({ success: false, message: 'MailerLite token is not configured.' });
+    }
+    const groupId = String(req.query.group_id || '').trim();
+    const limit = Math.min(Number(req.query.limit) || 25, 100);
+    if (!groupId) {
+      return res.status(400).json({ success: false, message: 'group_id is required.' });
+    }
+    const data = await mailerLiteCall(token, 'GET', `/groups/${groupId}/subscribers?limit=${limit}`);
+    const subs = (Array.isArray(data?.data) ? data.data : []).map((s: any) => ({
+      id: String(s.id),
+      email: s.email,
+      name: s.fields?.name || s.name || null,
+      type: s.status || null,
+      dateCreated: s.created_at || null,
+      dateSubscribe: s.subscribed_at || null,
+      sent: s.sent || 0,
+      opened: s.opens_count || 0,
+      clicked: s.clicks_count || 0,
+    }));
+    return res.json({ success: true, subscribers: subs, count: subs.length });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not fetch MailerLite subscribers.', status: err.status });
+  }
+});
+
+// POST /api/crm/mailerlite/subscriber — upsert a subscriber and add to a group
+app.post('/api/crm/mailerlite/subscriber', async (req, res) => {
+  try {
+    const token = mailerToken(req);
+    if (!token) {
+      return res.status(400).json({ success: false, message: 'MailerLite token is not configured.' });
+    }
+    const { email, name, groupId, groupName } = req.body || {};
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'email is required.' });
+    }
+    let groupIds: string[] = [];
+    if (groupId) groupIds = [String(groupId)];
+    else if (groupName) {
+      const id = MAILERLITE_GROUPS[groupName];
+      if (id) groupIds = [id];
+      else {
+        // Resolve by name from the API.
+        const groups = await mailerLiteCall(token, 'GET', '/groups');
+        const found = (Array.isArray(groups?.data) ? groups.data : []).find((g: any) => g.name === groupName);
+        if (found) groupIds = [String(found.id)];
+      }
+    }
+    const subscriber = await mailerUpsertSubscriber(token, String(email).trim().toLowerCase(), name || '', groupIds);
+    return res.json({ success: true, subscriber });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not add MailerLite subscriber.', status: err.status });
+  }
+});
+
+// POST /api/crm/mailerlite/group — move a subscriber between groups
+// (e.g. Walk Booked → Walk Completed). Body: { email, addGroupId?, removeGroupId? }
+app.post('/api/crm/mailerlite/group', async (req, res) => {
+  try {
+    const token = mailerToken(req);
+    if (!token) {
+      return res.status(400).json({ success: false, message: 'MailerLite token is not configured.' });
+    }
+    const { email, addGroupId, removeGroupId } = req.body || {};
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'email is required.' });
+    }
+    const cleanEmail = String(email).trim().toLowerCase();
+    let subscriberId = await mailerFindSubscriber(token, cleanEmail);
+    if (!subscriberId) {
+      const created = await mailerUpsertSubscriber(token, cleanEmail, req.body?.name || '');
+      subscriberId = created?.id ? String(created.id) : null;
+    }
+    if (!subscriberId) {
+      return res.status(500).json({ success: false, message: 'Could not resolve or create subscriber.' });
+    }
+    const actions: string[] = [];
+    if (removeGroupId) {
+      await mailerLiteCall(token, 'DELETE', `/subscribers/${subscriberId}/groups/${removeGroupId}`);
+      actions.push(`removed from group ${removeGroupId}`);
+    }
+    if (addGroupId) {
+      await mailerLiteCall(token, 'POST', `/subscribers/${subscriberId}/groups/${addGroupId}`);
+      actions.push(`added to group ${addGroupId}`);
+    }
+    return res.json({ success: true, email: cleanEmail, subscriberId, actions });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not move MailerLite subscriber.', status: err.status });
+  }
+});
+
+// POST /api/crm/sync-woo — pull WooCommerce customers from a brand's orders
+// and add them to the Pet Food Buyers group (dedupe by email).
+app.post('/api/crm/sync-woo', async (req, res) => {
+  try {
+    const token = mailerToken(req);
+    if (!token) {
+      return res.status(400).json({ success: false, message: 'MailerLite token is not configured.' });
+    }
+    const { wpUrl, key, secret, groupId, days } = req.body || {};
+    if (!wpUrl || !key || !secret) {
+      return res.status(400).json({ success: false, message: 'wpUrl, key, and secret are required (WooCommerce REST credentials).' });
+    }
+    const lookback = Math.min(Math.max(Number(days) || 90, 1), 365);
+    const perPage = 50;
+    const url = wcAuthUrl(wpUrl, key, secret, `/orders?per_page=${perPage}&page=1&orderby=date&order=desc&after=${new Date(Date.now() - lookback * 86400000).toISOString()}`);
+
+    const wcRes = await fetch(url, { headers: DEFAULT_WP_HEADERS });
+    if (!wcRes.ok) {
+      const body = await wcRes.text();
+      return res.status(wcRes.status).json({ success: false, message: `WC API ${wcRes.status}: ${body}` });
+    }
+    const raw = await wcRes.json();
+    const orders = Array.isArray(raw) ? raw : [];
+
+    // Unique buyers from orders (billing email + name).
+    const buyers = new Map<string, { email: string; name: string }>();
+    for (const o of orders) {
+      const email = String(o.billing?.email || '').trim().toLowerCase();
+      if (!email) continue;
+      const first = o.billing?.first_name || '';
+      const last = o.billing?.last_name || '';
+      buyers.set(email, { email, name: `${first} ${last}`.trim() });
+    }
+
+    const targetGroup = String(groupId || MAILERLITE_GROUPS['Pet Food Buyers'] || '');
+    let added = 0;
+    let existing = 0;
+    let failed = 0;
+    const errors: string[] = [];
+    for (const b of buyers.values()) {
+      try {
+        const before = await mailerFindSubscriber(token, b.email);
+        await mailerUpsertSubscriber(token, b.email, b.name, [targetGroup]);
+        if (before) existing += 1;
+        else added += 1;
+      } catch (err: any) {
+        failed += 1;
+        errors.push(`${b.email}: ${err.message}`);
+      }
+    }
+
+    return res.json({
+      success: true,
+      ordersScanned: orders.length,
+      uniqueBuyers: buyers.size,
+      added,
+      existing,
+      failed,
+      errors: errors.slice(0, 10),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not sync WooCommerce buyers.', status: err.status });
+  }
+});
+
+// POST /api/crm/mailerlite/webhook — receive MailerLite automation webhook
+// events and move the subscriber between walk groups.
+// Body: { email, event: booked | completed | cancelled } (or MailerLite
+// automation webhook payload with subscriber.email + custom event field).
+app.post('/api/crm/mailerlite/webhook', async (req, res) => {
+  try {
+    const token = mailerToken(req);
+    if (!token) {
+      return res.status(400).json({ success: false, message: 'MailerLite token is not configured.' });
+    }
+    const body = req.body || {};
+    // Accept our test format AND MailerLite automation webhook payloads.
+    const email = String(
+      body.email ||
+      body.subscriber?.email ||
+      body.customer?.email ||
+      body.customer_email ||
+      body.data?.email ||
+      ''
+    ).trim().toLowerCase();
+    const event = String(
+      body.event ||
+      body.type ||
+      body.status ||
+      body.trigger ||
+      body.data?.event ||
+      ''
+    ).toLowerCase();
+    const customerName = String(
+      body.name ||
+      body.subscriber?.name ||
+      body.customer?.firstName ||
+      body.customer?.lastName ||
+      body.customer_name ||
+      body.data?.name ||
+      ''
+    ).trim();
+
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'No subscriber email found in webhook payload.' });
+    }
+
+    // Map events to group moves.
+    const walkBooked = MAILERLITE_GROUPS['Walk Booked'];
+    const walkCompleted = MAILERLITE_GROUPS['Walk Completed'];
+    let addGroupId: string | null = null;
+    let removeGroupId: string | null = null;
+    let mapped = '';
+
+    if (event.includes('book') || event.includes('confirm') || event.includes('appointment') || event.includes('scheduled')) {
+      addGroupId = walkBooked;
+      mapped = 'booked → Walk Booked';
+    } else if (event.includes('complete') || event.includes('done') || event.includes('finish')) {
+      addGroupId = walkCompleted;
+      removeGroupId = walkBooked;
+      mapped = 'completed → Walk Completed (removed from Walk Booked)';
+    } else if (event.includes('cancel')) {
+      removeGroupId = walkBooked;
+      mapped = 'cancelled → removed from Walk Booked';
+    }
+
+    if (!addGroupId && !removeGroupId) {
+      return res.json({ success: true, message: `Webhook received but no group move mapped for event "${event}".`, email, event });
+    }
+
+    // Ensure the subscriber exists (create if missing), then move groups.
+    let subscriberId = await mailerFindSubscriber(token, email);
+    if (!subscriberId) {
+      const created = await mailerUpsertSubscriber(token, email, customerName || '');
+      subscriberId = created?.id ? String(created.id) : null;
+    }
+    if (!subscriberId) {
+      return res.status(500).json({ success: false, message: 'Could not resolve or create subscriber.' });
+    }
+
+    const actions: string[] = [];
+    if (removeGroupId) {
+      await mailerLiteCall(token, 'DELETE', `/subscribers/${subscriberId}/groups/${removeGroupId}`);
+      actions.push(`removed from Walk Booked`);
+    }
+    if (addGroupId) {
+      await mailerLiteCall(token, 'POST', `/subscribers/${subscriberId}/groups/${addGroupId}`);
+      actions.push(`added to ${addGroupId === walkCompleted ? 'Walk Completed' : 'Walk Booked'}`);
+    }
+
+    return res.json({ success: true, email, event, mapped, subscriberId, actions });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not process MailerLite webhook.', status: err.status });
+  }
+});
+
+// GET /api/crm/mailerlite/webhook — webhook endpoint info (for MailerLite automation setup)
+app.get('/api/crm/mailerlite/webhook', (req, res) => {
+  return res.json({
+    success: true,
+    endpoint: 'POST /api/crm/mailerlite/webhook',
+    expects: {
+      email: 'subscriber email (or subscriber.email / customer.email / customer_email / data.email)',
+      event: 'booking event: booked | completed | cancelled',
+      name: 'optional subscriber name',
+    },
+    groupMoves: {
+      booked: 'add to Walk Booked',
+      completed: 'add to Walk Completed, remove from Walk Booked',
+      cancelled: 'remove from Walk Booked',
+    },
+    note: 'In MailerLite: Automation → trigger (e.g. subscriber added to Walk Booked) → Webhook action → POST JSON to this endpoint.',
+  });
+});
+
+// ==========================================
 // 4. SERVER BOOTSTRAP & VITE MIDDLEWARE
 // ==========================================
 

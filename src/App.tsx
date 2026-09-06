@@ -11,6 +11,7 @@ import { SettingsTab } from './components/SettingsTab';
 import { FeatureTracker } from './components/FeatureTracker';
 import { ActivityLogView } from './components/ActivityLog';
 import { Scoreboard } from './components/Scoreboard';
+import { CrmDashboard } from './components/CrmDashboard';
 import { LoginScreen } from './components/LoginScreen';
 import { INITIAL_BRANDS, INITIAL_CONTENT } from './data/initialData';
 import { Brand, ContentItem, PipelineStatus, AppUser, FeatureRequest } from './types';
@@ -843,6 +844,10 @@ export default function App() {
 
             {activeTab === 'scoreboard' && (
               <Scoreboard brands={brands} />
+            )}
+
+            {activeTab === 'crm' && (
+              <CrmDashboard brands={brands} />
             )}
 
             {activeTab === 'activity-log' && (

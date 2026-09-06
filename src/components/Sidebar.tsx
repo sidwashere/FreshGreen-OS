@@ -12,7 +12,8 @@ import {
   CalendarClock,
   ListChecks,
   Activity,
-  BarChart3
+  BarChart3,
+  Mail
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -80,6 +81,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
     {
       label: 'Distribution',
       items: [
+        {
+          id: 'crm',
+          label: 'CRM & Automations',
+          icon: Mail,
+          badge: 'Sync',
+          badgeColor: 'bg-blue-500/20 text-blue-300 border-blue-500/30',
+          description: 'MailerLite, WooCommerce & Amelia'
+        },
         {
           id: 'scoreboard',
           label: 'Scoreboard & Orders',
