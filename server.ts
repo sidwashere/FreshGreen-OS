@@ -7342,6 +7342,30 @@ app.post('/api/crm/sync-woo', async (req, res) => {
 // events and move the subscriber between walk groups.
 // Body: { email, event: booked | completed | cancelled } (or MailerLite
 // automation webhook payload with subscriber.email + custom event field).
+// Also handles MailerLite subscriber.added_to_group webhooks: when the
+// subscriber lands in the Contact Enquiries group, the store owner is
+// notified via the WordPress site's wp_mail endpoint.
+async function notifyContactEnquiry(email: string, name: string) {
+  const wpUrl = 'https://danielstastypetfoods.co.uk/wp-json/daniels/v1/notify-enquiry';
+  const secret = process.env.DGC_NOTIFY_SECRET || '';
+  try {
+    const res = await fetch(wpUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-dgc-secret': secret,
+      },
+      body: JSON.stringify({ email, name }),
+    });
+    const text = await res.text();
+    let data: any = null;
+    try { data = text ? JSON.parse(text) : null; } catch { data = null; }
+    return { status: res.status, data };
+  } catch (err: any) {
+    return { status: 0, error: err.message || 'Could not reach WordPress notify endpoint.' };
+  }
+}
+
 app.post('/api/crm/mailerlite/webhook', async (req, res) => {
   try {
     const token = mailerToken(req);
@@ -7359,6 +7383,7 @@ app.post('/api/crm/mailerlite/webhook', async (req, res) => {
       ''
     ).trim().toLowerCase();
     const event = String(
+      req.query.event ||
       body.event ||
       body.type ||
       body.status ||
@@ -7378,6 +7403,40 @@ app.post('/api/crm/mailerlite/webhook', async (req, res) => {
 
     if (!email) {
       return res.status(400).json({ success: false, message: 'No subscriber email found in webhook payload.' });
+    }
+
+    // Contact Enquiries notification: MailerLite webhook (subscriber.added_to_group)
+    // → notify the store owner via the WordPress site's wp_mail endpoint.
+    if (event.includes('added_to_group') || event.includes('group')) {
+      const contactGroup = MAILERLITE_GROUPS['Contact Enquiries'];
+      const groupName = String(body.group?.name || body.data?.group?.name || '').trim();
+      const groupId = String(body.group?.id || body.data?.group?.id || '').trim();
+      if (groupName === 'Contact Enquiries' || groupId === contactGroup) {
+        const notifyResult = await notifyContactEnquiry(email, customerName);
+        return res.json({ success: true, email, event, mapped: 'contact enquiry → owner notified', notifyResult });
+      }
+      return res.json({ success: true, message: `Webhook received for group "${groupName}" — no action mapped.`, email, event });
+    }
+
+    // Contact Enquiries notification: MailerLite subscriber.form_submitted webhook.
+    // The payload carries no form id, so we look up the subscriber's groups via the
+    // MailerLite API and notify the owner when the Contact Enquiries group is present.
+    if (event.includes('form_submitted')) {
+      const subscriberId = String(body.id || body.subscriber?.id || '').trim();
+      if (!subscriberId) {
+        return res.json({ success: true, message: 'form_submitted webhook received but no subscriber id — no action.', email, event });
+      }
+      const groups = await mailerLiteCall(token, 'GET', `/subscribers/${subscriberId}/groups`);
+      const groupList = Array.isArray(groups?.data) ? groups.data : [];
+      const inContact = groupList.some(
+        (g: any) => String(g.id) === MAILERLITE_GROUPS['Contact Enquiries'] || String(g.name) === 'Contact Enquiries'
+      );
+      const groupNames = groupList.map((g: any) => g.name);
+      if (inContact) {
+        const notifyResult = await notifyContactEnquiry(email, customerName);
+        return res.json({ success: true, email, event, mapped: 'contact enquiry (form) → owner notified', subscriberId, groups: groupNames, notifyResult });
+      }
+      return res.json({ success: true, message: 'form_submitted webhook received — subscriber not in Contact Enquiries group, no action.', email, event, subscriberId, groups: groupNames });
     }
 
     // Map events to group moves.
