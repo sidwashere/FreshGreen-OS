@@ -13,7 +13,8 @@ import {
   ListChecks,
   Activity,
   BarChart3,
-  Mail
+  Mail,
+  Package
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -96,6 +97,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
           badge: 'Live',
           badgeColor: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30',
           description: 'Multi-channel sales & order hub'
+        },
+        {
+          id: 'products',
+          label: 'Product Manager',
+          icon: Package,
+          badge: 'CRUD',
+          badgeColor: 'bg-orange-500/20 text-orange-300 border-orange-500/30',
+          description: 'Products, categories & attributes'
         },
         {
           id: 'autoblog',
