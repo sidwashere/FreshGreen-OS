@@ -287,6 +287,10 @@ export interface ContentItem {
   lastRefreshedAt?: string;
   /** How many times this item has been repurposed/refreshed since first publish. */
   repurposeCount?: number;
+  /** Auto-generated social media content package (Facebook / Instagram /
+   *  Google Business Profile) produced together with the main article. Linked
+   *  to the same blog number + featured image so the VA can match them. */
+  socialContent?: SocialContentPackage;
 }
 
 /** Complete context from a single Google Sheet row. Every field maps to a
@@ -343,6 +347,33 @@ export interface AutoBlogOverrides {
   runSeoAnalysis?: boolean;
   /** Whether to humanize the draft after generation. */
   humanize?: boolean;
+}
+
+/** Auto-generated social media content package for one blog article. Produced
+ *  together with the main article so the VA gets one complete package per post,
+ *  linked by blog number + main image. */
+export interface SocialContentPackage {
+  /** Facebook post text (~500 words). */
+  facebook: string;
+  /** Instagram caption text (~150 words). */
+  instagram: string;
+  /** Google Business Profile update text (~90 words). */
+  googleBusiness: string;
+  /** Same main image as the article — the VA posts this with the captions. */
+  imageUrl?: string;
+  /** Blog reference number linking this package to its article, e.g. "DTP001". */
+  blogNumber?: string;
+  /** Article title for context. */
+  articleTitle?: string;
+  /** Article live URL once published (filled at publish time). */
+  articleUrl?: string;
+  status: 'pending' | 'ready' | 'error';
+  error?: string;
+  generatedAt?: string;
+  model?: string;    // e.g. 'gemini-3.5-flash'
+  provider?: string; // 'gemini' | 'openrouter' | 'custom'
+  fallback?: boolean;
+  latencyMs?: number;
 }
 
 /** Global AutoBlog configuration stored per-brand or app-wide. */

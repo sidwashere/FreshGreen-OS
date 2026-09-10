@@ -20,8 +20,217 @@ import {
   escapeHtmlAttr,
 } from './src/lib/dynamicFields.js';
 import { tipLabel, isDanielsBrand } from './src/lib/tipLabel.js';
+import { initializeApp as initAdminApp, applicationDefault } from 'firebase-admin/app';
+import { getFirestore as getAdminFirestore, FieldValue as AdminFieldValue } from 'firebase-admin/firestore';
 
 dotenv.config();
+
+// ── Firebase Admin (server-side Firestore access) ────────────────────────────
+// Lets the server read scheduled content items and publish them to WordPress
+// even when no client is open. Uses Application Default Credentials: on Cloud
+// Run this is the service's runtime SA (needs roles/datastore.user); locally
+// set GOOGLE_APPLICATION_CREDENTIALS to a service-account key file.
+let adminDb: ReturnType<typeof getAdminFirestore> | null = null;
+try {
+  if (process.env.FIRESTORE_EMULATOR_HOST) {
+    // Local dev/testing against the Firestore emulator — no credentials needed.
+    initAdminApp({ projectId: process.env.FIREBASE_PROJECT_ID || 'demo-fgos' });
+    console.log('[FGOS] ✅ Firebase Admin initialized (EMULATOR mode) — server-side auto-publish armed');
+  } else {
+    // Production (Cloud Run): Application Default Credentials = the service's
+    // runtime SA (needs roles/datastore.user). Locally: set
+    // GOOGLE_APPLICATION_CREDENTIALS to a service-account key file.
+    initAdminApp({ credential: applicationDefault() });
+    console.log('[FGOS] ✅ Firebase Admin initialized — server-side auto-publish armed');
+  }
+  adminDb = getAdminFirestore();
+} catch (err: any) {
+  console.error('[FGOS] ⚠️ Firebase Admin init failed — server-side auto-publish disabled:', err?.message || err);
+}
+
+// ── Server-side auto-publish scheduler ───────────────────────────────────────
+// Two complementary mechanisms (both call runServerPublishCheck):
+//  1. A setInterval that runs every 60s while the process is alive.
+//  2. POST /api/autoblog/server-tick — called by a Cloud Scheduler job every
+//     minute so the instance is woken (and kept warm) even when idle, which
+//     also keeps the setInterval alive. The endpoint requires the tick secret.
+const SERVER_PUBLISH_INTERVAL_MS = 60_000;
+const PUBLISH_LOCK_TTL_MS = 2 * 60_000; // a stuck lock expires after 2 min
+
+/** Publish a single content item to its brand's WordPress. */
+async function publishItemToWordPress(item: any, brand: any): Promise<{ wpPostId: number; wpLiveUrl: string }> {
+  const cleanUrl = brand.wpUrl.replace(/\/+$/, '');
+  const authHeader = 'Basic ' + Buffer.from(`${brand.wpUsername}:${brand.wpAppPassword || ''}`).toString('base64');
+  const wpStatus = item.autoBlogOverrides?.wpStatus || 'publish';
+  const wpTemplate = item.autoBlogOverrides?.wpTemplate || 'elementor_header_footer';
+
+  const payload: any = {
+    title: item.title,
+    content: item.bodyHtml,
+    status: wpStatus,
+    slug: item.slug || undefined,
+    template: wpTemplate !== 'default' ? mapWpTemplate(wpTemplate) : undefined,
+  };
+
+  if (item.featuredMediaId) {
+    payload.featured_media = item.featuredMediaId;
+  }
+
+  const isUpdate = !!item.wpPostId;
+  const endpoint = isUpdate
+    ? `${cleanUrl}/wp-json/wp/v2/posts/${item.wpPostId}`
+    : `${cleanUrl}/wp-json/wp/v2/posts`;
+
+  const resp = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Authorization': authHeader, 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!resp.ok) {
+    const errBody = await resp.text();
+    throw new Error(`WordPress API ${resp.status}: ${errBody.slice(0, 200)}`);
+  }
+
+  const wpPost = await resp.json();
+  return { wpPostId: wpPost.id, wpLiveUrl: wpPost.link || `${cleanUrl}/?p=${wpPost.id}` };
+}
+
+/** One scheduler tick: find due Draft_Ready items in Firestore and publish them. */
+async function runServerPublishCheck(): Promise<{ published: number; errors: number }> {
+  if (!adminDb) return { published: 0, errors: 0 };
+  const now = Date.now();
+  const snap = await adminDb.collection('content_items')
+    .where('status', '==', 'Draft_Ready')
+    .limit(50)
+    .get();
+
+  const due: { ref: any; item: any }[] = [];
+  for (const doc of snap.docs) {
+    const item = doc.data();
+    const sched = item.scheduledPublishAt ? new Date(item.scheduledPublishAt).getTime() : null;
+    if (!sched || sched > now) continue; // not due yet
+    if (item.lastAutoPublishedAt) continue; // already published
+    if (item.publishLock && now - item.publishLock < PUBLISH_LOCK_TTL_MS) continue; // locked by another tick
+    due.push({ ref: doc.ref, item });
+  }
+
+  let published = 0;
+  let errors = 0;
+  for (const { ref, item } of due) {
+    // ATOMIC lock acquisition: only one tick (of possibly several concurrent
+    // ones — Cloud Scheduler + setInterval) may win the lock, so an item is
+    // never published twice. The transaction re-checks the item's state.
+    let acquired = false;
+    try {
+      await adminDb.runTransaction(async (tx) => {
+        const snap = await tx.get(ref);
+        const data = snap.data();
+        if (!data) return;
+        if (data.lastAutoPublishedAt) return; // already published
+        if (data.publishLock && now - data.publishLock < PUBLISH_LOCK_TTL_MS) return; // locked
+        tx.update(ref, { publishLock: now, updatedAt: new Date().toISOString() });
+        acquired = true;
+      });
+    } catch (err: any) {
+      console.error(`[AutoPublish] lock transaction failed for "${item.title}":`, err?.message || err);
+      continue;
+    }
+    if (!acquired) continue; // another tick won the lock
+
+    try {
+      const brandSnap = await adminDb.collection('brands').doc(item.brandId).get();
+      const brand = brandSnap.exists ? brandSnap.data() : null;
+      if (!brand || !brand.wpUrl || !brand.wpUsername) {
+        throw new Error('No valid brand connection');
+      }
+      const { wpPostId, wpLiveUrl } = await publishItemToWordPress(item, brand);
+      const publishedAt = new Date().toISOString();
+      await ref.update({
+        status: 'Published',
+        wpPostId,
+        wpLiveUrl,
+        lastAutoPublishedAt: publishedAt,
+        publishLock: AdminFieldValue.delete(),
+        lastAutoPublishError: AdminFieldValue.delete(),
+        updatedAt: publishedAt,
+      });
+      // Sync the blog register entry (if it exists) so the register shows the
+      // live status without any client being open.
+      const regRef = adminDb.collection('blog_register').doc(item.id);
+      const regSnap = await regRef.get();
+      if (regSnap.exists) {
+        await regRef.update({
+          status: 'Published',
+          datePublished: publishedAt,
+          wpPostId,
+          wpLiveUrl,
+          updatedAt: publishedAt,
+        });
+      }
+      published++;
+      console.log(`[AutoPublish] ✅ "${item.title}" → ${wpLiveUrl}`);
+
+      // Best-effort social package: if the item has no ready social content
+      // (generated before this feature shipped, or generation failed), produce
+      // it now from the published article. Never blocks or fails the publish.
+      if (item.socialContent?.status !== 'ready') {
+        try {
+          const social = await generateSocialPackage({
+            title: item.title,
+            articleHtml: item.bodyHtml,
+            brand,
+            primaryKeyword: item.primaryKeyword,
+            secondaryKeywords: item.secondaryKeywords,
+            blogNumber: item.blogNumber,
+            featuredImageUrl: item.featuredImageUrl,
+            callToAction: item.sheetContext?.callToAction,
+          });
+          await ref.update({
+            socialContent: {
+              ...social.social,
+              imageUrl: item.featuredImageUrl,
+              blogNumber: item.blogNumber,
+              articleTitle: item.title,
+              articleUrl: wpLiveUrl,
+              status: 'ready',
+              generatedAt: new Date().toISOString(),
+              model: social.model,
+              provider: social.provider,
+              fallback: social.fallback,
+              latencyMs: social.latencyMs,
+            },
+            updatedAt: new Date().toISOString(),
+          });
+          console.log(`[AutoPublish] 📱 Social package generated for "${item.title}"`);
+        } catch (socErr: any) {
+          console.error(`[AutoPublish] ⚠️ Social package failed for "${item.title}":`, socErr?.message || socErr);
+        }
+      }
+    } catch (err: any) {
+      const errMsg = err?.message || 'Publish failed';
+      await ref.update({
+        status: 'Error',
+        lastAutoPublishError: errMsg,
+        publishLock: AdminFieldValue.delete(),
+        updatedAt: new Date().toISOString(),
+      });
+      errors++;
+      console.error(`[AutoPublish] ❌ "${item.title}": ${errMsg}`);
+    }
+  }
+  return { published, errors };
+}
+
+function startServerScheduler() {
+  if (!adminDb) return;
+  setInterval(() => {
+    runServerPublishCheck().catch((err) => {
+      console.error('[AutoPublish] scheduler tick failed:', err?.message || err);
+    });
+  }, SERVER_PUBLISH_INTERVAL_MS);
+  console.log(`[FGOS] 🔄 Server-side auto-publish scheduler armed (every ${SERVER_PUBLISH_INTERVAL_MS / 1000}s)`);
+}
 
 const DEFAULT_WP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 const DEFAULT_WP_HEADERS = {
@@ -160,6 +369,143 @@ async function generateWithModelFallback(ai: any, params: any): Promise<{ text: 
 function safeCount(value: any): number {
   const n = parseInt(String(value ?? ''), 10);
   return Number.isFinite(n) ? n : 0;
+}
+
+// ── Social media content package (Facebook / Instagram / Google Business) ────
+// Generates the three platform texts from the final article in ONE model call
+// (consistent voice, one latency cost). Word counts are validated server-side
+// with one corrective retry. Best-effort by design: callers must never fail the
+// article generation because social failed — they store status 'error' instead.
+const SOCIAL_TARGETS = { facebook: 500, instagram: 150, googleBusiness: 90 };
+const SOCIAL_TOLERANCE = 0.2; // ±20% off-target triggers one corrective retry
+
+function countPlainWords(text: string = ''): number {
+  return text ? text.split(/\s+/).filter(Boolean).length : 0;
+}
+
+/** Parse the model's JSON output, tolerating code fences and a missing key. */
+function parseSocialJson(text: string): { facebook: string; instagram: string; googleBusiness: string } {
+  let t = (text || '').trim();
+  t = t.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
+  try {
+    const obj = JSON.parse(t);
+    return {
+      facebook: String(obj.facebook || '').trim(),
+      instagram: String(obj.instagram || '').trim(),
+      googleBusiness: String(obj.googleBusiness || obj.google_business || '').trim(),
+    };
+  } catch {
+    // Heuristic fallback: pull the three sections out of a non-JSON response.
+    const grab = (key: string): string => {
+      const m = t.match(new RegExp(`["']?${key}["']?\\s*[:=]\\s*["']([\\s\\S]*?)["']`, 'i'));
+      return m ? m[1].trim() : '';
+    };
+    const facebook = grab('facebook');
+    const instagram = grab('instagram');
+    const googleBusiness = grab('googleBusiness') || grab('google_business');
+    if (facebook || instagram || googleBusiness) return { facebook, instagram, googleBusiness };
+    throw new Error('Could not parse social package from model output');
+  }
+}
+
+/** Generate the Facebook / Instagram / Google Business Profile package for one
+ *  article in a single model call. Throws on failure — callers decide how to
+ *  degrade (best-effort). */
+async function generateSocialPackage(opts: {
+  title: string;
+  articleHtml?: string;
+  brand?: any;
+  primaryKeyword?: string;
+  secondaryKeywords?: string[];
+  blogNumber?: string;
+  featuredImageUrl?: string;
+  callToAction?: string;
+  byokKeys?: any;
+  modelPref?: any;
+}): Promise<{
+  social: { facebook: string; instagram: string; googleBusiness: string };
+  wordCounts: { facebook: number; instagram: number; googleBusiness: number };
+  model: string;
+  provider: string;
+  fallback: boolean;
+  latencyMs: number;
+}> {
+  const startedAt = Date.now();
+  const { title, brand, primaryKeyword, secondaryKeywords, blogNumber, featuredImageUrl, callToAction, byokKeys } = opts;
+
+  const aiApiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || byokKeys?.gemini;
+  const ai = aiApiKey ? new GoogleGenAI({ apiKey: aiApiKey, httpOptions: { headers: { 'User-Agent': 'aistudio-build' } } }) : null;
+  if (!ai) throw new Error('No Gemini API key available');
+
+  const bannedWordsText = brand?.bannedWords?.length
+    ? `STRICT BANNED WORDS (DO NOT USE ANY OF THESE): ${brand.bannedWords.join(', ')}.`
+    : '';
+  const ref = blogNumber || 'N/A';
+
+  const prompt = `You are the social media manager for "${brand?.name || 'the brand'}".
+Brand Voice & Tone Guidelines: ${brand?.voiceGuidelines || 'Professional, clear, engaging, authoritative'}.
+${bannedWordsText}
+BRITISH ENGLISH RULE: Write entirely in British English (colour, favourite, analyse, organise, centre, etc.). Never use American spellings.
+${grammarRulesPrompt(brand)}
+
+ARTICLE TITLE: "${title}"
+BLOG REFERENCE NUMBER: ${ref} — this MUST appear in every post (e.g. "Blog ${ref}") so the VA can match the social content to the article.
+PRIMARY KEYWORD: ${primaryKeyword || ''}
+${secondaryKeywords?.length ? `SECONDARY KEYWORDS: ${secondaryKeywords.join(', ')}` : ''}
+${callToAction ? `CALL TO ACTION: ${callToAction}` : ''}
+${featuredImageUrl ? `MAIN IMAGE: ${featuredImageUrl} — the accompanying image for these posts.` : ''}
+
+Write a complete social media content package for this article. Return ONLY valid JSON with exactly these three keys:
+
+{
+  "facebook": "~500 words. An engaging Facebook post: a strong hook as the first line, then 2-4 short paragraphs covering the article's key points, a clear call to action, a link to the blog (Blog ${ref}), and 2-4 relevant hashtags. Warm, conversational brand voice.",
+  "instagram": "~150 words. An Instagram caption: a hook, a concise summary of the article's most compelling points, 2-4 emojis used naturally, 5-8 relevant hashtags, a call to action, and a note that the image accompanies this post.",
+  "googleBusiness": "~90 words. A professional Google Business Profile update: the article's key benefit in a concise, trustworthy tone, a call to action, a link to the blog (Blog ${ref}). NO hashtags, NO emojis."
+}
+
+Rules:
+- Every post must reference the blog reference number (Blog ${ref}).
+- Never use banned words. Follow the brand voice and grammar rules exactly.
+- Do not invent facts not supported by the article. Keep health/nutritional claims qualified ("may support", "as part of a balanced diet").
+- No markdown code fences, no commentary — ONLY the JSON object.`;
+
+  // One corrective retry if word counts are badly off-target.
+  let lastErr: any;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const correction = attempt === 1
+        ? '\n\nIMPORTANT: Your previous output had incorrect word counts. Hit the targets exactly: facebook ~500 words, instagram ~150 words, googleBusiness ~90 words.'
+        : '';
+      const { text, model } = await generateWithModelFallback(ai, {
+        contents: [{ role: 'user', parts: [{ text: prompt + correction }] }],
+        generationConfig: { responseMimeType: 'application/json' },
+      });
+      const social = parseSocialJson(text);
+      const wordCounts = {
+        facebook: countPlainWords(social.facebook),
+        instagram: countPlainWords(social.instagram),
+        googleBusiness: countPlainWords(social.googleBusiness),
+      };
+      const offTarget = (key: keyof typeof SOCIAL_TARGETS) =>
+        Math.abs(wordCounts[key] - SOCIAL_TARGETS[key]) / SOCIAL_TARGETS[key] > SOCIAL_TOLERANCE;
+      if (attempt === 0 && (offTarget('facebook') || offTarget('instagram') || offTarget('googleBusiness'))) {
+        console.log(`[Social] Word counts off-target (${JSON.stringify(wordCounts)}) — retrying once…`);
+        continue;
+      }
+      return {
+        social,
+        wordCounts,
+        model,
+        provider: 'gemini',
+        fallback: false,
+        latencyMs: Date.now() - startedAt,
+      };
+    } catch (err: any) {
+      lastErr = err;
+      if (attempt === 0) continue;
+    }
+  }
+  throw lastErr || new Error('Social generation failed');
 }
 
 // ---------- Streamed generation helpers ----------
@@ -2460,6 +2806,38 @@ Return ONLY the JSON array — no markdown fences, no commentary, no surrounding
     }
     emit({ type: 'error', error: errorMessage });
     cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// API Endpoint: Generate Social Media Content Package
+// Produces the Facebook (~500w), Instagram (~150w) and Google Business Profile
+// (~90w) texts for one article in a single model call. Called automatically by
+// the AutoBlog pipeline after the article is generated, and by the editor's
+// "Generate social package" button (also used to regenerate after edits).
+// ---------------------------------------------------------------------------
+app.post('/api/ai/generate-social', async (req, res) => {
+  try {
+    const { title, articleHtml, brand, primaryKeyword, secondaryKeywords, blogNumber, featuredImageUrl, callToAction, byokKeys, modelPref } = req.body;
+    if (!title || typeof title !== 'string') {
+      return res.status(400).json({ success: false, error: 'Missing title.' });
+    }
+    const result = await generateSocialPackage({
+      title,
+      articleHtml,
+      brand,
+      primaryKeyword,
+      secondaryKeywords,
+      blogNumber,
+      featuredImageUrl,
+      callToAction,
+      byokKeys,
+      modelPref,
+    });
+    res.json({ success: true, ...result });
+  } catch (err: any) {
+    console.error('Error in /api/ai/generate-social:', err);
+    res.status(500).json({ success: false, error: err?.message || 'Social generation failed.' });
   }
 });
 
@@ -6537,7 +6915,9 @@ app.post('/api/autoblog/resync', async (req, res) => {
   }
 });
 
-/** Auto-publish endpoint — called by the client on an interval to check for due items. */
+/** Auto-publish endpoint — called by the client for manual "Publish Now" and
+ *  as a fallback. Idempotent: never double-publishes an item that the
+ *  server-side scheduler has already published. */
 app.post('/api/autoblog/check-publish', async (req, res) => {
   try {
     const { dueItems, brands } = req.body;
@@ -6556,6 +6936,11 @@ app.post('/api/autoblog/check-publish', async (req, res) => {
         results.push({ itemId: item.id, success: false, message: 'Not due yet — scheduled time not reached' });
         continue;
       }
+      // Idempotency: skip items the server-side scheduler already published.
+      if (item.lastAutoPublishedAt) {
+        results.push({ itemId: item.id, success: true, message: 'Already published', wpPostId: item.wpPostId });
+        continue;
+      }
       const brand = brands?.find((b: any) => b.id === (item.autoBlogOverrides?.brandId || item.brandId));
       if (!brand || !brand.wpUrl || !brand.wpUsername) {
         results.push({ itemId: item.id, success: false, message: 'No valid brand connection' });
@@ -6563,45 +6948,12 @@ app.post('/api/autoblog/check-publish', async (req, res) => {
       }
 
       try {
-        const cleanUrl = brand.wpUrl.replace(/\/+$/, '');
-        const authHeader = 'Basic ' + Buffer.from(`${brand.wpUsername}:${brand.wpAppPassword || ''}`).toString('base64');
-        const wpStatus = item.autoBlogOverrides?.wpStatus || 'publish';
-        const wpTemplate = item.autoBlogOverrides?.wpTemplate || 'elementor_header_footer';
-
-        const payload: any = {
-          title: item.title,
-          content: item.bodyHtml,
-          status: wpStatus,
-          slug: item.slug || undefined,
-          template: wpTemplate !== 'default' ? mapWpTemplate(wpTemplate) : undefined,
-        };
-
-        if (item.featuredMediaId) {
-          payload.featured_media = item.featuredMediaId;
-        }
-
-        const isUpdate = item.wpPostId;
-        const endpoint = isUpdate
-          ? `${cleanUrl}/wp-json/wp/v2/posts/${item.wpPostId}`
-          : `${cleanUrl}/wp-json/wp/v2/posts`;
-
-        const resp = await fetch(endpoint, {
-          method: isUpdate ? 'POST' : 'POST',
-          headers: { 'Authorization': authHeader, 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-
-        if (!resp.ok) {
-          const errBody = await resp.text();
-          throw new Error(`WordPress API ${resp.status}: ${errBody.slice(0, 200)}`);
-        }
-
-        const wpPost = await resp.json();
+        const { wpPostId } = await publishItemToWordPress(item, brand);
         results.push({
           itemId: item.id,
           success: true,
-          message: `Published as ${wpStatus}`,
-          wpPostId: wpPost.id,
+          message: `Published as ${item.autoBlogOverrides?.wpStatus || 'publish'}`,
+          wpPostId,
         });
       } catch (err: any) {
         results.push({
@@ -6620,6 +6972,32 @@ app.post('/api/autoblog/check-publish', async (req, res) => {
   } catch (err: any) {
     return res.status(500).json({ error: err?.message || 'Failed to check auto-publish queue' });
   }
+});
+
+/** Server-tick endpoint — called by Cloud Scheduler every minute so the
+ *  auto-publish check runs even when the app is closed and the instance is
+ *  cold. Requires the DGC_NOTIFY_SECRET header to prevent abuse. */
+app.post('/api/autoblog/server-tick', async (req, res) => {
+  const secret = req.headers['x-fgos-tick-secret'] || req.headers['x-dgc-notify-secret'];
+  if (!process.env.DGC_NOTIFY_SECRET || secret !== process.env.DGC_NOTIFY_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    const result = await runServerPublishCheck();
+    return res.json({ ok: true, ...result, at: new Date().toISOString() });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Server tick failed' });
+  }
+});
+
+/** Health/status endpoint — shows whether the server-side scheduler is armed. */
+app.get('/api/autoblog/server-status', (req, res) => {
+  res.json({
+    schedulerArmed: !!adminDb,
+    intervalMs: SERVER_PUBLISH_INTERVAL_MS,
+    lockTtlMs: PUBLISH_LOCK_TTL_MS,
+    at: new Date().toISOString(),
+  });
 });
 
 app.get('/api/export/sql', (req, res) => {
@@ -7159,18 +7537,25 @@ app.get('/api/crm/mailerlite/status', async (req, res) => {
       return res.status(400).json({ success: false, message: 'MailerLite token is not configured. Add it in Settings → API Keys → mailerlite.' });
     }
     const groups = await mailerLiteCall(token, 'GET', '/groups');
-    const flat = (Array.isArray(groups?.data) ? groups.data : []).map((g: any) => ({
-      id: String(g.id),
-      name: g.name,
-      total: g.active_count || 0,
-      active: g.active_count || 0,
-      unsubscribed: g.unsubscribed_count || 0,
-      bounced: g.bounced_count || 0,
-      unconfirmed: g.unconfirmed_count || 0,
-      sent: g.sent_count || 0,
-      opened: g.opens_count || 0,
-      clicked: g.clicks_count || 0,
-    }));
+    const flat = (Array.isArray(groups?.data) ? groups.data : []).map((g: any) => {
+      const active = g.active_count || 0;
+      const unconfirmed = g.unconfirmed_count || 0;
+      const unsubscribed = g.unsubscribed_count || 0;
+      const bounced = g.bounced_count || 0;
+      return {
+        id: String(g.id),
+        name: g.name,
+        // MailerLite's group object has no `total` field, so sum the status counts.
+        total: active + unconfirmed + unsubscribed + bounced,
+        active,
+        unsubscribed,
+        bounced,
+        unconfirmed,
+        sent: g.sent_count || 0,
+        opened: g.opens_count || 0,
+        clicked: g.clicks_count || 0,
+      };
+    });
     return res.json({ success: true, groups: flat, count: flat.length });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err.message || 'Could not reach MailerLite.', status: err.status });
@@ -7508,6 +7893,398 @@ app.get('/api/crm/mailerlite/webhook', (req, res) => {
 });
 
 // ==========================================
+// 3.5 PRODUCT MANAGEMENT (WC v3 CRUD)
+// ==========================================
+// Full CRUD for WooCommerce products, categories, and attributes via WC REST API v3.
+// All endpoints accept { wpUrl, key, secret } to authenticate against the brand's store.
+// Prefixed /api/wc-mgmt/ to avoid collision with existing /api/wp/products.
+
+/** Extract WC credentials from body (POST/PUT) or query (GET/DELETE). */
+function wcCreds(req: express.Request): { wpUrl: string; key: string; secret: string } | null {
+  const wpUrl = String((req.body?.wpUrl ?? req.query?.wpUrl) || '').trim().replace(/\/+$/, '');
+  const key = String((req.body?.key ?? req.query?.key) || '').trim();
+  const secret = String((req.body?.secret ?? req.query?.secret) || '').trim();
+  if (!wpUrl || !key || !secret) return null;
+  return { wpUrl, key, secret };
+}
+
+/** Generic WC v3 proxy — forwards to the WooCommerce REST API and relays the response. */
+async function wcProxy(
+  creds: { wpUrl: string; key: string; secret: string },
+  method: string,
+  path: string,
+  body?: any,
+): Promise<{ status: number; data: any }> {
+  const url = wcAuthUrl(creds.wpUrl, creds.key, creds.secret, path);
+  const opts: RequestInit = {
+    method,
+    headers: { ...DEFAULT_WP_HEADERS, 'Content-Type': 'application/json' },
+  };
+  if (body && method !== 'GET' && method !== 'HEAD') {
+    opts.body = JSON.stringify(body);
+  }
+  const r = await fetch(url, opts);
+  let data: any = null;
+  const text = await r.text();
+  try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+  return { status: r.status, data };
+}
+
+// ── Products ──────────────────────────────────────────────────────────────────
+
+/** GET /api/wc-mgmt/products — list products (search, category filter, pagination, status). */
+app.get('/api/wc-mgmt/products', async (req, res) => {
+  try {
+    const creds = wcCreds(req);
+    if (!creds) return res.status(400).json({ success: false, message: 'wpUrl, key, and secret are required.' });
+    const perPage = Math.min(Math.max(Number(req.query.per_page) || 50, 1), 100);
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const search = String(req.query.search || '').trim();
+    const category = String(req.query.category || '').trim();
+    const status = String(req.query.status || '').trim();
+    let qs = `?per_page=${perPage}&page=${page}`;
+    if (search) qs += `&search=${encodeURIComponent(search)}`;
+    if (category) qs += `&category=${encodeURIComponent(category)}`;
+    if (status) qs += `&status=${encodeURIComponent(status)}`;
+    const r = await wcProxy(creds, 'GET', `/products${qs}`);
+    // WC v3 returns an array directly; headers come from response
+    const items = Array.isArray(r.data) ? r.data.map((p: any) => ({
+      id: p.id,
+      name: p.name,
+      slug: p.slug,
+      status: p.status,
+      type: p.type,
+      permalink: p.permalink,
+      description: p.description || '',
+      short_description: p.short_description || '',
+      price: p.price || '',
+      regular_price: p.regular_price || '',
+      sale_price: p.sale_price || '',
+      on_sale: p.on_sale,
+      categories: (p.categories || []).map((c: any) => ({ id: c.id, name: c.name, slug: c.slug })),
+      images: (p.images || []).map((img: any) => ({ id: img.id, src: img.src, name: img.name, alt: img.alt })),
+      attributes: (p.attributes || []).map((a: any) => ({
+        id: a.id,
+        name: a.name,
+        position: a.position,
+        visible: a.visible,
+        variation: a.variation,
+        options: a.options || [],
+      })),
+      meta_data: (p.meta_data || []).filter((m: any) => !m.key.startsWith('_')),
+      external_url: p.external_url || '',
+      button_text: p.button_text || '',
+      sku: p.sku || '',
+      stock_status: p.stock_status || '',
+      date_created: p.date_created,
+      date_modified: p.date_modified,
+    })) : [];
+    // For headers, re-fetch from a raw response
+    const rawUrl = wcAuthUrl(creds.wpUrl, creds.key, creds.secret, `/products${qs}`);
+    const rawR = await fetch(rawUrl, { headers: DEFAULT_WP_HEADERS });
+    const wpTotal = Number(rawR.headers.get('x-wp-total') || items.length);
+    const wpTotalPages = Number(rawR.headers.get('x-wp-totalpages') || 1);
+    return res.json({ success: true, products: items, total: wpTotal, totalPages: wpTotalPages, page, perPage });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not list products.' });
+  }
+});
+
+/** GET /api/wc-mgmt/products/:id — get single product with full details. */
+app.get('/api/wc-mgmt/products/:id', async (req, res) => {
+  try {
+    const creds = wcCreds(req);
+    if (!creds) return res.status(400).json({ success: false, message: 'wpUrl, key, and secret are required.' });
+    const r = await wcProxy(creds, 'GET', `/products/${req.params.id}`);
+    if (r.status === 404) return res.status(404).json({ success: false, message: 'Product not found.' });
+    if (r.status !== 200) return res.status(r.status).json({ success: false, message: r.data?.message || `WC API error ${r.status}` });
+    return res.json({ success: true, product: r.data });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not fetch product.' });
+  }
+});
+
+/** POST /api/wc-mgmt/products — create a new product. */
+app.post('/api/wc-mgmt/products', async (req, res) => {
+  try {
+    const creds = wcCreds(req);
+    if (!creds) return res.status(400).json({ success: false, message: 'wpUrl, key, and secret are required.' });
+    const payload = { ...req.body };
+    delete payload.wpUrl; delete payload.key; delete payload.secret;
+    const r = await wcProxy(creds, 'POST', '/products', payload);
+    if (r.status >= 400) return res.status(r.status).json({ success: false, message: r.data?.message || `WC API error ${r.status}`, data: r.data });
+    return res.json({ success: true, product: r.data });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not create product.' });
+  }
+});
+
+/** PUT /api/wc-mgmt/products/:id — update an existing product. */
+app.put('/api/wc-mgmt/products/:id', async (req, res) => {
+  try {
+    const creds = wcCreds(req);
+    if (!creds) return res.status(400).json({ success: false, message: 'wpUrl, key, and secret are required.' });
+    const payload = { ...req.body };
+    delete payload.wpUrl; delete payload.key; delete payload.secret;
+    const r = await wcProxy(creds, 'PUT', `/products/${req.params.id}`, payload);
+    if (r.status >= 400) return res.status(r.status).json({ success: false, message: r.data?.message || `WC API error ${r.status}`, data: r.data });
+    return res.json({ success: true, product: r.data });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not update product.' });
+  }
+});
+
+/** DELETE /api/wc-mgmt/products/:id — delete a product. */
+app.delete('/api/wc-mgmt/products/:id', async (req, res) => {
+  try {
+    const creds = wcCreds(req);
+    if (!creds) return res.status(400).json({ success: false, message: 'wpUrl, key, and secret are required.' });
+    const force = req.query.force === 'true' || req.query.force === '1';
+    const r = await wcProxy(creds, 'DELETE', `/products/${req.params.id}?force=${force}`);
+    if (r.status >= 400) return res.status(r.status).json({ success: false, message: r.data?.message || `WC API error ${r.status}` });
+    return res.json({ success: true, deleted: true, id: Number(req.params.id) });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not delete product.' });
+  }
+});
+
+// ── Categories ────────────────────────────────────────────────────────────────
+
+/** GET /api/wc-mgmt/categories — list product categories. */
+app.get('/api/wc-mgmt/categories', async (req, res) => {
+  try {
+    const creds = wcCreds(req);
+    if (!creds) return res.status(400).json({ success: false, message: 'wpUrl, key, and secret are required.' });
+    const perPage = Math.min(Math.max(Number(req.query.per_page) || 100, 1), 100);
+    const r = await wcProxy(creds, 'GET', `/products/categories?per_page=${perPage}`);
+    const items = Array.isArray(r.data) ? r.data.map((c: any) => ({
+      id: c.id, name: c.name, slug: c.slug, parent: c.parent,
+      description: c.description || '', display: c.display || 'default',
+      image: c.image || null, count: c.count || 0,
+    })) : [];
+    return res.json({ success: true, categories: items });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not list categories.' });
+  }
+});
+
+/** POST /api/wc-mgmt/categories — create a category. */
+app.post('/api/wc-mgmt/categories', async (req, res) => {
+  try {
+    const creds = wcCreds(req);
+    if (!creds) return res.status(400).json({ success: false, message: 'wpUrl, key, and secret are required.' });
+    const payload = { ...req.body };
+    delete payload.wpUrl; delete payload.key; delete payload.secret;
+    const r = await wcProxy(creds, 'POST', '/products/categories', payload);
+    if (r.status >= 400) return res.status(r.status).json({ success: false, message: r.data?.message || `WC API error ${r.status}`, data: r.data });
+    return res.json({ success: true, category: r.data });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not create category.' });
+  }
+});
+
+/** PUT /api/wc-mgmt/categories/:id — update a category. */
+app.put('/api/wc-mgmt/categories/:id', async (req, res) => {
+  try {
+    const creds = wcCreds(req);
+    if (!creds) return res.status(400).json({ success: false, message: 'wpUrl, key, and secret are required.' });
+    const payload = { ...req.body };
+    delete payload.wpUrl; delete payload.key; delete payload.secret;
+    const r = await wcProxy(creds, 'PUT', `/products/categories/${req.params.id}`, payload);
+    if (r.status >= 400) return res.status(r.status).json({ success: false, message: r.data?.message || `WC API error ${r.status}`, data: r.data });
+    return res.json({ success: true, category: r.data });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not update category.' });
+  }
+});
+
+/** DELETE /api/wc-mgmt/categories/:id — delete a category. */
+app.delete('/api/wc-mgmt/categories/:id', async (req, res) => {
+  try {
+    const creds = wcCreds(req);
+    if (!creds) return res.status(400).json({ success: false, message: 'wpUrl, key, and secret are required.' });
+    const force = req.query.force === 'true' || req.query.force === '1';
+    const r = await wcProxy(creds, 'DELETE', `/products/categories/${req.params.id}?force=${force}`);
+    if (r.status >= 400) return res.status(r.status).json({ success: false, message: r.data?.message || `WC API error ${r.status}` });
+    return res.json({ success: true, deleted: true, id: Number(req.params.id) });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not delete category.' });
+  }
+});
+
+// ── Attributes ────────────────────────────────────────────────────────────────
+
+/** GET /api/wc-mgmt/attributes — list global product attributes. */
+app.get('/api/wc-mgmt/attributes', async (req, res) => {
+  try {
+    const creds = wcCreds(req);
+    if (!creds) return res.status(400).json({ success: false, message: 'wpUrl, key, and secret are required.' });
+    const r = await wcProxy(creds, 'GET', '/products/attributes');
+    const items = Array.isArray(r.data) ? r.data.map((a: any) => ({
+      id: a.id, name: a.name, slug: a.slug, type: a.type,
+      order_by: a.order_by, has_archives: a.has_archives,
+    })) : [];
+    return res.json({ success: true, attributes: items });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not list attributes.' });
+  }
+});
+
+/** POST /api/wc-mgmt/attributes — create an attribute. */
+app.post('/api/wc-mgmt/attributes', async (req, res) => {
+  try {
+    const creds = wcCreds(req);
+    if (!creds) return res.status(400).json({ success: false, message: 'wpUrl, key, and secret are required.' });
+    const payload = { ...req.body };
+    delete payload.wpUrl; delete payload.key; delete payload.secret;
+    const r = await wcProxy(creds, 'POST', '/products/attributes', payload);
+    if (r.status >= 400) return res.status(r.status).json({ success: false, message: r.data?.message || `WC API error ${r.status}`, data: r.data });
+    return res.json({ success: true, attribute: r.data });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not create attribute.' });
+  }
+});
+
+/** PUT /api/wc-mgmt/attributes/:id — update an attribute. */
+app.put('/api/wc-mgmt/attributes/:id', async (req, res) => {
+  try {
+    const creds = wcCreds(req);
+    if (!creds) return res.status(400).json({ success: false, message: 'wpUrl, key, and secret are required.' });
+    const payload = { ...req.body };
+    delete payload.wpUrl; delete payload.key; delete payload.secret;
+    const r = await wcProxy(creds, 'PUT', `/products/attributes/${req.params.id}`, payload);
+    if (r.status >= 400) return res.status(r.status).json({ success: false, message: r.data?.message || `WC API error ${r.status}`, data: r.data });
+    return res.json({ success: true, attribute: r.data });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not update attribute.' });
+  }
+});
+
+/** DELETE /api/wc-mgmt/attributes/:id — delete an attribute. */
+app.delete('/api/wc-mgmt/attributes/:id', async (req, res) => {
+  try {
+    const creds = wcCreds(req);
+    if (!creds) return res.status(400).json({ success: false, message: 'wpUrl, key, and secret are required.' });
+    const force = req.query.force === 'true' || req.query.force === '1';
+    const r = await wcProxy(creds, 'DELETE', `/products/attributes/${req.params.id}?force=${force}`);
+    if (r.status >= 400) return res.status(r.status).json({ success: false, message: r.data?.message || `WC API error ${r.status}` });
+    return res.json({ success: true, deleted: true, id: Number(req.params.id) });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not delete attribute.' });
+  }
+});
+
+// ── Attribute Terms ───────────────────────────────────────────────────────────
+
+/** GET /api/wc-mgmt/attributes/:id/terms — list terms for an attribute. */
+app.get('/api/wc-mgmt/attributes/:id/terms', async (req, res) => {
+  try {
+    const creds = wcCreds(req);
+    if (!creds) return res.status(400).json({ success: false, message: 'wpUrl, key, and secret are required.' });
+    const r = await wcProxy(creds, 'GET', `/products/attributes/${req.params.id}/terms`);
+    const items = Array.isArray(r.data) ? r.data.map((t: any) => ({
+      id: t.id, name: t.name, slug: t.slug, description: t.description || '',
+      menu_order: t.menu_order, count: t.count || 0,
+    })) : [];
+    return res.json({ success: true, terms: items });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not list attribute terms.' });
+  }
+});
+
+/** POST /api/wc-mgmt/attributes/:id/terms — create a term for an attribute. */
+app.post('/api/wc-mgmt/attributes/:id/terms', async (req, res) => {
+  try {
+    const creds = wcCreds(req);
+    if (!creds) return res.status(400).json({ success: false, message: 'wpUrl, key, and secret are required.' });
+    const payload = { ...req.body };
+    delete payload.wpUrl; delete payload.key; delete payload.secret;
+    const r = await wcProxy(creds, 'POST', `/products/attributes/${req.params.id}/terms`, payload);
+    if (r.status >= 400) return res.status(r.status).json({ success: false, message: r.data?.message || `WC API error ${r.status}`, data: r.data });
+    return res.json({ success: true, term: r.data });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not create attribute term.' });
+  }
+});
+
+/** PUT /api/wc-mgmt/attributes/:id/terms/:termId — update a term. */
+app.put('/api/wc-mgmt/attributes/:id/terms/:termId', async (req, res) => {
+  try {
+    const creds = wcCreds(req);
+    if (!creds) return res.status(400).json({ success: false, message: 'wpUrl, key, and secret are required.' });
+    const payload = { ...req.body };
+    delete payload.wpUrl; delete payload.key; delete payload.secret;
+    const r = await wcProxy(creds, 'PUT', `/products/attributes/${req.params.id}/terms/${req.params.termId}`, payload);
+    if (r.status >= 400) return res.status(r.status).json({ success: false, message: r.data?.message || `WC API error ${r.status}`, data: r.data });
+    return res.json({ success: true, term: r.data });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not update attribute term.' });
+  }
+});
+
+/** DELETE /api/wc-mgmt/attributes/:id/terms/:termId — delete a term. */
+app.delete('/api/wc-mgmt/attributes/:id/terms/:termId', async (req, res) => {
+  try {
+    const creds = wcCreds(req);
+    if (!creds) return res.status(400).json({ success: false, message: 'wpUrl, key, and secret are required.' });
+    const force = req.query.force === 'true' || req.query.force === '1';
+    const r = await wcProxy(creds, 'DELETE', `/products/attributes/${req.params.id}/terms/${req.params.termId}?force=${force}`);
+    if (r.status >= 400) return res.status(r.status).json({ success: false, message: r.data?.message || `WC API error ${r.status}` });
+    return res.json({ success: true, deleted: true, id: Number(req.params.termId) });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not delete attribute term.' });
+  }
+});
+
+// ── Media Upload (product images) ─────────────────────────────────────────────
+
+/** POST /api/wc-mgmt/upload-image — upload an image to WordPress media library.
+ *  Accepts multipart/form-data with fields: file (binary), wpUrl, key, secret.
+ *  Returns the media item ID and URL for use in product.images[]. */
+app.post('/api/wc-mgmt/upload-image', async (req, res) => {
+  try {
+    // This endpoint expects raw binary — express.raw() middleware handles it.
+    const creds = wcCreds(req);
+    if (!creds) return res.status(400).json({ success: false, message: 'wpUrl, key, and secret are required.' });
+    // For now, support passing a URL to download and attach (simpler than multipart)
+    const imageUrl = String(req.body?.image_url || '').trim();
+    if (!imageUrl) return res.status(400).json({ success: false, message: 'image_url is required.' });
+    // Download the image
+    const imgRes = await fetch(imageUrl);
+    if (!imgRes.ok) return res.status(400).json({ success: false, message: `Could not download image: ${imgRes.status}` });
+    const contentType = imgRes.headers.get('content-type') || 'image/jpeg';
+    const ext = contentType.includes('png') ? 'png' : contentType.includes('webp') ? 'webp' : 'jpg';
+    const filename = `product-${Date.now()}.${ext}`;
+    // Upload via WC v3 system_status (no, we need wp/v2/media)
+    const mediaUrl = creds.wpUrl + '/wp-json/wp/v2/media';
+    const sep = mediaUrl.includes('?') ? '&' : '?';
+    const authUrl = `${mediaUrl}${sep}consumer_key=${encodeURIComponent(creds.key)}&consumer_secret=${encodeURIComponent(creds.secret)}`;
+    const buf = Buffer.from(await imgRes.arrayBuffer());
+    const uploadRes = await fetch(authUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Disposition': `attachment; filename="${filename}"`,
+        'Content-Type': contentType,
+      },
+      body: buf,
+    });
+    const uploadData = await uploadRes.json();
+    if (uploadRes.status >= 400) return res.status(uploadRes.status).json({ success: false, message: uploadData?.message || 'Upload failed', data: uploadData });
+    return res.json({
+      success: true,
+      media: {
+        id: uploadData.id,
+        src: uploadData.source_url,
+        name: uploadData.title?.rendered || filename,
+        alt: uploadData.alt_text || '',
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err.message || 'Could not upload image.' });
+  }
+});
+
+// ==========================================
 // 4. SERVER BOOTSTRAP & VITE MIDDLEWARE
 // ==========================================
 
@@ -7546,6 +8323,7 @@ async function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`FGOS (Fresh Green Operating System) running on http://0.0.0.0:${PORT}`);
+    startServerScheduler();
   });
 }
 

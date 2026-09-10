@@ -2,7 +2,7 @@ import { fetchGlobalKeys, fetchAiPref, saveAiPref, AI_MODEL_OPTIONS } from "../l
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import ReactQuill from 'react-quill-new';
 import 'react-quill-new/dist/quill.snow.css';
-import { ContentItem, Brand, VisualBlock, VisualBlockType, PipelineStatus, GenerationLogEntry, AiModelPref, BlockTune, CardItem, CarouselSlide } from '../types';
+import { ContentItem, Brand, VisualBlock, VisualBlockType, PipelineStatus, GenerationLogEntry, AiModelPref, BlockTune, CardItem, CarouselSlide, SocialContentPackage } from '../types';
 import { figureHtmlFor as figureHtmlForLib, rebuildArticleHtml, syncImageMarkers } from '../lib/blogHtml';
 import { tipLabel } from '../lib/tipLabel';
 import { countWords, deriveWpState, syncItemToWp, refreshWpState } from '../lib/wpSync';
@@ -45,7 +45,8 @@ import {
   Upload,
   GripVertical,
   SlidersHorizontal,
-  Calendar
+  Calendar,
+  Share2
 } from 'lucide-react';
 
 // Blog production workflow — the order every post moves through
@@ -102,6 +103,109 @@ interface ZenEditorProps {
   items?: ContentItem[];
 }
 
+// Social panel — tabs for Facebook / Instagram / Google Business with editable
+// textareas, live word counts vs targets, per-platform Copy, Copy all with
+// === separators, and Regenerate.
+const SOCIAL_TARGETS: Record<'facebook' | 'instagram' | 'googleBusiness', number> = {
+  facebook: 500,
+  instagram: 150,
+  googleBusiness: 90,
+};
+const SOCIAL_LABELS: Record<'facebook' | 'instagram' | 'googleBusiness', string> = {
+  facebook: 'Facebook',
+  instagram: 'Instagram',
+  googleBusiness: 'Google Business',
+};
+
+function SocialPanel({ social, onEdit, onRegenerate, isRegenerating }: {
+  social: SocialContentPackage;
+  onEdit: (field: 'facebook' | 'instagram' | 'googleBusiness', value: string) => void;
+  onRegenerate: () => void;
+  isRegenerating: boolean;
+}) {
+  const [tab, setTab] = useState<'facebook' | 'instagram' | 'googleBusiness'>('facebook');
+  const wordCount = (t: string) => (t.trim() ? t.trim().split(/\s+/).length : 0);
+  const target = SOCIAL_TARGETS[tab];
+  const count = wordCount(social[tab] || '');
+  const withinTolerance = Math.abs(count - target) <= target * 0.2;
+
+  const copy = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const ta = document.getElementById('zen-social-ta') as HTMLTextAreaElement | null;
+      ta?.select();
+    }
+  };
+
+  return (
+    <div>
+      {/* Header meta */}
+      <div className="flex items-center gap-3 flex-wrap mb-4">
+        {social.blogNumber && (
+          <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-violet-100 text-violet-700">{social.blogNumber}</span>
+        )}
+        {social.imageUrl && (
+          <img src={social.imageUrl} alt="Main image" className="w-9 h-9 rounded-lg object-cover border border-slate-200" />
+        )}
+        {social.model && <span className="text-[10px] text-slate-400 ml-auto">{social.provider} · {social.model}</span>}
+      </div>
+
+      {/* Tabs */}
+      <div className="flex border-b border-slate-100 mb-4">
+        {(Object.keys(SOCIAL_LABELS) as ('facebook' | 'instagram' | 'googleBusiness')[]).map((k) => (
+          <button
+            key={k}
+            onClick={() => setTab(k)}
+            className={`px-4 py-2 text-xs font-bold transition ${tab === k ? 'text-violet-700 border-b-2 border-violet-600' : 'text-slate-500 hover:text-slate-700'}`}
+          >
+            {SOCIAL_LABELS[k]}
+            <span className={`ml-1.5 text-[10px] font-semibold ${Math.abs(wordCount(social[k] || '') - SOCIAL_TARGETS[k]) <= SOCIAL_TARGETS[k] * 0.2 ? 'text-emerald-600' : 'text-amber-600'}`}>
+              {wordCount(social[k] || '')}w
+            </span>
+          </button>
+        ))}
+      </div>
+
+      {/* Editor */}
+      <textarea
+        id="zen-social-ta"
+        value={social[tab] || ''}
+        onChange={(e) => onEdit(tab, e.target.value)}
+        rows={12}
+        className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-xs leading-relaxed text-slate-800 focus:ring-2 focus:ring-violet-500 outline-none resize-y font-mono"
+      />
+      <div className="flex items-center gap-2 mt-2 flex-wrap">
+        <span className={`text-[11px] font-bold ${withinTolerance ? 'text-emerald-600' : 'text-amber-600'}`}>
+          {count} / {target} words {withinTolerance ? '✓' : '(target ±20%)'}
+        </span>
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            onClick={() => copy(social[tab] || '')}
+            className="px-3 py-1.5 bg-white border border-slate-200 text-slate-600 rounded-lg text-xs font-semibold hover:bg-slate-50 transition"
+          >
+            Copy
+          </button>
+          <button
+            onClick={() => copy(`=== Facebook ===\n\n${social.facebook || ''}\n\n=== Instagram ===\n\n${social.instagram || ''}\n\n=== Google Business ===\n\n${social.googleBusiness || ''}`)}
+            className="px-3 py-1.5 bg-white border border-slate-200 text-slate-600 rounded-lg text-xs font-semibold hover:bg-slate-50 transition"
+          >
+            Copy all
+          </button>
+          <button
+            onClick={onRegenerate}
+            disabled={isRegenerating}
+            className="px-3 py-1.5 bg-white border border-slate-200 text-slate-600 rounded-lg text-xs font-semibold hover:bg-slate-50 transition flex items-center gap-1 disabled:opacity-50"
+          >
+            {isRegenerating ? <RefreshCw className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+            Regenerate
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export const ZenEditor: React.FC<ZenEditorProps> = ({
   item,
   brand,
@@ -115,7 +219,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
   const [newDraftType, setNewDraftType] = useState<'post' | 'page'>('post');
   const [applyHumanization, setApplyHumanization] = useState(true);
   // Workflow steps: Brief -> Write -> SEO -> Visuals -> Publish
-  const [stepTab, setStepTab] = useState<'brief' | 'write' | 'seo' | 'visuals' | 'publish'>('write');
+  const [stepTab, setStepTab] = useState<'brief' | 'write' | 'seo' | 'visuals' | 'social' | 'publish'>('write');
   const [writeMode, setWriteMode] = useState<'visual' | 'html'>('visual');
   // User-stated block hints for Auto-Write: which content blocks the engine
   // should include (image wraps, product showcases, CTA bands, cards, quotes,
@@ -123,6 +227,11 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
   // rest; these take priority.
   const [requestedBlocks, setRequestedBlocks] = useState<string[]>([]);
   const [isGeneratingAi, setIsGeneratingAi] = useState(false);
+  // Auto-generate the social media package (Facebook/Instagram/Google Business)
+  // right after Auto-Write completes. Default ON — the VA checks & corrects.
+  const [autoSocial, setAutoSocial] = useState(true);
+  const [socialGenerating, setSocialGenerating] = useState(false);
+  const [socialError, setSocialError] = useState<string | null>(null);
   // Live generation transparency: percentage, phase message, the model's text
   // as it writes, heartbeat info, plus the full generation blueprint (rules,
   // parameters) and a live history timeline of every step taken.
@@ -381,6 +490,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
       let streamedText = '';
       let completed = false;
       let streamError: string | null = null;
+      let doneData: any = null;
 
       const handleEvent = (evt: any) => {
         if (evt.type === 'generationInfo') {
@@ -476,8 +586,9 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
           streamError = evt.error || 'Generation failed.';
         } else if (evt.type === 'done') {
           completed = true;
-          applyGeneratedArticle(evt.data || {});
-          const d = evt.data || {};
+          doneData = evt.data || {};
+          applyGeneratedArticle(doneData);
+          const d = doneData;
           logGeneration({
             at: new Date().toISOString(),
             action: 'Auto-Write',
@@ -515,6 +626,17 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
       if (!completed && !abort.signal.aborted) {
         throw new Error('Connection closed before generation finished. Please retry.');
       }
+
+      // Auto-generate the social media package from the finished article
+      // (toggle ON by default). Best-effort — never fails the article.
+      if (completed && autoSocial && doneData && !abort.signal.aborted) {
+        setGenState((prev) => (prev ? { ...prev, phase: 'Writing the social media package (Facebook, Instagram, Google Business)…', percent: 99, stalled: false } : prev));
+        await handleGenerateSocial({
+          bodyHtml: doneData.bodyHtml || doneData.articleHtml,
+          featuredImageUrl: doneData.featuredImageUrl || doneData.heroImg,
+          title: doneData.articleTitle || editingItem.title,
+        });
+      }
     } catch (e: any) {
       if (abort.signal.aborted) {
         setAiError('Generation cancelled.');
@@ -534,6 +656,60 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
       setIsGeneratingAi(false);
       setGenState(null);
       abortRef.current = null;
+    }
+  };
+
+  // Generate (or regenerate) the social media content package for the current
+  // draft: Facebook (~500w), Instagram (~150w), Google Business Profile (~90w).
+  // Best-effort — a failure sets socialContent.status = 'error' with a retry.
+  const handleGenerateSocial = async (source?: { bodyHtml?: string; featuredImageUrl?: string; title?: string }) => {
+    if (!editingItem) return;
+    setSocialGenerating(true);
+    setSocialError(null);
+    try {
+      const byokKeys = await fetchGlobalKeys();
+      const bodyHtml = source?.bodyHtml || editingItem.bodyHtml || '';
+      const featuredImageUrl = source?.featuredImageUrl || editingItem.featuredImageUrl;
+      const title = source?.title || editingItem.initialPrompt || editingItem.title;
+      const socResp = await fetch('/api/ai/generate-social', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title,
+          articleHtml: bodyHtml,
+          brand,
+          primaryKeyword: editingItem.primaryKeyword,
+          secondaryKeywords: editingItem.secondaryKeywords,
+          blogNumber: editingItem.blogNumber,
+          featuredImageUrl,
+          callToAction: editingItem.sheetContext?.callToAction,
+          byokKeys,
+        }),
+      });
+      const socData = await socResp.json();
+      if (socData.success && socData.social) {
+        const pkg: SocialContentPackage = {
+          ...socData.social,
+          imageUrl: featuredImageUrl,
+          blogNumber: editingItem.blogNumber,
+          articleTitle: editingItem.title,
+          status: 'ready',
+          generatedAt: new Date().toISOString(),
+          model: socData.model,
+          provider: socData.provider,
+          fallback: socData.fallback,
+          latencyMs: socData.latencyMs,
+        };
+        setEditingItem((prev) => (prev ? { ...prev, socialContent: pkg, updatedAt: new Date().toISOString() } : prev));
+      } else {
+        setSocialError(socData.error || 'Social generation failed.');
+        setEditingItem((prev) => (prev ? { ...prev, socialContent: { facebook: '', instagram: '', googleBusiness: '', status: 'error', error: socData.error || 'Social generation failed.' }, updatedAt: new Date().toISOString() } : prev));
+      }
+    } catch (e: any) {
+      setSocialError(e?.message || 'Social generation failed.');
+      setEditingItem((prev) => (prev ? { ...prev, socialContent: { facebook: '', instagram: '', googleBusiness: '', status: 'error', error: e?.message || 'Social generation failed.' }, updatedAt: new Date().toISOString() } : prev));
+    } finally {
+      setSocialGenerating(false);
     }
   };
 
@@ -1792,6 +1968,18 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
             </span>
           )}
         </button>
+        <button
+          onClick={() => setStepTab('social')}
+          className={`flex-1 min-w-[100px] px-3 py-2.5 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 whitespace-nowrap transition ${
+            stepTab === 'social' ? 'text-white shadow' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'
+          }`}
+          style={stepTab === 'social' ? { backgroundColor: brandColor(brand) } : undefined}
+        >
+          <Share2 className="w-4 h-4" /> Social
+          {editingItem.socialContent?.status === 'ready' && (
+            <span className={`w-1.5 h-1.5 rounded-full ${stepTab === 'social' ? 'bg-emerald-300' : 'bg-emerald-500'}`} />
+          )}
+        </button>
       </div>
 
       {/* Generation history — sticky, top-right below the tabs, visible on every step */}
@@ -2247,6 +2435,27 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                 <Layout className="w-3.5 h-3.5" />
                 Rebuild styled article
               </button>
+              <button
+                onClick={() => handleGenerateSocial()}
+                disabled={isGeneratingAi || socialGenerating || countWords(editingItem?.bodyHtml || '') < 50}
+                title="Generate the social media package (Facebook ~500w, Instagram ~150w, Google Business ~90w) from this article — linked to the same blog number and main image. Run again after editing the article to refresh it."
+                className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-slate-600 text-xs font-semibold hover:bg-slate-50 transition shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Share2 className="w-3.5 h-3.5" />
+                {socialGenerating ? 'Writing social package…' : editingItem?.socialContent?.status === 'ready' ? 'Regenerate social' : 'Social package'}
+              </button>
+              <label
+                title="Automatically generate the social media package after every Auto-Write."
+                className="flex items-center gap-1.5 px-2 py-2.5 text-[11px] font-semibold text-slate-500 cursor-pointer select-none"
+              >
+                <input
+                  type="checkbox"
+                  checked={autoSocial}
+                  onChange={(e) => setAutoSocial(e.target.checked)}
+                  className="accent-indigo-600 w-3.5 h-3.5"
+                />
+                Auto social
+              </label>
               <button
                 onClick={handleGenerateWithGemini}
                 disabled={isGeneratingAi}
@@ -3188,6 +3397,70 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                   </div>
                 </div>
               </div>
+            </div>
+          )}
+
+          {/* Step: Social — Facebook / Instagram / Google Business package */}
+          {stepTab === 'social' && (
+            <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
+              <div className="flex items-start justify-between gap-3 flex-wrap mb-5">
+                <div>
+                  <h3 className="font-bold text-slate-900 text-lg flex items-center gap-2">
+                    <Share2 className="w-5 h-5 text-violet-500" /> Social Media Package
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Facebook (~500w), Instagram (~150w) and Google Business Profile (~90w) posts generated from this article — linked to the same blog number and main image so the VA can match them.
+                  </p>
+                </div>
+                {editingItem.socialContent?.status === 'ready' && (
+                  <span className="text-xs font-bold px-3 py-1.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                    Ready ✓
+                  </span>
+                )}
+              </div>
+
+              {socialError && (
+                <div className="mb-4 bg-rose-50 border border-rose-200 text-rose-700 text-xs font-medium rounded-2xl p-3 flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>{socialError}</span>
+                </div>
+              )}
+
+              {!editingItem.socialContent || editingItem.socialContent.status === 'error' ? (
+                <div className="text-center py-10">
+                  <Share2 className="w-10 h-10 text-slate-300 mx-auto mb-3" />
+                  <p className="text-sm font-semibold text-slate-700">
+                    {editingItem.socialContent?.status === 'error' ? 'The social package failed to generate.' : 'No social package yet.'}
+                  </p>
+                  <p className="text-xs text-slate-400 mt-1 mb-4">
+                    {editingItem.socialContent?.status === 'error'
+                      ? editingItem.socialContent.error || 'Retry to generate it from the current article.'
+                      : 'Generate it from the current article — or it is created automatically after Auto-Write.'}
+                  </p>
+                  <button
+                    onClick={() => handleGenerateSocial()}
+                    disabled={socialGenerating || countWords(editingItem.bodyHtml || '') < 50}
+                    className="inline-flex items-center gap-2 px-5 py-2.5 text-white rounded-xl text-sm font-semibold hover:brightness-110 transition disabled:opacity-60 shadow-sm"
+                    style={{ backgroundColor: brandColor(brand) }}
+                  >
+                    {socialGenerating ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                    {socialGenerating ? 'Writing social package…' : 'Generate social package'}
+                  </button>
+                </div>
+              ) : (
+                <SocialPanel
+                  social={editingItem.socialContent}
+                  onEdit={(field, value) =>
+                    setEditingItem((prev) => ({
+                      ...prev,
+                      socialContent: { ...(prev.socialContent as SocialContentPackage), [field]: value, status: 'ready' },
+                      updatedAt: new Date().toISOString(),
+                    }))
+                  }
+                  onRegenerate={() => handleGenerateSocial()}
+                  isRegenerating={socialGenerating}
+                />
+              )}
             </div>
           )}
 

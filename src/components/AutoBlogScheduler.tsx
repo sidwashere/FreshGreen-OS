@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { doc, getDoc, setDoc, onSnapshot } from 'firebase/firestore';
 import { db } from '../lib/firebase';
-import { ContentItem, Brand, AutoBlogOverrides } from '../types';
+import { ContentItem, Brand, AutoBlogOverrides, SocialContentPackage } from '../types';
 import { GenerationInfoPanel } from './GenerationInfoPanel';
 import {
   FileSpreadsheet,
@@ -28,6 +28,7 @@ import {
   CalendarClock,
   Layers,
   Download,
+  Share2,
 } from 'lucide-react';
 
 interface AutoBlogSchedulerProps {
@@ -247,6 +248,180 @@ const CalendarGrid: React.FC<CalendarGridProps> = ({
   );
 };
 
+// Social Media Package card — shown in the expanded item view. Tabs for
+// Facebook / Instagram / Google Business, editable textareas with live word
+// counts vs targets, per-platform Copy, Copy all (=== separators), Save edits,
+// and Regenerate (re-runs the AI from the current article).
+const SOCIAL_TARGETS: Record<'facebook' | 'instagram' | 'googleBusiness', number> = {
+  facebook: 500,
+  instagram: 150,
+  googleBusiness: 90,
+};
+const SOCIAL_LABELS: Record<'facebook' | 'instagram' | 'googleBusiness', string> = {
+  facebook: 'Facebook',
+  instagram: 'Instagram',
+  googleBusiness: 'Google Business',
+};
+
+function SocialPackageCard({ item, brand, isRegenerating, onRegenerate, onSave }: {
+  item: ContentItem;
+  brand?: Brand;
+  isRegenerating: boolean;
+  onRegenerate: (item: ContentItem) => void;
+  onSave: (item: ContentItem) => void;
+}) {
+  const social = item.socialContent;
+  const [tab, setTab] = useState<'facebook' | 'instagram' | 'googleBusiness'>('facebook');
+  const [draft, setDraft] = useState<{ facebook: string; instagram: string; googleBusiness: string }>({
+    facebook: social?.facebook || '',
+    instagram: social?.instagram || '',
+    googleBusiness: social?.googleBusiness || '',
+  });
+  const [savedFlash, setSavedFlash] = useState(false);
+
+  useEffect(() => {
+    setDraft({
+      facebook: social?.facebook || '',
+      instagram: social?.instagram || '',
+      googleBusiness: social?.googleBusiness || '',
+    });
+  }, [social?.facebook, social?.instagram, social?.googleBusiness]);
+
+  const wordCount = (t: string) => (t.trim() ? t.trim().split(/\s+/).length : 0);
+  const target = SOCIAL_TARGETS[tab];
+  const count = wordCount(draft[tab]);
+  const withinTolerance = Math.abs(count - target) <= target * 0.2;
+
+  const copy = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Clipboard unavailable (non-secure context) — fall back to select-all.
+      const ta = document.getElementById(`social-ta-${item.id}-${tab}`) as HTMLTextAreaElement | null;
+      ta?.select();
+    }
+  };
+
+  const copyAll = async () => {
+    const all = `=== Facebook ===\n\n${draft.facebook}\n\n=== Instagram ===\n\n${draft.instagram}\n\n=== Google Business ===\n\n${draft.googleBusiness}`;
+    await copy(all);
+  };
+
+  const saveEdits = () => {
+    onSave({
+      ...item,
+      socialContent: {
+        ...(social || {}),
+        facebook: draft.facebook,
+        instagram: draft.instagram,
+        googleBusiness: draft.googleBusiness,
+        status: 'ready',
+        updatedAt: new Date().toISOString(),
+      } as SocialContentPackage,
+      updatedAt: new Date().toISOString(),
+    });
+    setSavedFlash(true);
+    setTimeout(() => setSavedFlash(false), 1500);
+  };
+
+  if (!social) return null;
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      {/* Header */}
+      <div className="px-4 py-3 border-b border-slate-100 flex items-center gap-3 flex-wrap">
+        <Share2 className="w-4 h-4 text-violet-500" />
+        <span className="text-sm font-bold text-slate-800">Social Media Package</span>
+        {social.blogNumber && (
+          <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-violet-100 text-violet-700">{social.blogNumber}</span>
+        )}
+        {social.imageUrl && (
+          <img src={social.imageUrl} alt="Main image" className="w-8 h-8 rounded-lg object-cover border border-slate-200" />
+        )}
+        <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${social.status === 'ready' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+          {social.status === 'ready' ? 'Ready' : 'Error'}
+        </span>
+        {social.model && <span className="text-[10px] text-slate-400 ml-auto">{social.provider} · {social.model}</span>}
+      </div>
+
+      {social.status === 'error' && (
+        <div className="px-4 py-3 bg-rose-50 border-b border-rose-100 text-rose-700 text-xs font-medium flex items-center gap-2">
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+          <span>{social.error || 'Social generation failed.'}</span>
+          <button
+            onClick={() => onRegenerate(item)}
+            disabled={isRegenerating}
+            className="ml-auto px-3 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 disabled:opacity-50"
+          >
+            {isRegenerating ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+            Retry
+          </button>
+        </div>
+      )}
+
+      {/* Tabs */}
+      <div className="flex border-b border-slate-100">
+        {(Object.keys(SOCIAL_LABELS) as ('facebook' | 'instagram' | 'googleBusiness')[]).map((k) => (
+          <button
+            key={k}
+            onClick={() => setTab(k)}
+            className={`px-4 py-2 text-xs font-bold transition ${tab === k ? 'text-violet-700 border-b-2 border-violet-600' : 'text-slate-500 hover:text-slate-700'}`}
+          >
+            {SOCIAL_LABELS[k]}
+            <span className={`ml-1.5 text-[10px] font-semibold ${Math.abs(wordCount(draft[k]) - SOCIAL_TARGETS[k]) <= SOCIAL_TARGETS[k] * 0.2 ? 'text-emerald-600' : 'text-amber-600'}`}>
+              {wordCount(draft[k])}w
+            </span>
+          </button>
+        ))}
+      </div>
+
+      {/* Editor */}
+      <div className="p-4">
+        <textarea
+          id={`social-ta-${item.id}-${tab}`}
+          value={draft[tab]}
+          onChange={(e) => setDraft((prev) => ({ ...prev, [tab]: e.target.value }))}
+          rows={10}
+          className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-xs leading-relaxed text-slate-800 focus:ring-2 focus:ring-violet-500 outline-none resize-y font-mono"
+        />
+        <div className="flex items-center gap-2 mt-2 flex-wrap">
+          <span className={`text-[11px] font-bold ${withinTolerance ? 'text-emerald-600' : 'text-amber-600'}`}>
+            {count} / {target} words {withinTolerance ? '✓' : `(target ±20%)`}
+          </span>
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              onClick={() => copy(draft[tab])}
+              className="px-3 py-1.5 bg-white border border-slate-200 text-slate-600 rounded-lg text-xs font-semibold hover:bg-slate-50 transition"
+            >
+              Copy
+            </button>
+            <button
+              onClick={copyAll}
+              className="px-3 py-1.5 bg-white border border-slate-200 text-slate-600 rounded-lg text-xs font-semibold hover:bg-slate-50 transition"
+            >
+              Copy all
+            </button>
+            <button
+              onClick={saveEdits}
+              className="px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-xs font-bold transition"
+            >
+              {savedFlash ? 'Saved ✓' : 'Save edits'}
+            </button>
+            <button
+              onClick={() => onRegenerate(item)}
+              disabled={isRegenerating}
+              className="px-3 py-1.5 bg-white border border-slate-200 text-slate-600 rounded-lg text-xs font-semibold hover:bg-slate-50 transition flex items-center gap-1 disabled:opacity-50"
+            >
+              {isRegenerating ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+              Regenerate
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
   items,
   brands,
@@ -307,6 +482,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
   // ── UI state ───────────────────────────────────────────────────────
   const [view, setView] = useState<ViewMode>('queue');
   const [expandedItem, setExpandedItem] = useState<string | null>(null);
+  const [generatingSocial, setGeneratingSocial] = useState<Set<string>>(new Set());
   const [generating, setGenerating] = useState<Set<string>>(new Set());
   const [publishing, setPublishing] = useState<Set<string>>(new Set());
   // Live generation info per item id (for the streaming status panel)
@@ -353,61 +529,12 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
     [autoBlogItems]
   );
 
-  // ── Auto-publish check (runs every 60s when enabled) ───────────────
-  useEffect(() => {
-    if (!autoPublish) return;
-    const interval = setInterval(async () => {
-      const now = new Date();
-      const dueItems = brandItems.filter(
-        (i) =>
-          i.scheduledPublishAt &&
-          i.status === 'Draft_Ready' &&
-          !i.lastAutoPublishedAt &&
-          new Date(i.scheduledPublishAt) <= now
-      );
-      if (dueItems.length === 0) return;
-      try {
-        const resp = await fetch('/api/autoblog/check-publish', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ dueItems, brands: brands.filter((b) => b.id === selectedBrandId) }),
-        });
-        const data = await resp.json();
-        // Record results (both success and failure) for every item
-        for (const r of data.results || []) {
-          const item = dueItems.find((i) => i.id === r.itemId);
-          if (!item) continue;
-          if (r.success) {
-            onSaveItem({
-              ...item,
-              status: 'Published',
-              wpPostId: r.wpPostId,
-              lastAutoPublishedAt: new Date().toISOString(),
-              lastAutoPublishError: undefined,
-              updatedAt: new Date().toISOString(),
-            });
-          } else {
-            onSaveItem({
-              ...item,
-              status: 'Error',
-              lastAutoPublishError: r.message || 'Publish failed',
-              updatedAt: new Date().toISOString(),
-            });
-          }
-        }
-        if (data.published > 0) {
-          setNotice({ kind: 'ok', text: `Auto-published ${data.published} post(s)` });
-        }
-        const errCount = data.errors?.length || 0;
-        if (errCount > 0) {
-          setNotice({ kind: 'err', text: `${errCount} post(s) failed to publish — check queue for details` });
-        }
-      } catch {
-        // Silently retry next interval
-      }
-    }, 60_000);
-    return () => clearInterval(interval);
-  }, [autoPublish, brandItems, brands, selectedBrandId, onSaveItem]);
+  // ── Auto-publish check ─────────────────────────────────────────────
+  // NOTE: Auto-publishing is now handled SERVER-SIDE (firebase-admin on the
+  // server + a Cloud Scheduler tick every minute), so scheduled items publish
+  // even when the app is closed. The queue here updates live via the Firestore
+  // onSnapshot (items prop) as items flip to Published/Error. The "Publish
+  // Now" button below still calls /api/autoblog/check-publish for manual use.
 
   // ── Sheet actions ──────────────────────────────────────────────────
   // AbortController for cancelling in-flight sheet fetches when switching tabs
@@ -831,6 +958,78 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
         }
       }
 
+      // Step 4: Generate the social media content package (Facebook, Instagram,
+      // Google Business Profile) from the final article. Best-effort: a failure
+      // here never fails the article — the package is saved with status 'error'
+      // and the VA can retry from the expanded item view.
+      let socialContent: SocialContentPackage | undefined;
+      if (bodyHtml) {
+        patch((prev) => ({
+          ...prev,
+          phase: 'Writing the social media package (Facebook, Instagram, Google Business)…',
+          percent: 99,
+          stalled: false,
+          history: [...(prev.history || []), { message: 'Writing the social media package…', percent: 99, at: Date.now() }],
+        }));
+        try {
+          const socResp = await fetch('/api/ai/generate-social', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              title: item.initialPrompt || item.title,
+              articleHtml: bodyHtml,
+              brand: brands.find((b) => b.id === item.brandId),
+              primaryKeyword: kwData.primaryKeyword || item.primaryKeyword,
+              secondaryKeywords: kwData.secondaryKeywords || item.secondaryKeywords,
+              blogNumber: item.blogNumber,
+              featuredImageUrl: genData.heroImg || item.featuredImageUrl,
+              callToAction: item.sheetContext?.callToAction,
+              byokKeys: JSON.parse(localStorage.getItem('fgos_byok_keys') || '{}'),
+            }),
+          });
+          const socData = await socResp.json();
+          if (socData.success && socData.social) {
+            socialContent = {
+              ...socData.social,
+              imageUrl: genData.heroImg || item.featuredImageUrl,
+              blogNumber: item.blogNumber,
+              articleTitle: item.title,
+              status: 'ready',
+              generatedAt: new Date().toISOString(),
+              model: socData.model,
+              provider: socData.provider,
+              fallback: socData.fallback,
+              latencyMs: socData.latencyMs,
+            };
+            patch((prev) => ({
+              ...prev,
+              phase: 'Social media package ready.',
+              percent: 100,
+              stalled: false,
+              history: [...(prev.history || []), { message: 'Social media package ready.', percent: 100, at: Date.now() }],
+            }));
+          } else {
+            socialContent = { facebook: '', instagram: '', googleBusiness: '', status: 'error', error: socData.error || 'Social generation failed.' };
+            patch((prev) => ({
+              ...prev,
+              phase: 'Social package failed — article saved, retry later.',
+              percent: 100,
+              stalled: false,
+              history: [...(prev.history || []), { message: 'Social package failed — retry later.', percent: 100, at: Date.now() }],
+            }));
+          }
+        } catch (socErr: any) {
+          socialContent = { facebook: '', instagram: '', googleBusiness: '', status: 'error', error: socErr.message || 'Social generation failed.' };
+          patch((prev) => ({
+            ...prev,
+            phase: 'Social package failed — article saved, retry later.',
+            percent: 100,
+            stalled: false,
+            history: [...(prev.history || []), { message: 'Social package failed — retry later.', percent: 100, at: Date.now() }],
+          }));
+        }
+      }
+
       // Update the item with generated content
       const updatedItem: ContentItem = {
         ...item,
@@ -843,6 +1042,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
         metaDescription: genData.metaDescription || item.metaDescription,
         featuredImageUrl: genData.heroImg || item.featuredImageUrl,
         nanoBananaPrompt: genData.nanoBananaPrompt || item.nanoBananaPrompt,
+        socialContent,
         status: 'Draft_Ready',
         updatedAt: new Date().toISOString(),
       };
@@ -865,6 +1065,67 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
           return next;
         });
       }, 3000);
+    }
+  };
+
+  // ── Regenerate the social media package for an existing draft ──────
+  const handleRegenerateSocial = async (item: ContentItem) => {
+    setGeneratingSocial((prev) => new Set(prev).add(item.id));
+    try {
+      const byokKeys = JSON.parse(localStorage.getItem('fgos_byok_keys') || '{}');
+      const brand = brands.find((b) => b.id === item.brandId);
+      const resp = await fetch('/api/ai/generate-social', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: item.initialPrompt || item.title,
+          articleHtml: item.bodyHtml,
+          brand,
+          primaryKeyword: item.primaryKeyword,
+          secondaryKeywords: item.secondaryKeywords,
+          blogNumber: item.blogNumber,
+          featuredImageUrl: item.featuredImageUrl,
+          callToAction: item.sheetContext?.callToAction,
+          byokKeys,
+        }),
+      });
+      const data = await resp.json();
+      if (data.success && data.social) {
+        const pkg: SocialContentPackage = {
+          ...data.social,
+          imageUrl: item.featuredImageUrl,
+          blogNumber: item.blogNumber,
+          articleTitle: item.title,
+          status: 'ready',
+          generatedAt: new Date().toISOString(),
+          model: data.model,
+          provider: data.provider,
+          fallback: data.fallback,
+          latencyMs: data.latencyMs,
+        };
+        onSaveItem({ ...item, socialContent: pkg, updatedAt: new Date().toISOString() });
+        setNotice({ kind: 'ok', text: `Social package regenerated for "${item.title}"` });
+      } else {
+        onSaveItem({
+          ...item,
+          socialContent: { facebook: '', instagram: '', googleBusiness: '', status: 'error', error: data.error || 'Social generation failed.' },
+          updatedAt: new Date().toISOString(),
+        });
+        setNotice({ kind: 'err', text: `Social regeneration failed: ${data.error || 'unknown error'}` });
+      }
+    } catch (err: any) {
+      onSaveItem({
+        ...item,
+        socialContent: { facebook: '', instagram: '', googleBusiness: '', status: 'error', error: err?.message || 'Social generation failed.' },
+        updatedAt: new Date().toISOString(),
+      });
+      setNotice({ kind: 'err', text: `Social regeneration failed: ${err?.message}` });
+    } finally {
+      setGeneratingSocial((prev) => {
+        const next = new Set(prev);
+        next.delete(item.id);
+        return next;
+      });
     }
   };
 
@@ -1621,6 +1882,11 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
                       {item.status === 'Generating' ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : null}
                       {item.status.replace('_', ' ')}
                     </span>
+                    {item.socialContent?.status === 'ready' && (
+                      <span className="inline-flex items-center px-2 py-1 mt-1 rounded-lg text-[10px] font-bold bg-violet-100 text-violet-700" title="Social media package ready">
+                        📱 Social
+                      </span>
+                    )}
                   </div>
 
                   {/* Title + meta */}
@@ -1783,6 +2049,17 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
                         <AlertTriangle className="w-3 h-3" />
                         Publish error: {item.lastAutoPublishError}
                       </div>
+                    )}
+
+                    {/* Social media package */}
+                    {item.socialContent && (
+                      <SocialPackageCard
+                        item={item}
+                        brand={brand}
+                        isRegenerating={generatingSocial.has(item.id)}
+                        onRegenerate={handleRegenerateSocial}
+                        onSave={onSaveItem}
+                      />
                     )}
                   </div>
                 )}
