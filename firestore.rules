@@ -132,5 +132,14 @@ service cloud.firestore {
       allow update: if isSignedIn() && isValidId(entryId) && existing().userId == request.auth.uid && incoming().userId == request.auth.uid;
       allow delete: if isSignedIn() && isValidId(entryId) && existing().userId == request.auth.uid;
     }
+
+    // Activity log — signed-in users can read their own logs;
+    // anyone can create (the server writes on behalf of the user).
+    match /activity_logs/{logId} {
+      allow get: if isSignedIn() && isValidId(logId);
+      allow list: if isSignedIn();
+      allow create: if isSignedIn();
+      allow update, delete: if false;
+    }
   }
 }

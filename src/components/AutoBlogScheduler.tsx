@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { doc, getDoc, setDoc, onSnapshot } from 'firebase/firestore';
 import { db } from '../lib/firebase';
+import { logActivity } from '../lib/activityLogger';
 import { ContentItem, Brand, AutoBlogOverrides, SocialContentPackage } from '../types';
 import { GenerationInfoPanel } from './GenerationInfoPanel';
 import {
@@ -796,13 +797,12 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
   // ── Generate content for a single item ─────────────────────────────
   const handleGenerate = async (item: ContentItem) => {
     setGenerating((prev) => new Set(prev).add(item.id));
-    // Auto-expand so the live status panel is visible
     setExpandedItem(item.id);
-    // Reset live generation state for this item
     setGenState((prev) => ({
       ...prev,
       [item.id]: { phase: 'Connecting to the model…', percent: 0, words: 0, text: '', elapsed: 0, lastUpdate: Date.now(), stalled: false, generationInfo: null, history: [] },
     }));
+    logActivity({ category: 'generation', status: 'info', action: 'generate_start', title: `Generation started: ${item.title}`, message: 'Auto-Write generation initiated for this article.', brandId: item.brandId, brandName: brands.find((b) => b.id === item.brandId)?.name });
     try {
       // Step 1: Generate SEO keywords
       const kwResp = await fetch('/api/ai/suggest-keywords', {
@@ -971,6 +971,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
           stalled: false,
           history: [...(prev.history || []), { message: 'Writing the social media package…', percent: 99, at: Date.now() }],
         }));
+        logActivity({ category: 'generation', status: 'info', action: 'social_generate_start', title: `Social package generation started: ${item.title}`, message: 'Generating Facebook, Instagram and Google Business content.', brandId: item.brandId, brandName: brands.find((b) => b.id === item.brandId)?.name });
         try {
           const socResp = await fetch('/api/ai/generate-social', {
             method: 'POST',
@@ -1048,8 +1049,10 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
       };
 
       onSaveItem(updatedItem);
+      logActivity({ category: 'generation', status: 'success', action: 'generate_complete', title: `Generation complete: ${item.title}`, message: autoSocial && socialContent?.status === 'ready' ? 'Article and social package generated.' : 'Article generated.', brandId: item.brandId, brandName: brands.find((b) => b.id === item.brandId)?.name, payload: { socialStatus: socialContent?.status || 'none' } });
       setNotice({ kind: 'ok', text: autoHumanize ? `Generated & humanised: "${item.title}"` : `Generated: "${item.title}"` });
     } catch (err: any) {
+      logActivity({ category: 'error', status: 'error', action: 'generate_failed', title: `Generation failed: ${item.title}`, message: err.message || 'Generation failed.', brandId: item.brandId, brandName: brands.find((b) => b.id === item.brandId)?.name });
       setNotice({ kind: 'err', text: `Generation failed: ${err.message}` });
     } finally {
       setGenerating((prev) => {

@@ -6990,6 +6990,42 @@ app.post('/api/autoblog/server-tick', async (req, res) => {
   }
 });
 
+/** Activity log record endpoint — accepts a structured log entry and
+ *  persists it to the `activity_logs` Firestore collection. Used by the
+ *  client-side ActivityLogger fallback when the direct Firestore write
+ *  fails (e.g. emulator mode). */
+app.post('/api/logs/record', async (req, res) => {
+  try {
+    const { category, status, action, title, message, brandId, brandName, userId, userEmail, payload, response, durationMs, ip } = req.body;
+    if (!action || !title || !message) {
+      return res.status(400).json({ error: 'action, title and message required.' });
+    }
+    const logId = `log_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    const now = new Date().toISOString();
+    const fullLog = {
+      id: logId,
+      timestamp: now,
+      category: category || 'event',
+      status: status || 'info',
+      action,
+      title,
+      message,
+      brandId: brandId || null,
+      brandName: brandName || null,
+      userId: userId || null,
+      userEmail: userEmail || null,
+      payload: payload || null,
+      response: response || null,
+      durationMs: durationMs || null,
+      ip: ip || null,
+    };
+    await adminDb.collection('activity_logs').doc(logId).set(fullLog);
+    return res.json({ success: true, id: logId });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to record log.' });
+  }
+});
+
 /** Health/status endpoint — shows whether the server-side scheduler is armed. */
 app.get('/api/autoblog/server-status', (req, res) => {
   res.json({
