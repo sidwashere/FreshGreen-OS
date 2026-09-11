@@ -48,6 +48,37 @@ try {
   console.error('[FGOS] ⚠️ Firebase Admin init failed — server-side auto-publish disabled:', err?.message || err);
 }
 
+// ── Activity log helper ───────────────────────────────────────────────────────
+// Writes a structured entry to the `activity_logs` Firestore collection so the
+// Activity Log screen shows server-side events (auto-publishes, social fallback,
+// errors) even when no client is open. Best-effort — never throws.
+async function logServerActivity(entry: {
+  category: 'generation' | 'api_request' | 'error' | 'event' | 'output';
+  status: 'success' | 'error' | 'warning' | 'info';
+  action: string;
+  title: string;
+  message: string;
+  brandId?: string;
+  brandName?: string;
+  payload?: Record<string, any>;
+  response?: Record<string, any>;
+  durationMs?: number;
+}) {
+  if (!adminDb) return;
+  try {
+    const logId = `log_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    await adminDb.collection('activity_logs').doc(logId).set({
+      id: logId,
+      timestamp: new Date().toISOString(),
+      userId: 'system',
+      userEmail: 'system@fgos.local',
+      ...entry,
+    });
+  } catch (err: any) {
+    console.error('[ActivityLog] server log write failed:', err?.message || err);
+  }
+}
+
 // ── Server-side auto-publish scheduler ───────────────────────────────────────
 // Two complementary mechanisms (both call runServerPublishCheck):
 //  1. A setInterval that runs every 60s while the process is alive.
@@ -170,6 +201,7 @@ async function runServerPublishCheck(): Promise<{ published: number; errors: num
       }
       published++;
       console.log(`[AutoPublish] ✅ "${item.title}" → ${wpLiveUrl}`);
+      logServerActivity({ category: 'event', status: 'success', action: 'auto_publish', title: `Auto-published: ${item.title}`, message: `Published to WordPress: ${wpLiveUrl}`, brandId: item.brandId, brandName: brand?.name, response: { wpPostId, wpLiveUrl } });
 
       // Best-effort social package: if the item has no ready social content
       // (generated before this feature shipped, or generation failed), produce
@@ -203,8 +235,10 @@ async function runServerPublishCheck(): Promise<{ published: number; errors: num
             updatedAt: new Date().toISOString(),
           });
           console.log(`[AutoPublish] 📱 Social package generated for "${item.title}"`);
+          logServerActivity({ category: 'generation', status: 'success', action: 'social_fallback', title: `Social package generated at publish: ${item.title}`, message: 'Social content produced by the server-side fallback after publishing.', brandId: item.brandId, brandName: brand?.name, payload: { model: social.model, provider: social.provider, latencyMs: social.latencyMs } });
         } catch (socErr: any) {
           console.error(`[AutoPublish] ⚠️ Social package failed for "${item.title}":`, socErr?.message || socErr);
+          logServerActivity({ category: 'error', status: 'error', action: 'social_fallback_failed', title: `Social package failed at publish: ${item.title}`, message: (socErr?.message || 'Social generation failed.').slice(0, 300), brandId: item.brandId, brandName: brand?.name });
         }
       }
     } catch (err: any) {
@@ -217,6 +251,7 @@ async function runServerPublishCheck(): Promise<{ published: number; errors: num
       });
       errors++;
       console.error(`[AutoPublish] ❌ "${item.title}": ${errMsg}`);
+      logServerActivity({ category: 'error', status: 'error', action: 'auto_publish_failed', title: `Auto-publish failed: ${item.title}`, message: errMsg.slice(0, 300), brandId: item.brandId, brandName: brand?.name });
     }
   }
   return { published, errors };
@@ -2797,9 +2832,11 @@ Return ONLY the JSON array — no markdown fences, no commentary, no surrounding
       },
       percent: 100,
     });
+    logServerActivity({ category: 'generation', status: 'success', action: 'article_generate', title: `Article generated: ${articleTitle || title}`, message: `Article generated (${countWords(finalHtml)} words).`, brandId: brand?.id, brandName: brand?.name, payload: { model: genModel, provider: genProvider, fallback: genFallback, latencyMs: Date.now() - startedAt, wordCount: countWords(finalHtml) }, durationMs: Date.now() - startedAt });
     cleanup();
   } catch (err: any) {
     console.error('Error in /api/ai/generate-article:', err);
+    logServerActivity({ category: 'error', status: 'error', action: 'article_generate_failed', title: `Article generation failed: ${title}`, message: (err?.message || 'Generation failed.').slice(0, 300), brandId: brand?.id, brandName: brand?.name, durationMs: Date.now() - startedAt });
     let errorMessage = err.message || 'Failed to generate article with Gemini.';
     if (errorMessage.includes('API_KEY_INVALID') || errorMessage.includes('API key not valid')) {
       errorMessage = 'Invalid Gemini API Key. Please provide a valid key in BYOK Settings.';
@@ -2817,6 +2854,7 @@ Return ONLY the JSON array — no markdown fences, no commentary, no surrounding
 // "Generate social package" button (also used to regenerate after edits).
 // ---------------------------------------------------------------------------
 app.post('/api/ai/generate-social', async (req, res) => {
+  const t0 = Date.now();
   try {
     const { title, articleHtml, brand, primaryKeyword, secondaryKeywords, blogNumber, featuredImageUrl, callToAction, byokKeys, modelPref } = req.body;
     if (!title || typeof title !== 'string') {
@@ -2834,9 +2872,11 @@ app.post('/api/ai/generate-social', async (req, res) => {
       byokKeys,
       modelPref,
     });
+    logServerActivity({ category: 'generation', status: 'success', action: 'social_generate', title: `Social package generated: ${title}`, message: 'Facebook, Instagram and Google Business content generated.', brandId: brand?.id, brandName: brand?.name, payload: { model: result.model, provider: result.provider, fallback: result.fallback, latencyMs: result.latencyMs, blogNumber }, durationMs: Date.now() - t0 });
     res.json({ success: true, ...result });
   } catch (err: any) {
     console.error('Error in /api/ai/generate-social:', err);
+    logServerActivity({ category: 'error', status: 'error', action: 'social_generate_failed', title: `Social package failed: ${title}`, message: (err?.message || 'Social generation failed.').slice(0, 300), brandId: brand?.id, brandName: brand?.name, durationMs: Date.now() - t0 });
     res.status(500).json({ success: false, error: err?.message || 'Social generation failed.' });
   }
 });

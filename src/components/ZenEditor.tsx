@@ -6,6 +6,7 @@ import { ContentItem, Brand, VisualBlock, VisualBlockType, PipelineStatus, Gener
 import { figureHtmlFor as figureHtmlForLib, rebuildArticleHtml, syncImageMarkers } from '../lib/blogHtml';
 import { tipLabel } from '../lib/tipLabel';
 import { countWords, deriveWpState, syncItemToWp, refreshWpState } from '../lib/wpSync';
+import { logActivity } from '../lib/activityLogger';
 import { SeoPanel } from './SeoPanel';
 import { GenerationInfoPanel } from './GenerationInfoPanel';
 import { 
@@ -455,6 +456,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
     const abort = new AbortController();
     abortRef.current = abort;
     const byokKeys = await fetchGlobalKeys();
+    logActivity({ category: 'generation', status: 'info', action: 'autowrite_start', title: `Auto-Write started: ${editingItem.title}`, message: 'Article generation initiated in the editor.', brandId: editingItem.brandId, brandName: brand?.name });
     try {
       const res = await fetch('/api/ai/generate-article', {
         method: 'POST',
@@ -637,12 +639,14 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
           title: doneData.articleTitle || editingItem.title,
         });
       }
+      logActivity({ category: 'generation', status: 'success', action: 'autowrite_complete', title: `Auto-Write complete: ${editingItem.title}`, message: 'Article generated in the editor.', brandId: editingItem.brandId, brandName: brand?.name });
     } catch (e: any) {
       if (abort.signal.aborted) {
         setAiError('Generation cancelled.');
       } else {
         console.error('Error generating article:', e);
         setAiError(e?.message || 'Generation failed. Please try again.');
+        logActivity({ category: 'error', status: 'error', action: 'autowrite_failed', title: `Auto-Write failed: ${editingItem.title}`, message: (e?.message || 'Generation failed').slice(0, 300), brandId: editingItem.brandId, brandName: brand?.name });
         logGeneration({
           at: new Date().toISOString(),
           action: 'Auto-Write',
@@ -666,6 +670,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
     if (!editingItem) return;
     setSocialGenerating(true);
     setSocialError(null);
+    logActivity({ category: 'generation', status: 'info', action: 'social_generate_start', title: `Social package generation started: ${editingItem.title}`, message: 'Generating Facebook, Instagram and Google Business content.', brandId: editingItem.brandId, brandName: brand?.name });
     try {
       const byokKeys = await fetchGlobalKeys();
       const bodyHtml = source?.bodyHtml || editingItem.bodyHtml || '';
@@ -701,12 +706,15 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
           latencyMs: socData.latencyMs,
         };
         setEditingItem((prev) => (prev ? { ...prev, socialContent: pkg, updatedAt: new Date().toISOString() } : prev));
+        logActivity({ category: 'generation', status: 'success', action: 'social_generate_complete', title: `Social package ready: ${editingItem.title}`, message: 'Facebook, Instagram and Google Business content generated.', brandId: editingItem.brandId, brandName: brand?.name, payload: { model: socData.model, provider: socData.provider, latencyMs: socData.latencyMs } });
       } else {
         setSocialError(socData.error || 'Social generation failed.');
+        logActivity({ category: 'error', status: 'error', action: 'social_generate_failed', title: `Social package failed: ${editingItem.title}`, message: (socData.error || 'Social generation failed.').slice(0, 300), brandId: editingItem.brandId, brandName: brand?.name });
         setEditingItem((prev) => (prev ? { ...prev, socialContent: { facebook: '', instagram: '', googleBusiness: '', status: 'error', error: socData.error || 'Social generation failed.' }, updatedAt: new Date().toISOString() } : prev));
       }
     } catch (e: any) {
       setSocialError(e?.message || 'Social generation failed.');
+      logActivity({ category: 'error', status: 'error', action: 'social_generate_failed', title: `Social package failed: ${editingItem.title}`, message: (e?.message || 'Social generation failed.').slice(0, 300), brandId: editingItem.brandId, brandName: brand?.name });
       setEditingItem((prev) => (prev ? { ...prev, socialContent: { facebook: '', instagram: '', googleBusiness: '', status: 'error', error: e?.message || 'Social generation failed.' }, updatedAt: new Date().toISOString() } : prev));
     } finally {
       setSocialGenerating(false);
