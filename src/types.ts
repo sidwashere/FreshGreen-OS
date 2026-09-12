@@ -291,6 +291,17 @@ export interface ContentItem {
    *  Google Business Profile) produced together with the main article. Linked
    *  to the same blog number + featured image so the VA can match them. */
   socialContent?: SocialContentPackage;
+  /** SEO analysis score (0–100) — set when autoSeoAnalysis runs after generation. */
+  seoScore?: number;
+  /** Full SEO analysis summary attached after generation (autoSeoAnalysis). */
+  seoAnalysis?: {
+    pct: number;
+    status: string;
+    summary: { good: number; ok: number; poor: number; na: number };
+    recommendations: string[];
+  };
+  /** Consecutive auto-publish failures so far (server-side retry counter). */
+  publishRetryCount?: number;
 }
 
 /** Complete context from a single Google Sheet row. Every field maps to a

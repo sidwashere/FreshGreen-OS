@@ -550,6 +550,9 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
     sheetFetchRef.current?.abort();
     const controller = new AbortController();
     sheetFetchRef.current = controller;
+    // Hard timeout: if the server hangs, stop spinning and tell the user.
+    let timedOut = false;
+    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 30_000);
 
     setLoading(true); setError(null); setSheetRows([]); setTabs([]);
     try {
@@ -586,9 +589,13 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
       setSheetHeaders(data.headers || []);
       setSelectedRows(new Set());
     } catch (err: any) {
-      if (err?.name === 'AbortError') return; // Swallowed — new request superseded this one
+      if (err?.name === 'AbortError') {
+        if (timedOut) setError('Connection timed out — the server took too long to respond. Try again.');
+        return; // superseded by a newer request — swallowed
+      }
       setError(err.message || 'Failed to fetch sheet');
     } finally {
+      clearTimeout(timeout);
       setLoading(false);
     }
   };
@@ -599,6 +606,9 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
     sheetFetchRef.current?.abort();
     const controller = new AbortController();
     sheetFetchRef.current = controller;
+    // Hard timeout: if the server hangs, stop spinning and tell the user.
+    let timedOut = false;
+    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 30_000);
 
     setLoading(true); setError(null);
     const prevRows = sheetRows; // keep previous rows in case fetch fails
@@ -617,12 +627,16 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
       setSheetHeaders(data.headers || []);
       setSelectedRows(new Set());
     } catch (err: any) {
-      if (err?.name === 'AbortError') return;
+      if (err?.name === 'AbortError') {
+        if (timedOut) setError('Connection timed out — the server took too long to respond. Try again.');
+        return;
+      }
       // On failure, restore previous data so the UI doesn't go blank
       setSheetRows(prevRows);
       setSheetHeaders(prevHeaders);
       setError(err.message || 'Failed to fetch tab — showing previous tab data');
     } finally {
+      clearTimeout(timeout);
       setLoading(false);
     }
   };
@@ -683,6 +697,11 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
 
   const handleImportRows = async () => {
     if (sheetRows.length === 0) return;
+    // Importing requires a concrete brand — "All Brands" has no valid target.
+    if (!selectedBrandId) {
+      setError('Select a specific brand before importing — "All Brands" is not a valid import target.');
+      return;
+    }
     // Import only the user-selected rows (fall back to all rows if none selected)
     const rowsToImport = selectedRows.size > 0
       ? sheetRows.filter((_, idx) => selectedRows.has(idx))
@@ -704,35 +723,42 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
       const data = await resp.json();
       if (data.error) throw new Error(data.error);
 
-      // Create content items from imported rows — show progress
-      const startDateMs = new Date(startDate).getTime();
+      // Create content items from imported rows — show progress. Each row is
+      // isolated: one failing row never aborts the rest of the import.
       const totalCount = data.imported.length;
       setImportProgress({ done: 0, total: totalCount });
       let createdCount = 0;
+      const failed: string[] = [];
       for (let i = 0; i < data.imported.length; i++) {
         const row = data.imported[i];
-
-        await onCreateNewItem(
-          row.title,
-          selectedBrandId,
-          'post',
-          {
-            primaryKeyword: row.primaryKeyword,
-            secondaryKeywords: row.secondaryKeywords,
-            seoBrief: row.seoBrief,
-            initialPrompt: row.initialPrompt,
-            sheetContext: row.sheetContext,
-            sourceSheetId: sheetUrl,
-          }
-        );
-
-        createdCount++;
-        setImportProgress({ done: createdCount, total: totalCount });
+        try {
+          await onCreateNewItem(
+            row.title,
+            selectedBrandId,
+            'post',
+            {
+              primaryKeyword: row.primaryKeyword,
+              secondaryKeywords: row.secondaryKeywords,
+              seoBrief: row.seoBrief,
+              initialPrompt: row.initialPrompt,
+              sheetContext: row.sheetContext,
+              sourceSheetId: sheetUrl,
+            }
+          );
+          createdCount++;
+        } catch (rowErr: any) {
+          failed.push(row.title);
+          console.error(`[AutoBlog] Import failed for "${row.title}":`, rowErr?.message || rowErr);
+        }
+        setImportProgress({ done: createdCount + failed.length, total: totalCount });
       }
 
+      const skippedCount = data.skipped?.length || 0;
       setNotice({
-        kind: 'ok',
-        text: `Imported ${createdCount} post(s) • ${data.skipped.length} skipped (duplicates/empty)`,
+        kind: failed.length === 0 ? 'ok' : 'err',
+        text: failed.length === 0
+          ? `Imported ${createdCount} post(s) • ${skippedCount} skipped (duplicates/empty)`
+          : `Imported ${createdCount} of ${totalCount} • ${failed.length} failed (${failed.slice(0, 2).join('; ')}${failed.length > 2 ? '…' : ''}) • ${skippedCount} skipped`,
       });
       // Clear the selection after a successful import
       setSelectedRows(new Set());
@@ -761,34 +787,60 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
       if (data.error) throw new Error(data.error);
       setResyncResult({ newRows: data.newRows?.length || 0, changedRows: data.changedRows?.length || 0 });
 
-      // Import new rows only
+      // 1) Import new rows only — each row isolated so one failure never
+      //    aborts the rest of the sync.
+      let createdCount = 0;
+      const failed: string[] = [];
       if (data.newRows && data.newRows.length > 0) {
-        const startDateMs = new Date(startDate).getTime();
-        const startOffset = autoBlogItems.length; // continue after existing items
-        let createdCount = 0;
         setImportProgress({ done: 0, total: data.newRows.length });
         for (let i = 0; i < data.newRows.length; i++) {
           const row = data.newRows[i];
-          await onCreateNewItem(
-            row['Blog Title'] || row['Title'] || 'Untitled',
-            selectedBrandId,
-            'post',
-            {
-              primaryKeyword: row['Primary Keyword'] || '',
-              secondaryKeywords: (row['Secondary Keywords'] || '').split(/[,;|]/).map((s: string) => s.trim()).filter(Boolean),
-              seoBrief: row['Search Intent'] || row['One Line Summary'] || '',
-              initialPrompt: row['One Line Summary'] || row['Blog Title'] || '',
-              sheetContext: row,
-              sourceSheetId: sheetUrl,
-            }
-          );
-          createdCount++;
-          setImportProgress({ done: createdCount, total: data.newRows.length });
+          try {
+            await onCreateNewItem(
+              row['Blog Title'] || row['Title'] || 'Untitled',
+              selectedBrandId,
+              'post',
+              {
+                primaryKeyword: row['Primary Keyword'] || '',
+                secondaryKeywords: (row['Secondary Keywords'] || '').split(/[,;|]/).map((s: string) => s.trim()).filter(Boolean),
+                seoBrief: row['Search Intent'] || row['One Line Summary'] || '',
+                initialPrompt: row['One Line Summary'] || row['Blog Title'] || '',
+                sheetContext: row,
+                sourceSheetId: sheetUrl,
+              }
+            );
+            createdCount++;
+          } catch (rowErr: any) {
+            failed.push(row['Blog Title'] || row['Title'] || 'Untitled');
+            console.error(`[AutoBlog] Re-sync import failed for "${row['Blog Title'] || row['Title']}":`, rowErr?.message || rowErr);
+          }
+          setImportProgress({ done: createdCount + failed.length, total: data.newRows.length });
         }
-        setNotice({ kind: 'ok', text: `Re-synced: ${createdCount} new post(s) imported, ${data.changedRows?.length || 0} existing row(s) with changes detected` });
-      } else {
-        setNotice({ kind: 'ok', text: `Sheet is up to date — no new rows. ${data.changedRows?.length || 0} existing row(s) may have changes.` });
       }
+
+      // 2) Apply changed rows to the existing items (seoBrief + primary
+      //    keyword) so the sheet stays the single source of truth.
+      let updatedCount = 0;
+      if (data.changedRows && data.changedRows.length > 0) {
+        for (const ch of data.changedRows) {
+          const existing = autoBlogItems.find((it) => it.title === ch.existingTitle);
+          if (!existing) continue;
+          const sheetSummary = ch.row['One Line Summary'] || ch.row['Summary'] || '';
+          const sheetKeyword = ch.row['Primary Keyword'] || ch.row['Primary'] || '';
+          onSaveItem({
+            ...existing,
+            seoBrief: sheetSummary || existing.seoBrief,
+            primaryKeyword: sheetKeyword || existing.primaryKeyword,
+            updatedAt: new Date().toISOString(),
+          });
+          updatedCount++;
+        }
+      }
+
+      setNotice({
+        kind: failed.length === 0 ? 'ok' : 'err',
+        text: `Re-synced: ${createdCount} new post(s) imported, ${updatedCount} existing row(s) updated${failed.length ? `, ${failed.length} failed` : ''}`,
+      });
     } catch (err: any) {
       setError(err.message || 'Re-sync failed');
     } finally {
@@ -798,7 +850,9 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
   };
 
   // ── Generate content for a single item ─────────────────────────────
-  const handleGenerate = async (item: ContentItem) => {
+  // Returns true on success, false on failure — lets the batch runner report
+  // per-item results instead of a blanket "all done".
+  const handleGenerate = async (item: ContentItem): Promise<boolean> => {
     setGenerating((prev) => new Set(prev).add(item.id));
     setExpandedItem(item.id);
     setGenState((prev) => ({
@@ -806,6 +860,12 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
       [item.id]: { phase: 'Connecting to the model…', percent: 0, words: 0, text: '', elapsed: 0, lastUpdate: Date.now(), stalled: false, generationInfo: null, history: [] },
     }));
     logActivity({ category: 'generation', status: 'info', action: 'generate_start', title: `Generation started: ${item.title}`, message: 'Auto-Write generation initiated for this article.', brandId: item.brandId, brandName: brands.find((b) => b.id === item.brandId)?.name });
+    // Client-side stall watchdog: the server heartbeats every 15s, so if no
+    // chunk arrives for 90s the connection is dead — abort instead of spinning
+    // forever with a stuck "Generating…" button.
+    const genController = new AbortController();
+    let stalled = false;
+    const genWatchdog = setTimeout(() => { stalled = true; genController.abort(); }, 90_000);
     try {
       // Step 1: Generate SEO keywords
       const kwResp = await fetch('/api/ai/suggest-keywords', {
@@ -831,8 +891,11 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
           seoBrief: item.seoBrief || kwData.seoBrief,
           sheetContext: item.sheetContext || null,
           targetWordCount: defaultWordCount,
+          tone: defaultTone,
+          generateImages: autoGenerateImages,
           byokKeys: JSON.parse(localStorage.getItem('fgos_byok_keys') || '{}'),
         }),
+        signal: genController.signal,
       });
 
       if (!genResp.body) throw new Error('No response body');
@@ -895,7 +958,6 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
           try { handleEvent(JSON.parse(line)); } catch { /* skip malformed */ }
         }
       }
-
       if (streamError) throw new Error(streamError);
       if (!completed || !genData) throw new Error('Generation ended without completing.');
 
@@ -1051,13 +1113,54 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
         updatedAt: new Date().toISOString(),
       };
 
+      // Step 5: Auto-run the SEO analysis (only when the setting is enabled).
+      // Best-effort: a failure here never fails the generation — the draft is
+      // saved either way and the score is just attached when available.
+      if (autoSeoAnalysis && bodyHtml) {
+        patch((prev) => ({
+          ...prev,
+          phase: 'Running the SEO analysis…',
+          percent: 100,
+          stalled: false,
+          history: [...(prev.history || []), { message: 'Running the SEO analysis…', percent: 100, at: Date.now() }],
+        }));
+        try {
+          const seoResp = await fetch('/api/seo/analyze', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              title: genData.metaTitle || item.title,
+              metaDescription: genData.metaDescription || item.metaDescription,
+              focusKeyphrase: kwData.primaryKeyword || item.primaryKeyword,
+              secondaryKeyphrases: kwData.secondaryKeywords || item.secondaryKeywords,
+              bodyHtml,
+            }),
+          });
+          const seoData = await seoResp.json();
+          if (seoData.success && seoData.data) {
+            updatedItem.seoScore = seoData.data.pct;
+            updatedItem.seoAnalysis = {
+              pct: seoData.data.pct,
+              status: seoData.data.status,
+              summary: seoData.data.summary,
+              recommendations: seoData.data.recommendations || [],
+            };
+          }
+        } catch (seoErr: any) {
+          console.warn(`[AutoBlog] SEO analysis failed for "${item.title}":`, seoErr?.message || seoErr);
+        }
+      }
+
       onSaveItem(updatedItem);
-      logActivity({ category: 'generation', status: 'success', action: 'generate_complete', title: `Generation complete: ${item.title}`, message: autoSocial && socialContent?.status === 'ready' ? 'Article and social package generated.' : 'Article generated.', brandId: item.brandId, brandName: brands.find((b) => b.id === item.brandId)?.name, payload: { socialStatus: socialContent?.status || 'none' } });
+      logActivity({ category: 'generation', status: 'success', action: 'generate_complete', title: `Generation complete: ${item.title}`, message: autoSocial && socialContent?.status === 'ready' ? 'Article and social package generated.' : 'Article generated.', brandId: item.brandId, brandName: brands.find((b) => b.id === item.brandId)?.name, payload: { socialStatus: socialContent?.status || 'none', seoScore: updatedItem.seoScore } });
       setNotice({ kind: 'ok', text: autoHumanize ? `Generated & humanised: "${item.title}"` : `Generated: "${item.title}"` });
+      return true;
     } catch (err: any) {
       logActivity({ category: 'error', status: 'error', action: 'generate_failed', title: `Generation failed: ${item.title}`, message: err.message || 'Generation failed.', brandId: item.brandId, brandName: brands.find((b) => b.id === item.brandId)?.name });
-      setNotice({ kind: 'err', text: `Generation failed: ${err.message}` });
+      setNotice({ kind: 'err', text: `Generation failed: ${stalled ? 'the model went quiet — please retry' : err.message}` });
+      return false;
     } finally {
+      clearTimeout(genWatchdog);
       setGenerating((prev) => {
         const next = new Set(prev);
         next.delete(item.id);
@@ -1161,6 +1264,17 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
     // the intended calendar day regardless of timezone.
     const startDateMs = new Date(`${startDate}T00:00:00`).getTime();
     if (isNaN(startDateMs)) { setNotice({ kind: 'err', text: 'Invalid start date' }); return; }
+    // NEVER schedule into the past: the first post must land on a future day,
+    // otherwise the auto-publish tick fires immediately and the post goes live
+    // before anyone has reviewed it.
+    const tomorrow = new Date();
+    tomorrow.setHours(0, 0, 0, 0);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    if (startDateMs < tomorrow.getTime()) {
+      setNotice({ kind: 'err', text: 'Start date must be tomorrow or later — pick a future date so posts don\'t publish immediately.' });
+      return;
+    }
+    if (!window.confirm(`Schedule ${drafts.length} draft${drafts.length > 1 ? 's' : ''} every ${cadenceDays} day${cadenceDays > 1 ? 's' : ''} starting ${startDate}?`)) return;
     drafts.forEach((item, i) => {
       const schedDate = new Date(startDateMs + i * cadenceDays * 86_400_000);
       onSaveItem({
@@ -1188,16 +1302,28 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
       setNotice({ kind: 'err', text: `"${item.title}" — brand has no WordPress credentials configured. Go to Settings → Brand DNA to add them.` });
       return;
     }
+    if (!item.bodyHtml || item.bodyHtml.trim().length < 50) {
+      setNotice({ kind: 'err', text: `"${item.title}" has no article body yet — generate the draft before publishing.` });
+      return;
+    }
     setPublishing((prev) => new Set(prev).add(item.id));
     try {
-      const resp = await fetch('/api/autoblog/check-publish', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          dueItems: [{ ...item, scheduledPublishAt: new Date().toISOString() }],
-          brands: [brand],
-        }),
-      });
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 30_000);
+      let resp: Response;
+      try {
+        resp = await fetch('/api/autoblog/check-publish', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            dueItems: [{ ...item, scheduledPublishAt: new Date().toISOString() }],
+            brands: [brand],
+          }),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
       const data = await resp.json();
       const result = data.results?.[0];
       if (result?.success) {
@@ -1207,20 +1333,23 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
           wpPostId: result.wpPostId,
           lastAutoPublishedAt: new Date().toISOString(),
           lastAutoPublishError: undefined,
+          publishRetryCount: undefined,
           updatedAt: new Date().toISOString(),
         });
         setNotice({ kind: 'ok', text: `Published "${item.title}" to WordPress` });
       } else {
+        // Keep the item retryable (Draft_Ready) — the server-side tick will
+        // retry it with exponential backoff when its schedule comes due.
         onSaveItem({
           ...item,
-          status: 'Error',
+          status: 'Draft_Ready',
           lastAutoPublishError: result?.message || 'Publish failed',
           updatedAt: new Date().toISOString(),
         });
-        setNotice({ kind: 'err', text: `Publish failed: ${result?.message || 'Unknown error'}` });
+        setNotice({ kind: 'err', text: `Publish failed: ${result?.message || 'Unknown error'} — will retry automatically.` });
       }
     } catch (err: any) {
-      setNotice({ kind: 'err', text: `Publish error: ${err.message}` });
+      setNotice({ kind: 'err', text: `Publish error: ${err?.name === 'AbortError' ? 'timed out after 30s' : err.message}` });
     } finally {
       setPublishing((prev) => {
         const next = new Set(prev);
@@ -1232,6 +1361,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
 
   // ── Delete item ────────────────────────────────────────────────────
   const handleDelete = async (item: ContentItem) => {
+    if (!window.confirm(`Delete "${item.title}"? This cannot be undone.`)) return;
     await onDeleteItem(item);
     setNotice({ kind: 'ok', text: `Deleted "${item.title}"` });
   };
@@ -1244,16 +1374,20 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
     setBatchGenerating(true);
     setNotice({ kind: 'ok', text: `Generating ${planned.length} articles sequentially — click Stop to cancel…` });
     let done = 0;
+    let failed = 0;
     for (const item of planned) {
       if (batchCancelRef.current) {
         setNotice({ kind: 'ok', text: `Stopped after ${done} / ${planned.length} articles` });
         break;
       }
-      await handleGenerate(item);
-      done++;
+      const ok = await handleGenerate(item);
+      if (ok) done++; else failed++;
     }
     if (!batchCancelRef.current) {
-      setNotice({ kind: 'ok', text: `All done — ${done} articles generated` });
+      setNotice({
+        kind: failed === 0 ? 'ok' : 'err',
+        text: failed === 0 ? `All done — ${done} articles generated` : `Finished: ${done} generated, ${failed} failed — retry the failed ones individually`,
+      });
     }
     setBatchGenerating(false);
   };
@@ -1658,9 +1792,9 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
                 <div className="flex items-start gap-2 p-2.5 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-700">
                   <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
                   <span>
-                    Auto-publish runs every 60 seconds <strong>while this browser tab is open</strong>.
-                    If you close the tab, scheduled posts won't publish until you return.
-                    For fully automated publishing, set up a server-side cron job targeting <code className="bg-amber-100 px-1 rounded">/api/autoblog/check-publish</code>.
+                    Auto-publish runs <strong>server-side every 60 seconds</strong> (Cloud Scheduler tick), so scheduled
+                    posts publish even when this app is closed. Transient failures are retried automatically with
+                    exponential backoff (up to 5 attempts) before an item is marked Error.
                   </span>
                 </div>
               )}
@@ -1888,6 +2022,18 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
                     {item.socialContent?.status === 'ready' && (
                       <span className="inline-flex items-center px-2 py-1 mt-1 rounded-lg text-[10px] font-bold bg-violet-100 text-violet-700" title="Social media package ready">
                         📱 Social
+                      </span>
+                    )}
+                    {item.seoScore != null && item.seoScore > 0 && (
+                      <span className={`inline-flex items-center px-2 py-1 mt-1 rounded-lg text-[10px] font-bold ${
+                        item.seoScore >= 80 ? 'bg-emerald-100 text-emerald-700' : item.seoScore >= 60 ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700'
+                      }`} title={`SEO score: ${item.seoScore}/100`}>
+                        📊 SEO {item.seoScore}
+                      </span>
+                    )}
+                    {(item.publishRetryCount || 0) > 0 && (
+                      <span className="inline-flex items-center px-2 py-1 mt-1 rounded-lg text-[10px] font-bold bg-amber-100 text-amber-700" title={`Publish failed ${item.publishRetryCount} time(s) — will retry`}>
+                        ⚠️ Retry {item.publishRetryCount}/5
                       </span>
                     )}
                   </div>

@@ -112,11 +112,22 @@ async function publishItemToWordPress(item: any, brand: any): Promise<{ wpPostId
     ? `${cleanUrl}/wp-json/wp/v2/posts/${item.wpPostId}`
     : `${cleanUrl}/wp-json/wp/v2/posts`;
 
-  const resp = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'Authorization': authHeader, 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
+  // Hard timeout: a hanging WordPress never blocks the scheduler tick.
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  let resp: Response;
+  try {
+    resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Authorization': authHeader, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+  } catch (err: any) {
+    clearTimeout(timeout);
+    throw new Error(err?.name === 'AbortError' ? 'WordPress API timed out after 30s' : (err?.message || 'WordPress API request failed'));
+  }
+  clearTimeout(timeout);
 
   if (!resp.ok) {
     const errBody = await resp.text();
@@ -165,6 +176,7 @@ async function runServerPublishCheck(): Promise<{ published: number; errors: num
     if (!sched || sched > now) continue; // not due yet
     if (item.lastAutoPublishedAt) continue; // already published
     if (item.publishLock && now - item.publishLock < PUBLISH_LOCK_TTL_MS) continue; // locked by another tick
+    if (item.publishRetryAt && now < item.publishRetryAt) continue; // backing off after a transient failure
     due.push({ ref: doc.ref, item });
   }
 
@@ -182,6 +194,7 @@ async function runServerPublishCheck(): Promise<{ published: number; errors: num
         if (!data) return;
         if (data.lastAutoPublishedAt) return; // already published
         if (data.publishLock && now - data.publishLock < PUBLISH_LOCK_TTL_MS) return; // locked
+        if (data.publishRetryAt && now < data.publishRetryAt) return; // backing off
         tx.update(ref, { publishLock: now, updatedAt: new Date().toISOString() });
         acquired = true;
       });
@@ -220,6 +233,8 @@ async function runServerPublishCheck(): Promise<{ published: number; errors: num
         wpLiveUrl,
         lastAutoPublishedAt: publishedAt,
         publishLock: AdminFieldValue.delete(),
+        publishRetryCount: AdminFieldValue.delete(),
+        publishRetryAt: AdminFieldValue.delete(),
         lastAutoPublishError: AdminFieldValue.delete(),
         updatedAt: publishedAt,
       });
@@ -280,15 +295,36 @@ async function runServerPublishCheck(): Promise<{ published: number; errors: num
       }
     } catch (err: any) {
       const errMsg = err?.message || 'Publish failed';
-      await ref.update({
-        status: 'Error',
-        lastAutoPublishError: errMsg,
-        publishLock: AdminFieldValue.delete(),
-        updatedAt: new Date().toISOString(),
-      });
+      const retries = (item.publishRetryCount || 0) + 1;
+      const MAX_PUBLISH_RETRIES = 5;
+      if (retries >= MAX_PUBLISH_RETRIES) {
+        // Give up permanently — mark Error so the VA sees it in the queue.
+        await ref.update({
+          status: 'Error',
+          lastAutoPublishError: errMsg,
+          publishRetryCount: retries,
+          publishLock: AdminFieldValue.delete(),
+          publishRetryAt: AdminFieldValue.delete(),
+          updatedAt: new Date().toISOString(),
+        });
+        console.error(`[AutoPublish] ❌ "${item.title}" failed ${retries} times — marked Error: ${errMsg}`);
+      } else {
+        // Transient failure — keep Draft_Ready and back off exponentially so
+        // the next tick retries after a growing delay (1m, 2m, 4m, 8m, 16m)
+        // instead of hammering WordPress or getting stuck in Error forever.
+        const backoffMs = Math.min(Math.pow(2, retries) * 60_000, 30 * 60_000);
+        await ref.update({
+          status: 'Draft_Ready',
+          lastAutoPublishError: errMsg,
+          publishRetryCount: retries,
+          publishRetryAt: Date.now() + backoffMs,
+          publishLock: AdminFieldValue.delete(),
+          updatedAt: new Date().toISOString(),
+        });
+        console.error(`[AutoPublish] ⚠️ "${item.title}" failed (attempt ${retries}/${MAX_PUBLISH_RETRIES}) — retrying in ${Math.round(backoffMs / 60000)}m: ${errMsg}`);
+      }
       errors++;
-      console.error(`[AutoPublish] ❌ "${item.title}": ${errMsg}`);
-      logServerActivity({ category: 'error', status: 'error', action: 'auto_publish_failed', title: `Auto-publish failed: ${item.title}`, message: errMsg.slice(0, 300), brandId: item.brandId, brandName: brand?.name });
+      logServerActivity({ category: 'error', status: 'error', action: 'auto_publish_failed', title: `Auto-publish failed: ${item.title}`, message: `${errMsg.slice(0, 300)} (attempt ${retries}/${MAX_PUBLISH_RETRIES})`, brandId: item.brandId, brandName: brand?.name });
     }
   }
   return { published, errors };
@@ -1715,6 +1751,24 @@ app.post('/api/ai/suggest-keywords', async (req, res) => {
 // API Endpoint: Generate Article Content with Gemini (streamed)
 // Emits NDJSON events so the client can show live progress, the model's output
 // as it writes, and heartbeats proving the job is alive, not stuck.
+/** Resolve the effective voice/tone guidelines for a generation request.
+ *  An explicit `tone` override (from the AutoBlog settings) takes precedence
+ *  over the brand's stored voice guidelines; 'brand' (or no tone) falls back
+ *  to the brand defaults. */
+const TONE_DESCRIPTIONS: Record<string, string> = {
+  professional: 'Professional, clear, engaging, authoritative',
+  warm: 'Warm, friendly, reassuring, approachable',
+  playful: 'Playful, light-hearted, fun, energetic',
+  formal: 'Formal, polished, corporate, precise',
+  casual: 'Casual, conversational, relaxed, down-to-earth',
+};
+function resolveVoiceGuidelines(brand: any, tone?: string): string {
+  const brandVoice = brand?.voiceGuidelines || 'Professional, clear, engaging, authoritative';
+  if (!tone || tone === 'brand') return brandVoice;
+  const desc = TONE_DESCRIPTIONS[tone] || tone;
+  return `${desc}. ${brandVoice}`.trim();
+}
+
 app.post('/api/ai/generate-article', async (req, res) => {
   res.writeHead(200, {
     'Content-Type': 'application/x-ndjson; charset=utf-8',
@@ -1723,7 +1777,7 @@ app.post('/api/ai/generate-article', async (req, res) => {
     'X-Accel-Buffering': 'no',
   });
 
-  const { title, contentType, primaryKeyword, secondaryKeywords, seoBrief, brand, byokKeys, applyHumanization, targetWordCount, modelPref, sheetContext, requestedBlocks, relatedArticles } = req.body;
+  const { title, contentType, primaryKeyword, secondaryKeywords, seoBrief, brand, byokKeys, applyHumanization, targetWordCount, modelPref, sheetContext, requestedBlocks, relatedArticles, tone, generateImages } = req.body;
 
   const aiApiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || byokKeys?.gemini;
   let ai = aiApiKey ? new GoogleGenAI({ apiKey: aiApiKey }) : null;
@@ -1771,7 +1825,7 @@ app.post('/api/ai/generate-article', async (req, res) => {
       : 'Target 1000-1400 words for a post (600-800 for a landing page). The SEO analyzer gives full marks at 1000+ words, so never write fewer than 900 words for a post.';
 
     const writeInstruction = `You are a world-class professional senior editor and copywriter crafting content for the brand "${brand.name}".
-Brand Voice & Tone Guidelines: ${brand.voiceGuidelines || 'Professional, clear, engaging, authoritative'}.
+Brand Voice & Tone Guidelines: ${resolveVoiceGuidelines(brand, tone)}.
 ${bannedWordsText}
 
 WORKING TITLE / TOPIC (THE BRIEF): "${title}". Every heading, sentence and FAQ entry must serve exactly this topic — never drift to a side topic, never change the subject. The reader must feel one continuous, seamless narrative from the first sentence to the final FAQ answer.
@@ -2093,55 +2147,59 @@ Keep the JSON compact — no whitespace, no code fences.`;
       isDataUri?: boolean;
       prompt?: string;
     }> = [];
-    emit({ type: 'status', message: 'Generating 2 branded images with the paid Nano Banana model…', percent: 88 });
-    const imageTopicCtx = `Images for a blog article${title ? ` titled "${title}"` : ''}${primaryKeyword ? ` about "${primaryKeyword}"` : ''}. Brand: ${brand?.name || 'the site'}. Editorial, photorealistic, warm and authentic — no text, captions, logos or watermarks.`;
-    for (const img of [
-      { role: 'hero' as const, prompt: suggestedNanoPrompt || `${primaryKeyword || title} hero photo`, aspectRatio: '16:9', filename: 'featured-image' },
-      { role: 'secondary' as const, prompt: suggestedSecondaryPrompt || `${primaryKeyword || title} lifestyle detail photo`, aspectRatio: '4:3', filename: 'article-image-2' },
-    ]) {
-      lastChunkAt = Date.now();
-      emit({ type: 'status', message: `Rendering ${img.role === 'hero' ? 'hero' : 'in-body'} image with Nano Banana…`, percent: img.role === 'hero' ? 89 : 91 });
-      try {
-        const r = await generateAiImage({
-          prompt: `${imageTopicCtx}\n\nImage prompt: ${img.prompt}`,
-          aspectRatio: img.aspectRatio,
-          byokKeys,
-        });
-        let url = r.imageUrl;
-        let mediaId: number | undefined;
-        const isDataUri = /^data:image/i.test(url);
-        // Host on the brand's WP media library so the item stores URLs only.
-        if (!r.isPlaceholder && brand?.wpUrl && brand?.wpUsername && brand?.wpAppPassword) {
-          try {
-            const up = await uploadImageToWp(
-              brand,
-              isDataUri ? { dataBase64: url, filename: img.filename } : { imageUrl: url, filename: img.filename },
-            );
-            url = up.wpMediaUrl;
-            mediaId = up.wpMediaId;
-          } catch (upErr: any) {
-            console.warn(`[Images] ${img.role} upload skipped (keeping ${isDataUri ? 'data URI' : 'remote URL'}):`, String(upErr?.message || upErr).slice(0, 140));
+    if (generateImages !== false) {
+      emit({ type: 'status', message: 'Generating 2 branded images with the paid Nano Banana model…', percent: 88 });
+      const imageTopicCtx = `Images for a blog article${title ? ` titled "${title}"` : ''}${primaryKeyword ? ` about "${primaryKeyword}"` : ''}. Brand: ${brand?.name || 'the site'}. Editorial, photorealistic, warm and authentic — no text, captions, logos or watermarks.`;
+      for (const img of [
+        { role: 'hero' as const, prompt: suggestedNanoPrompt || `${primaryKeyword || title} hero photo`, aspectRatio: '16:9', filename: 'featured-image' },
+        { role: 'secondary' as const, prompt: suggestedSecondaryPrompt || `${primaryKeyword || title} lifestyle detail photo`, aspectRatio: '4:3', filename: 'article-image-2' },
+      ]) {
+        lastChunkAt = Date.now();
+        emit({ type: 'status', message: `Rendering ${img.role === 'hero' ? 'hero' : 'in-body'} image with Nano Banana…`, percent: img.role === 'hero' ? 89 : 91 });
+        try {
+          const r = await generateAiImage({
+            prompt: `${imageTopicCtx}\n\nImage prompt: ${img.prompt}`,
+            aspectRatio: img.aspectRatio,
+            byokKeys,
+          });
+          let url = r.imageUrl;
+          let mediaId: number | undefined;
+          const isDataUri = /^data:image/i.test(url);
+          // Host on the brand's WP media library so the item stores URLs only.
+          if (!r.isPlaceholder && brand?.wpUrl && brand?.wpUsername && brand?.wpAppPassword) {
+            try {
+              const up = await uploadImageToWp(
+                brand,
+                isDataUri ? { dataBase64: url, filename: img.filename } : { imageUrl: url, filename: img.filename },
+              );
+              url = up.wpMediaUrl;
+              mediaId = up.wpMediaId;
+            } catch (upErr: any) {
+              console.warn(`[Images] ${img.role} upload skipped (keeping ${isDataUri ? 'data URI' : 'remote URL'}):`, String(upErr?.message || upErr).slice(0, 140));
+            }
           }
+          const entry = {
+            role: img.role,
+            url,
+            mediaId,
+            model: r.model,
+            provider: r.provider,
+            isAiGenerated: r.isAiGenerated,
+            isPlaceholder: r.isPlaceholder,
+            isDataUri,
+            prompt: img.prompt,
+          };
+          generatedImages.push(entry);
+          lastChunkAt = Date.now();
+          emit({ type: 'image', ...entry });
+        } catch (imgErr: any) {
+          console.warn(`[Images] ${img.role} generation failed:`, String(imgErr?.message || imgErr).slice(0, 160));
+          lastChunkAt = Date.now();
+          emit({ type: 'imageWarning', role: img.role, message: String(imgErr?.message || imgErr).slice(0, 160) });
         }
-        const entry = {
-          role: img.role,
-          url,
-          mediaId,
-          model: r.model,
-          provider: r.provider,
-          isAiGenerated: r.isAiGenerated,
-          isPlaceholder: r.isPlaceholder,
-          isDataUri,
-          prompt: img.prompt,
-        };
-        generatedImages.push(entry);
-        lastChunkAt = Date.now();
-        emit({ type: 'image', ...entry });
-      } catch (imgErr: any) {
-        console.warn(`[Images] ${img.role} generation failed:`, String(imgErr?.message || imgErr).slice(0, 160));
-        lastChunkAt = Date.now();
-        emit({ type: 'imageWarning', role: img.role, message: String(imgErr?.message || imgErr).slice(0, 160) });
       }
+    } else {
+      emit({ type: 'status', message: 'Image generation skipped (setting disabled) — using placeholder images.', percent: 92 });
     }
     const heroImg = generatedImages.find((g) => g.role === 'hero');
     const secondaryImg = generatedImages.find((g) => g.role === 'secondary');
@@ -6837,14 +6895,20 @@ app.post('/api/autoblog/list-tabs', async (req, res) => {
     if (!sheetUrl) return res.status(400).json({ error: 'sheetUrl is required' });
     const { spreadsheetId } = parseSheetUrl(sheetUrl);
 
-    // Probe GIDs 0–9, then known large GIDs. Probe in parallel batches of 4.
-    const candidateGids = ['0','1','2','3','4','5','6','7','8','9','102378141','1594914000','383449943'];
+    // Probe GIDs 0–19, then known large GIDs. Probe in parallel batches of 4.
+    // Google assigns large sequential GIDs to new tabs, so cover the common
+    // ranges plus the historically observed ones.
+    const candidateGids = [
+      '0','1','2','3','4','5','6','7','8','9','10','11','12','13','14','15','16','17','18','19',
+      '102378141','1594914000','383449943','123456789','987654321','555555555','1111111111',
+      '1666666666','1888888888','1999999999','2050000000','2100000000','2147483647',
+    ];
     const BATCH = 4;
     const tabs: { name: string; gid: string; rowCount: number; firstCol: string }[] = [];
     let misses = 0;
 
     for (let i = 0; i < candidateGids.length; i += BATCH) {
-      if (misses >= 6) break; // too many consecutive empty/error GIDs — stop
+      if (misses >= 10) break; // too many consecutive empty/error GIDs — stop
       const batch = candidateGids.slice(i, i + BATCH);
       const results = await Promise.allSettled(
         batch.map(async (gid) => {
