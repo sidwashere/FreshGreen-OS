@@ -48,7 +48,11 @@ export default function App() {
 
   // Unified "New Blog" wizard — every manual creation trigger opens this.
   const [wizardOpen, setWizardOpen] = useState(false);
-  const openWizard = () => setWizardOpen(true);
+  const [wizardInitialTitle, setWizardInitialTitle] = useState('');
+  const openWizard = (title?: string) => {
+    setWizardInitialTitle(title || '');
+    setWizardOpen(true);
+  };
 
   // Sidebar state: desktop collapse (persisted) + mobile drawer
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
@@ -951,6 +955,7 @@ export default function App() {
         open={wizardOpen}
         brands={brands}
         selectedBrandId={selectedBrandId}
+        initialTitle={wizardInitialTitle}
         onSelectBrand={setSelectedBrandId}
         onCreateNewItem={handleCreateNewItem}
         onClose={() => setWizardOpen(false)}

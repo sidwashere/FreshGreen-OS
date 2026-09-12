@@ -20,6 +20,8 @@ interface NewBlogWizardProps {
   open: boolean;
   brands: Brand[];
   selectedBrandId: string;
+  /** Pre-fills the title step (e.g. a title typed in Content Hub's quick-create). */
+  initialTitle?: string;
   onSelectBrand: (id: string) => void;
   onCreateNewItem: (
     title: string,
@@ -46,6 +48,7 @@ export const NewBlogWizard: React.FC<NewBlogWizardProps> = ({
   open,
   brands,
   selectedBrandId,
+  initialTitle,
   onSelectBrand,
   onCreateNewItem,
   onClose,
@@ -66,14 +69,14 @@ export const NewBlogWizard: React.FC<NewBlogWizardProps> = ({
       setStep(0);
       setBrandId(selectedBrandId !== 'all' ? selectedBrandId : brands[0]?.id || '');
       setContentType('post');
-      setTitle('');
+      setTitle(initialTitle || '');
       setPrimaryKeyword('');
       setSecondaryKeywords('');
       setSeoBrief('');
       setError(null);
       setCreating(false);
     }
-  }, [open, selectedBrandId, brands]);
+  }, [open, selectedBrandId, brands, initialTitle]);
 
   const brand = brands.find((b) => b.id === brandId) || null;
   const bc = brand?.primaryColor || '#4f46e5';

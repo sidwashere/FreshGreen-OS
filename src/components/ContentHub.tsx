@@ -308,7 +308,8 @@ export const ContentHub: React.FC<ContentHubProps> = ({
   const quickCreate = () => {
     // Route through the unified step-by-step wizard so every entry point
     // offers the same guided flow (brand, type, title, keywords, confirm).
-    onOpenWizard();
+    // A title typed here pre-fills the wizard's title step.
+    onOpenWizard(newTitle.trim());
   };
 
   const statCards = [
@@ -409,13 +410,12 @@ export const ContentHub: React.FC<ContentHubProps> = ({
             value={newTitle}
             onChange={(e) => setNewTitle(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && quickCreate()}
-            placeholder="New post title… (opens in the Blog Editor)"
+            placeholder="New post title… (opens the step-by-step wizard)"
             className="flex-1 min-w-0 text-[13px] px-3.5 py-2 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-200"
           />
           <button
             onClick={quickCreate}
-            disabled={!newTitle.trim()}
-            className="shrink-0 inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white text-[12px] font-bold transition"
+            className="shrink-0 inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-[12px] font-bold transition"
           >
             <Plus className="w-4 h-4" /> New post
           </button>
