@@ -7220,6 +7220,12 @@ app.get('/api/blogs/audit', async (req, res) => {
       .filter((d) => !regIds.has(d.id))
       .map((d) => ({ id: d.id, title: d.data().title || '?', brandId: d.data().brandId || '?' }));
 
+    // Register entries whose content item no longer exists (orphans).
+    const itemIds = new Set(itemsSnap.docs.map((d) => d.id));
+    const orphans = regSnap.docs
+      .filter((d) => !itemIds.has(d.id))
+      .map((d) => ({ id: d.id, title: d.data().title || '?', blogNumber: d.data().blogNumber || '', brandId: d.data().brandId || '?' }));
+
     return res.json({
       success: true,
       at: new Date().toISOString(),
@@ -7231,6 +7237,8 @@ app.get('/api/blogs/audit', async (req, res) => {
       invalidNumbers: invalid,
       unregisteredItems: unregistered.length,
       unregisteredDetails: unregistered.slice(0, 50),
+      orphanedEntries: orphans.length,
+      orphanedDetails: orphans,
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Audit failed.' });
@@ -7248,6 +7256,7 @@ app.post('/api/blogs/audit', async (req, res) => {
     }
 
     const regSnap = await adminDb.collection('blog_register').get();
+    const itemsSnap = await adminDb.collection('content_items').get();
     const byNumber = new Map<string, { id: string; title: string; brandId: string; dateCreated: string }[]>();
     for (const doc of regSnap.docs) {
       const d = doc.data();
@@ -7270,24 +7279,30 @@ app.post('/api/blogs/audit', async (req, res) => {
     }
 
     const fixed: { id: string; oldNumber: string; newNumber: string; title: string }[] = [];
+    const created: { id: string; blogNumber: string; title: string }[] = [];
+    const deleted: string[] = [];
     const errors: string[] = [];
 
+    // Issue the next unused number for a brand (skips everything in `used`).
+    const issueNext = (brandId: string, used: Set<number>, code: string): string => {
+      let nextSeq = used.size ? Math.max(...used) + 1 : 1;
+      while (used.has(nextSeq)) nextSeq++;
+      used.add(nextSeq);
+      return `${code}${String(nextSeq).padStart(3, '0')}`;
+    };
+
+    // 1) Duplicate numbers → re-number all but the earliest entry.
     for (const [key, entries] of byNumber) {
       if (entries.length <= 1) continue;
       const [brandId, oldNumber] = key.split('|');
       const sorted = [...entries].sort((a, b) => a.dateCreated.localeCompare(b.dateCreated));
       const dupes = sorted.slice(1);
       const used = usedByBrand.get(brandId) || new Set<number>();
-      let nextSeq = used.size ? Math.max(...used) + 1 : 1;
       const brandSnap = await adminDb.collection('brands').doc(brandId).get();
       const code = resolveBrandCodeServer(brandSnap.exists ? brandSnap.data() : null);
       for (const dupe of dupes) {
         try {
-          // Skip any number already in use (including ones just issued).
-          while (used.has(nextSeq)) nextSeq++;
-          const newNumber = `${code}${String(nextSeq).padStart(3, '0')}`;
-          used.add(nextSeq);
-          nextSeq++;
+          const newNumber = issueNext(brandId, used, code);
           const now = new Date().toISOString();
           await adminDb.collection('blog_register').doc(dupe.id).update({ blogNumber: newNumber, updatedAt: now });
           await adminDb.collection('content_items').doc(dupe.id).update({ blogNumber: newNumber, updatedAt: now });
@@ -7306,8 +7321,91 @@ app.post('/api/blogs/audit', async (req, res) => {
       }
     }
 
-    logServerActivity({ category: 'event', status: 'success', action: 'register_repair', title: `Blog register repair: ${fixed.length} duplicates re-numbered`, message: `Re-issued unique blog numbers for ${fixed.length} duplicate register entries.`, payload: { fixed: fixed.length, errors: errors.length } });
-    return res.json({ success: true, fixed, errors, fixedCount: fixed.length, errorCount: errors.length });
+    // 2) Invalid/missing numbers in the register → re-issue a proper number.
+    const itemsById = new Map(itemsSnap.docs.map((d) => [d.id, d.data()]));
+    for (const doc of regSnap.docs) {
+      const d = doc.data();
+      const num = d.blogNumber ? String(d.blogNumber).trim().toUpperCase() : '';
+      if (num && /^[A-Z]{1,4}\d{3,}$/.test(num)) continue;
+      const brandId = d.brandId;
+      if (!brandId) { errors.push(`${doc.id}: no brandId — cannot re-issue`); continue; }
+      try {
+        const used = usedByBrand.get(brandId) || new Set<number>();
+        const brandSnap = await adminDb.collection('brands').doc(brandId).get();
+        const code = resolveBrandCodeServer(brandSnap.exists ? brandSnap.data() : null);
+        const newNumber = issueNext(brandId, used, code);
+        const now = new Date().toISOString();
+        await adminDb.collection('blog_register').doc(doc.id).update({ blogNumber: newNumber, updatedAt: now });
+        if (itemsById.has(doc.id)) {
+          await adminDb.collection('content_items').doc(doc.id).update({ blogNumber: newNumber, updatedAt: now });
+        }
+        fixed.push({ id: doc.id, oldNumber: num || '(missing)', newNumber, title: d.title || '?' });
+      } catch (err: any) {
+        errors.push(`${doc.id}: ${err?.message || err}`);
+      }
+    }
+
+    // 3) Content items with no register entry → create one (register drift).
+    const regIds = new Set(regSnap.docs.map((d) => d.id));
+    for (const doc of itemsSnap.docs) {
+      if (regIds.has(doc.id)) continue;
+      const d = doc.data();
+      const brandId = d.brandId;
+      if (!brandId) { errors.push(`${doc.id}: no brandId — cannot register`); continue; }
+      try {
+        const used = usedByBrand.get(brandId) || new Set<number>();
+        const brandSnap = await adminDb.collection('brands').doc(brandId).get();
+        const brand = brandSnap.exists ? brandSnap.data() : null;
+        const code = resolveBrandCodeServer(brand);
+        // Reuse the item's own number when it is valid and still unique.
+        const ownNum = d.blogNumber ? String(d.blogNumber).trim().toUpperCase() : '';
+        const ownSeq = /^[A-Z]{1,4}(\d{3,})$/.exec(ownNum);
+        let blogNumber = '';
+        if (ownSeq && !used.has(parseInt(ownSeq[1], 10))) {
+          blogNumber = ownNum;
+          used.add(parseInt(ownSeq[1], 10));
+        } else {
+          blogNumber = issueNext(brandId, used, code);
+        }
+        const now = new Date().toISOString();
+        await adminDb.collection('blog_register').doc(doc.id).set({
+          id: doc.id,
+          title: d.title || '?',
+          slug: d.slug || '',
+          blogNumber,
+          brandId,
+          brandName: brand?.name || '',
+          userId: d.userId || 'system',
+          status: d.status || 'Planned',
+          dateCreated: d.dateCreated || now,
+          datePublished: d.datePublished || null,
+          wpPostId: d.wpPostId || null,
+          wpLiveUrl: d.wpLiveUrl || null,
+          updatedAt: now,
+        });
+        created.push({ id: doc.id, blogNumber, title: d.title || '?' });
+      } catch (err: any) {
+        errors.push(`${doc.id}: ${err?.message || err}`);
+      }
+    }
+
+    // 4) Explicit test-artifact cleanup: delete register entry + content item
+    //    for each listed id (only ids the caller names — never inferred).
+    const { deleteEntries } = req.body || {};
+    if (Array.isArray(deleteEntries) && deleteEntries.length) {
+      for (const id of deleteEntries) {
+        try {
+          await adminDb.collection('blog_register').doc(id).delete();
+          await adminDb.collection('content_items').doc(id).delete();
+          deleted.push(id);
+        } catch (err: any) {
+          errors.push(`${id}: ${err?.message || err}`);
+        }
+      }
+    }
+
+    logServerActivity({ category: 'event', status: 'success', action: 'register_repair', title: `Blog register repair: ${fixed.length} re-numbered, ${created.length} registered, ${deleted.length} deleted`, message: `Register repair complete.`, payload: { fixed: fixed.length, created: created.length, deleted: deleted.length, errors: errors.length } });
+    return res.json({ success: true, fixed, created, deleted, errors, fixedCount: fixed.length, createdCount: created.length, deletedCount: deleted.length, errorCount: errors.length });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Repair failed.' });
   }
