@@ -7258,34 +7258,51 @@ app.post('/api/blogs/audit', async (req, res) => {
       byNumber.get(key)!.push({ id: doc.id, title: d.title || '?', brandId: d.brandId || '?', dateCreated: d.dateCreated || d.updatedAt || '' });
     }
 
+    // Per brand: every number currently in use (so repairs never collide with
+    // numbers held by non-duplicate entries or the kept duplicate).
+    const usedByBrand = new Map<string, Set<number>>();
+    for (const [key] of byNumber) {
+      const [brandId, num] = key.split('|');
+      const m = /^[A-Z]{1,4}(\d{3,})$/.exec(num);
+      if (!m) continue;
+      if (!usedByBrand.has(brandId)) usedByBrand.set(brandId, new Set());
+      usedByBrand.get(brandId)!.add(parseInt(m[1], 10));
+    }
+
     const fixed: { id: string; oldNumber: string; newNumber: string; title: string }[] = [];
     const errors: string[] = [];
 
     for (const [key, entries] of byNumber) {
       if (entries.length <= 1) continue;
-      const [brandId] = key.split('|');
+      const [brandId, oldNumber] = key.split('|');
       const sorted = [...entries].sort((a, b) => a.dateCreated.localeCompare(b.dateCreated));
       const dupes = sorted.slice(1);
+      const used = usedByBrand.get(brandId) || new Set<number>();
+      let nextSeq = used.size ? Math.max(...used) + 1 : 1;
+      const brandSnap = await adminDb.collection('brands').doc(brandId).get();
+      const code = resolveBrandCodeServer(brandSnap.exists ? brandSnap.data() : null);
       for (const dupe of dupes) {
         try {
-          // Issue a fresh unique number via the counter (transactional).
-          const counterRef = adminDb.collection('blog_counters').doc(brandId);
-          const seq = await adminDb.runTransaction(async (tx) => {
-            const snap = await tx.get(counterRef);
-            const next = (snap.exists ? (snap.data().nextSeq || 0) : 0) + 1;
-            tx.set(counterRef, { brandId, nextSeq: next, updatedAt: new Date().toISOString() });
-            return next;
-          });
-          const brandSnap = await adminDb.collection('brands').doc(brandId).get();
-          const code = resolveBrandCodeServer(brandSnap.exists ? brandSnap.data() : null);
-          const newNumber = `${code}${String(seq).padStart(3, '0')}`;
+          // Skip any number already in use (including ones just issued).
+          while (used.has(nextSeq)) nextSeq++;
+          const newNumber = `${code}${String(nextSeq).padStart(3, '0')}`;
+          used.add(nextSeq);
+          nextSeq++;
           const now = new Date().toISOString();
           await adminDb.collection('blog_register').doc(dupe.id).update({ blogNumber: newNumber, updatedAt: now });
           await adminDb.collection('content_items').doc(dupe.id).update({ blogNumber: newNumber, updatedAt: now });
-          fixed.push({ id: dupe.id, oldNumber: key.split('|')[1], newNumber, title: dupe.title });
+          fixed.push({ id: dupe.id, oldNumber, newNumber, title: dupe.title });
         } catch (err: any) {
           errors.push(`${dupe.id}: ${err?.message || err}`);
         }
+      }
+      // Advance the per-brand counter past every number now in use so future
+      // /api/blogs/next-number calls can never collide with repaired entries.
+      const counterRef = adminDb.collection('blog_counters').doc(brandId);
+      const counterSnap = await counterRef.get();
+      const counterNext = used.size ? Math.max(...used) + 1 : 1;
+      if (!counterSnap.exists || (counterSnap.data().nextSeq || 0) < counterNext) {
+        await counterRef.set({ brandId, nextSeq: counterNext, updatedAt: new Date().toISOString() });
       }
     }
 
