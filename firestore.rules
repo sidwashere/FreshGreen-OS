@@ -140,6 +140,12 @@ service cloud.firestore {
       allow delete: if isSignedIn() && isValidId(entryId) && existing().userId == request.auth.uid;
     }
 
+    // Per-brand blog number counters — written only by the server (admin SDK,
+    // bypasses rules). Admins may read/reset them; everyone else is denied.
+    match /blog_counters/{brandId} {
+      allow read, write: if isAdmin();
+    }
+
     // Activity log — signed-in users can read their own entries plus
     // system-generated entries (server writes userId 'system'); anyone can
     // create (the client writes its own uid, the server bypasses rules).
