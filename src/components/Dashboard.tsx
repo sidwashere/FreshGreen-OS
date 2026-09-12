@@ -160,6 +160,8 @@ interface DashboardProps {
     contentType: 'post' | 'page',
     opts?: { primaryKeyword?: string; secondaryKeywords?: string[] }
   ) => void;
+  /** Opens the unified step-by-step New Blog wizard. */
+  onOpenWizard: () => void;
   onImportWPPost?: (post: any) => void;
 }
 
@@ -171,14 +173,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onEditItem,
   onDeleteItem,
   onCreateNewItem,
+  onOpenWizard,
   onImportWPPost,
 }) => {
-  const [showCreateModal, setShowCreateModal] = useState(false);
-  const [newTitle, setNewTitle] = useState('');
-  const [newPrimaryKeyword, setNewPrimaryKeyword] = useState('');
-  const [newSecondaryKeywords, setNewSecondaryKeywords] = useState('');
-  const [newBrandId, setNewBrandId] = useState(selectedBrandId === 'all' ? (brands[0]?.id || '') : selectedBrandId);
-  const [newType, setNewType] = useState<'post' | 'page'>('post');
   const [searchQuery, setSearchQuery] = useState('');
   const [stageFilter, setStageFilter] = useState<'all' | 'planned' | 'writing' | 'review' | 'published' | 'error'>('all');
   // Pipeline grid shows 6 cards; "View All" expands to the full filtered list.
@@ -707,26 +704,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
     URL.revokeObjectURL(url);
   };
 
-  const handleCreateSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newTitle.trim()) return;
-    onCreateNewItem(
-      newTitle.trim(),
-      newBrandId,
-      newType,
-      {
-        primaryKeyword: newPrimaryKeyword.trim() || undefined,
-        secondaryKeywords: newSecondaryKeywords
-          .split(',')
-          .map((k) => k.trim())
-          .filter(Boolean),
-      }
-    );
-    setNewTitle('');
-    setNewPrimaryKeyword('');
-    setNewSecondaryKeywords('');
-  };
-
   // Real content-activity chart: posts published vs drafts edited per day,
   // computed from each site's actual post dates (no estimates).
   const activityChart = useMemo(() => {
@@ -1051,10 +1028,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </Tip>
           <Tip text="Start a new blog post or landing page in the editor for the selected brand." side="bottom">
             <button
-              onClick={() => {
-                if (selectedBrandId !== 'all') setNewBrandId(selectedBrandId);
-                setShowCreateModal(true);
-              }}
+              onClick={onOpenWizard}
               disabled={brands.length === 0}
               title={brands.length === 0 ? "Please create a brand first" : ""}
               className="flex items-center space-x-2 px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-sm transition shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
@@ -2040,7 +2014,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                     : 'Move posts forward through the workflow to see them here.'}
                 </p>
                 <button
-                  onClick={() => setShowCreateModal(true)}
+                  onClick={onOpenWizard}
                   className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition"
                 >
                   Create New Blog
@@ -2547,131 +2521,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         </div>
       )}
 
-      {/* Modal: Create New Content Item */}
-      {showCreateModal && (
-        <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-lg w-full p-8 shadow-2xl border border-slate-200 space-y-6">
-            <div className="flex items-center justify-between pb-4 border-b border-slate-100">
-              <h2 className="text-xl font-bold text-slate-900 flex items-center gap-2">
-                <Sparkles className="w-5 h-5 text-indigo-600" />
-                Plan New Blog Post
-              </h2>
-              <button
-                onClick={() => setShowCreateModal(false)}
-                className="text-slate-400 hover:text-slate-600 transition"
-              >
-                ✕
-              </button>
-            </div>
-
-            <form onSubmit={handleCreateSubmit} className="space-y-5">
-              <div>
-                <label className="block text-sm font-semibold text-slate-700 mb-2">Target Brand Property</label>
-                <select
-                  value={newBrandId}
-                  onChange={(e) => setNewBrandId(e.target.value)}
-                  className="w-full px-4 py-3 rounded-xl border border-slate-300 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                >
-                  {brands.map((b) => (
-                    <option key={b.id} value={b.id}>
-                      {b.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-sm font-semibold text-slate-700 mb-2">Publish Type</label>
-                <div className="grid grid-cols-2 gap-3">
-                  <button
-                    type="button"
-                    onClick={() => setNewType('post')}
-                    className={`py-3 rounded-xl text-sm font-bold border transition ${
-                      newType === 'post'
-                        ? 'bg-indigo-50 text-indigo-700 border-indigo-300 ring-2 ring-indigo-500/20'
-                        : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
-                    }`}
-                  >
-                    📝 Blog Post
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setNewType('page')}
-                    className={`py-3 rounded-xl text-sm font-bold border transition ${
-                      newType === 'page'
-                        ? 'bg-indigo-50 text-indigo-700 border-indigo-300 ring-2 ring-indigo-500/20'
-                        : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
-                    }`}
-                  >
-                    📄 Landing Page
-                  </button>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-sm font-semibold text-slate-700 mb-2">Topic or Working Title</label>
-                <input
-                  type="text"
-                  placeholder="e.g. 10 Natural Dog Treats for Digestive Health"
-                  value={newTitle}
-                  onChange={(e) => setNewTitle(e.target.value)}
-                  className="w-full px-4 py-3 rounded-xl border border-slate-300 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none placeholder:text-slate-400"
-                  required
-                  autoFocus
-                />
-              </div>
-
-              <details className="group rounded-xl border border-slate-200 bg-slate-50/60">
-                <summary className="flex items-center justify-between px-4 py-3 cursor-pointer select-none text-sm font-semibold text-slate-600 hover:text-slate-800">
-                  <span>Optional — keyword planning for richer SEO</span>
-                  <ChevronDown className="w-4 h-4 text-slate-400 group-open:rotate-180 transition" />
-                </summary>
-                <div className="px-4 pb-4 pt-1 space-y-3">
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-500 mb-1.5">Primary Keyword</label>
-                    <input
-                      type="text"
-                      placeholder="e.g. natural dog treats UK (optional)"
-                      value={newPrimaryKeyword}
-                      onChange={(e) => setNewPrimaryKeyword(e.target.value)}
-                      className="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-500 mb-1.5">Secondary Keywords</label>
-                    <input
-                      type="text"
-                      placeholder="Comma-separated, e.g. grain-free treats, puppy snacks (optional)"
-                      value={newSecondaryKeywords}
-                      onChange={(e) => setNewSecondaryKeywords(e.target.value)}
-                      className="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                    />
-                  </div>
-                  <p className="text-[11px] text-slate-400">
-                    Skip this and the inbuilt SEO tool will still analyse, score and refine the post automatically.
-                  </p>
-                </div>
-              </details>
-
-              <div className="pt-4 flex justify-end space-x-3">
-                <button
-                  type="button"
-                  onClick={() => setShowCreateModal(false)}
-                  className="px-5 py-2.5 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-100 transition"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-sm transition shadow-md flex items-center gap-2"
-                >
-                  Create & Launch Editor <ChevronRight className="w-4 h-4" />
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      {/* Create New Blog now opens the unified step-by-step wizard (App-level). */}
     </div>
   );
 };

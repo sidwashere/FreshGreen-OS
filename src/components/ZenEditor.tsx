@@ -29,6 +29,7 @@ import {
   SearchCheck,
   Rocket,
   ArrowRight,
+  ArrowLeft,
   AlertTriangle,
   ClipboardList,
   ArrowUp,
@@ -99,6 +100,8 @@ interface ZenEditorProps {
     contentType: 'post' | 'page',
     opts?: { primaryKeyword?: string; secondaryKeywords?: string[] }
   ) => void;
+  /** Opens the unified step-by-step New Blog wizard (App-level). */
+  onOpenWizard?: () => void;
   /** All content items for the workspace — used to build the brand's real
    * "related articles" list for dynamic template field population. */
   items?: ContentItem[];
@@ -213,6 +216,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
   onSaveItem,
   onSyncToWP,
   onCreateNewItem,
+  onOpenWizard,
   items = [],
 }) => {
   const [editingItem, setEditingItem] = useState<ContentItem | null>(item || null);
@@ -429,6 +433,37 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
     { label: 'WordPress credentials', ok: !!(brand?.wpUrl && brand?.wpAppPassword), optional: false },
   ];
   const publishReady = publishChecks.filter((c) => !c.optional).every((c) => c.ok);
+
+  // Per-stage gate: what must be true before the user can advance to the next
+  // step. Returns { ok, message } — message explains what's missing.
+  const stageGate = (status: PipelineStatus): { ok: boolean; message: string } => {
+    switch (status) {
+      case 'Planned':
+        return editingItem?.title?.trim()
+          ? { ok: true, message: 'Title set — ready to research' }
+          : { ok: false, message: 'Set a working title first' };
+      case 'Researching':
+        return editingItem?.primaryKeyword?.trim()
+          ? { ok: true, message: 'Focus keyphrase set — ready to write' }
+          : { ok: false, message: 'Add a focus keyphrase in the Brief tab first' };
+      case 'Generating':
+        return wordCount >= 50
+          ? { ok: true, message: `${wordCount} words written — ready to review` }
+          : { ok: false, message: `Write at least 50 words first (currently ${wordCount})` };
+      case 'Draft_Ready':
+        return liveSeoPct !== null && liveSeoPct >= 60
+          ? { ok: true, message: `SEO score ${liveSeoPct} — ready to go live` }
+          : liveSeoPct === null
+          ? { ok: false, message: 'Run the SEO audit to score this post first' }
+          : { ok: false, message: `SEO score ${liveSeoPct} — refine until it reaches 60+` };
+      case 'Published':
+        return publishReady
+          ? { ok: true, message: 'Pre-flight checks passed — publish to WordPress' }
+          : { ok: false, message: 'Complete the pre-flight checks below before publishing' };
+      default:
+        return { ok: true, message: '' };
+    }
+  };
   // Saving a WP draft is a WIP action — only content + credentials required
   // (no SEO score gate), so drafts can be parked at any point in the flow.
   const draftReady = !!editingItem?.title?.trim() && wordCount >= 50 && !!(brand?.wpUrl && brand?.wpAppPassword);
@@ -1687,7 +1722,15 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
               <p className="text-[11px] text-slate-400 mt-1">{brand.wpUrl.replace(/^https?:\/\//, '')}</p>
             )}
           </div>
-          {onCreateNewItem ? (
+          {onOpenWizard ? (
+            <button
+              onClick={onOpenWizard}
+              className="w-full py-3 rounded-xl text-white text-sm font-bold transition hover:brightness-110 shadow-sm flex items-center justify-center gap-2"
+              style={{ backgroundColor: bc }}
+            >
+              <Plus className="w-4 h-4" /> Start New Blog — Step by Step
+            </button>
+          ) : onCreateNewItem ? (
             <form
               onSubmit={(e) => {
                 e.preventDefault();
@@ -1841,8 +1884,8 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
               })}
             </div>
 
-            {/* Next action hint */}
-            <div className="mt-2 flex items-center justify-between gap-3">
+            {/* Next / Back action row — prominent branded buttons with per-step gates */}
+            <div className="mt-3 flex items-center justify-between gap-3">
               {currentStageIdx === WORKFLOW_STAGES.length - 1 ? (
                 <span className="text-[11px] font-bold text-emerald-600 flex items-center gap-1.5">
                   <Check className="w-3.5 h-3.5" /> This post is live — use Publish to WP to re-sync changes
@@ -1858,14 +1901,26 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                   ) : null}
                 </span>
               ) : nextStage ? (
-                <button
-                  onClick={() => handleSetStage(nextStage.status as PipelineStatus)}
-                  className="text-[11px] font-bold hover:opacity-80 flex items-center gap-1.5 transition group"
-                  style={{ color: brandColor(brand) }}
-                >
-                  Next: <span className="underline underline-offset-2">{nextStage.label}</span>
-                  <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
-                </button>
+                <div className="flex items-center gap-2">
+                  {currentStageIdx > 0 && (
+                    <button
+                      onClick={() => handleSetStage(WORKFLOW_STAGES[currentStageIdx - 1].status as PipelineStatus)}
+                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-bold text-slate-500 bg-slate-100 hover:bg-slate-200 transition"
+                      title={`Back to ${WORKFLOW_STAGES[currentStageIdx - 1].label}`}
+                    >
+                      <ArrowLeft className="w-3.5 h-3.5" /> Back
+                    </button>
+                  )}
+                  <button
+                    onClick={() => handleSetStage(nextStage.status as PipelineStatus)}
+                    disabled={!stageGate(editingItem.status as PipelineStatus).ok}
+                    title={stageGate(editingItem.status as PipelineStatus).message}
+                    className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-[11px] font-bold text-white transition hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
+                    style={{ backgroundColor: brandColor(brand) }}
+                  >
+                    Next Step: {nextStage.label} <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               ) : null}
               <span className="text-[11px] text-slate-400 hidden sm:block">
                 {currentStageIdx >= 0 ? WORKFLOW_STAGES[currentStageIdx].hint : 'Workflow stage'}

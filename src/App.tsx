@@ -14,6 +14,7 @@ import { Scoreboard } from './components/Scoreboard';
 import { CrmDashboard } from './components/CrmDashboard';
 import { ProductManager } from './components/ProductManager';
 import { LoginScreen } from './components/LoginScreen';
+import { NewBlogWizard } from './components/NewBlogWizard';
 import { INITIAL_BRANDS, INITIAL_CONTENT } from './data/initialData';
 import { Brand, ContentItem, PipelineStatus, AppUser, FeatureRequest } from './types';
 import { initAuth, db, USE_EMULATORS, adminCreateAccount, usernameToEmail } from './lib/firebase';
@@ -44,6 +45,10 @@ export default function App() {
   const [selectedBrandId, setSelectedBrandId] = useState<string>('dtp-brand');
   const [activeTab, setActiveTab] = useState<string>('pipeline');
   const [activeItemId, setActiveItemId] = useState<string>('item-1');
+
+  // Unified "New Blog" wizard — every manual creation trigger opens this.
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const openWizard = () => setWizardOpen(true);
 
   // Sidebar state: desktop collapse (persisted) + mobile drawer
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
@@ -839,6 +844,7 @@ export default function App() {
                 onEditItem={handleEditItem}
                 onDeleteItem={handleDeleteItem}
                 onCreateNewItem={handleCreateNewItem}
+                onOpenWizard={openWizard}
                 onImportWPPost={handleImportWPPost}
               />
             )}
@@ -852,6 +858,7 @@ export default function App() {
                   handleSaveItem(item);
                 }}
                 onCreateNewItem={handleCreateNewItem}
+                onOpenWizard={openWizard}
                 items={items}
               />
             )}
@@ -872,6 +879,7 @@ export default function App() {
                 onDeleteItem={handleDeleteItem}
                 onDeleteEntry={handleDeleteRegisterEntry}
                 onImportWPPosts={handleImportWPPosts}
+                onOpenWizard={openWizard}
                 onNavigateTab={navigateTab}
                 register={register}
               />
@@ -936,6 +944,17 @@ export default function App() {
           </main>
         </div>
       </div>
+
+      {/* Unified step-by-step New Blog wizard — opened from every manual
+          creation trigger (Dashboard, Content Hub, ZenEditor empty state). */}
+      <NewBlogWizard
+        open={wizardOpen}
+        brands={brands}
+        selectedBrandId={selectedBrandId}
+        onSelectBrand={setSelectedBrandId}
+        onCreateNewItem={handleCreateNewItem}
+        onClose={() => setWizardOpen(false)}
+      />
     </div>
   );
 }

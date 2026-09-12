@@ -36,6 +36,8 @@ interface ContentHubProps {
   onDeleteItem: (item: ContentItem) => Promise<{ success: boolean; message?: string }>;
   onDeleteEntry: (entryId: string) => Promise<{ success: boolean; message?: string }>;
   onImportWPPosts: (posts: any[], brand: Brand) => Promise<number>;
+  /** Opens the unified step-by-step New Blog wizard. */
+  onOpenWizard: () => void;
   onNavigateTab?: (tab: string) => void;
   register?: BlogRegisterEntry[];
 }
@@ -77,6 +79,7 @@ export const ContentHub: React.FC<ContentHubProps> = ({
   onDeleteItem,
   onDeleteEntry,
   onImportWPPosts,
+  onOpenWizard,
   onNavigateTab,
   register = [],
 }) => {
@@ -303,12 +306,9 @@ export const ContentHub: React.FC<ContentHubProps> = ({
   };
 
   const quickCreate = () => {
-    const title = newTitle.trim();
-    if (!title) return;
-    const brandId = brandScoped && brand ? brand.id : brands[0]?.id;
-    if (!brandId) return;
-    setNewTitle('');
-    onCreateNewItem(title, brandId, 'post');
+    // Route through the unified step-by-step wizard so every entry point
+    // offers the same guided flow (brand, type, title, keywords, confirm).
+    onOpenWizard();
   };
 
   const statCards = [
