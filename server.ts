@@ -127,6 +127,28 @@ async function publishItemToWordPress(item: any, brand: any): Promise<{ wpPostId
   return { wpPostId: wpPost.id, wpLiveUrl: wpPost.link || `${cleanUrl}/?p=${wpPost.id}` };
 }
 
+/**
+ * Systemwide duplicate-number guard: before an item is published, verify its
+ * blogNumber is not already used by ANOTHER item/register entry for the same
+ * brand. Returns the conflicting entry (or null when unique). This is the
+ * last line of defence — issuance is already duplicate-proof via the counter,
+ * but historic data may contain duplicates that must never reach WordPress.
+ */
+async function findBlogNumberConflict(item: any): Promise<{ itemId: string; title: string; blogNumber: string } | null> {
+  if (!adminDb || !item.blogNumber) return null;
+  const regSnap = await adminDb.collection('blog_register')
+    .where('brandId', '==', item.brandId)
+    .where('blogNumber', '==', item.blogNumber)
+    .limit(5)
+    .get();
+  for (const doc of regSnap.docs) {
+    if (doc.id !== item.id) {
+      return { itemId: doc.id, title: doc.data().title || '?', blogNumber: item.blogNumber };
+    }
+  }
+  return null;
+}
+
 /** One scheduler tick: find due Draft_Ready items in Firestore and publish them. */
 async function runServerPublishCheck(): Promise<{ published: number; errors: number }> {
   if (!adminDb) return { published: 0, errors: 0 };
@@ -174,6 +196,21 @@ async function runServerPublishCheck(): Promise<{ published: number; errors: num
       const brand = brandSnap.exists ? brandSnap.data() : null;
       if (!brand || !brand.wpUrl || !brand.wpUsername) {
         throw new Error('No valid brand connection');
+      }
+      // Systemwide duplicate guard: never publish an item whose blog number is
+      // already used by another item (historic duplicates must not reach WP).
+      const conflict = await findBlogNumberConflict(item);
+      if (conflict) {
+        const errMsg = `Duplicate blog number ${conflict.blogNumber} also used by "${conflict.title}" (${conflict.itemId}) — publish blocked.`;
+        console.error(`[AutoPublish] ⛔ ${errMsg}`);
+        logServerActivity({ category: 'error', status: 'error', action: 'publish_blocked_duplicate', title: `Publish blocked: ${item.title}`, message: errMsg, brandId: item.brandId, brandName: brand?.name });
+        await ref.update({
+          publishLock: AdminFieldValue.delete(),
+          lastAutoPublishError: errMsg,
+          updatedAt: new Date().toISOString(),
+        });
+        errors++;
+        continue;
       }
       const { wpPostId, wpLiveUrl } = await publishItemToWordPress(item, brand);
       const publishedAt = new Date().toISOString();
@@ -7138,6 +7175,124 @@ app.post('/api/blogs/next-number', async (req, res) => {
   } catch (err: any) {
     console.error('Error in /api/blogs/next-number:', err?.message || err);
     return res.status(500).json({ success: false, error: err?.message || 'Failed to issue blog number.' });
+  }
+});
+
+// ── Blog register audit + repair ─────────────────────────────────────────────
+// Scans blog_register + content_items for duplicate/missing blog numbers.
+//   GET  /api/blogs/audit            → report only
+//   POST /api/blogs/audit {fix:true} → re-issue unique numbers for duplicates
+//                                      (keeps the earliest entry per number),
+//                                      updates register + content items, and
+//                                      advances the per-brand counter.
+// The fix operation requires the DGC_NOTIFY_SECRET header (same as server-tick).
+app.get('/api/blogs/audit', async (req, res) => {
+  try {
+    if (!adminDb) return res.status(503).json({ success: false, error: 'Database unavailable.' });
+    const regSnap = await adminDb.collection('blog_register').get();
+    const itemsSnap = await adminDb.collection('content_items').get();
+
+    const byNumber = new Map<string, { id: string; title: string; brandId: string; dateCreated: string; status: string }[]>();
+    const missing: { id: string; title: string; brandId: string }[] = [];
+    const invalid: { id: string; blogNumber: string; title: string }[] = [];
+
+    for (const doc of regSnap.docs) {
+      const d = doc.data();
+      const num = d.blogNumber ? String(d.blogNumber).trim().toUpperCase() : '';
+      if (!num) { missing.push({ id: doc.id, title: d.title || '?', brandId: d.brandId || '?' }); continue; }
+      if (!/^[A-Z]{1,4}\d{3,}$/.test(num)) { invalid.push({ id: doc.id, blogNumber: num, title: d.title || '?' }); continue; }
+      const key = `${d.brandId}|${num}`;
+      if (!byNumber.has(key)) byNumber.set(key, []);
+      byNumber.get(key)!.push({ id: doc.id, title: d.title || '?', brandId: d.brandId || '?', dateCreated: d.dateCreated || d.updatedAt || '', status: d.status || '?' });
+    }
+
+    const duplicates: { blogNumber: string; brandId: string; count: number; entries: { id: string; title: string; dateCreated: string; status: string }[] }[] = [];
+    for (const [key, entries] of byNumber) {
+      if (entries.length > 1) {
+        const [brandId, blogNumber] = key.split('|');
+        duplicates.push({ blogNumber, brandId, count: entries.length, entries: entries.sort((a, b) => a.dateCreated.localeCompare(b.dateCreated)) });
+      }
+    }
+
+    // Items in content_items that have no register entry at all (register drift).
+    const regIds = new Set(regSnap.docs.map((d) => d.id));
+    const unregistered = itemsSnap.docs
+      .filter((d) => !regIds.has(d.id))
+      .map((d) => ({ id: d.id, title: d.data().title || '?', brandId: d.data().brandId || '?' }));
+
+    return res.json({
+      success: true,
+      at: new Date().toISOString(),
+      registerEntries: regSnap.size,
+      contentItems: itemsSnap.size,
+      duplicates: duplicates.length,
+      duplicateDetails: duplicates,
+      missingNumbers: missing,
+      invalidNumbers: invalid,
+      unregisteredItems: unregistered.length,
+      unregisteredDetails: unregistered.slice(0, 50),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Audit failed.' });
+  }
+});
+
+app.post('/api/blogs/audit', async (req, res) => {
+  try {
+    const { fix } = req.body || {};
+    if (!fix) return res.status(400).json({ success: false, error: 'Use GET for report, or POST {fix:true} to repair.' });
+    if (!adminDb) return res.status(503).json({ success: false, error: 'Database unavailable.' });
+    const secret = req.headers['x-fgos-secret'];
+    if (!process.env.DGC_NOTIFY_SECRET || secret !== process.env.DGC_NOTIFY_SECRET) {
+      return res.status(401).json({ success: false, error: 'Unauthorized — x-fgos-secret header required.' });
+    }
+
+    const regSnap = await adminDb.collection('blog_register').get();
+    const byNumber = new Map<string, { id: string; title: string; brandId: string; dateCreated: string }[]>();
+    for (const doc of regSnap.docs) {
+      const d = doc.data();
+      const num = d.blogNumber ? String(d.blogNumber).trim().toUpperCase() : '';
+      if (!num || !/^[A-Z]{1,4}\d{3,}$/.test(num)) continue;
+      const key = `${d.brandId}|${num}`;
+      if (!byNumber.has(key)) byNumber.set(key, []);
+      byNumber.get(key)!.push({ id: doc.id, title: d.title || '?', brandId: d.brandId || '?', dateCreated: d.dateCreated || d.updatedAt || '' });
+    }
+
+    const fixed: { id: string; oldNumber: string; newNumber: string; title: string }[] = [];
+    const errors: string[] = [];
+
+    for (const [key, entries] of byNumber) {
+      if (entries.length <= 1) continue;
+      const [brandId] = key.split('|');
+      const sorted = [...entries].sort((a, b) => a.dateCreated.localeCompare(b.dateCreated));
+      const dupes = sorted.slice(1);
+      for (const dupe of dupes) {
+        try {
+          // Issue a fresh unique number via the counter (transactional).
+          const counterRef = adminDb.collection('blog_counters').doc(brandId);
+          const seq = await adminDb.runTransaction(async (tx) => {
+            const snap = await tx.get(counterRef);
+            const next = (snap.exists ? (snap.data().nextSeq || 0) : 0) + 1;
+            tx.set(counterRef, { brandId, nextSeq: next, updatedAt: new Date().toISOString() });
+            return next;
+          });
+          const brandSnap = await adminDb.collection('brands').doc(brandId).get();
+          const code = resolveBrandCodeServer(brandSnap.exists ? brandSnap.data() : null);
+          const newNumber = `${code}${String(seq).padStart(3, '0')}`;
+          const now = new Date().toISOString();
+          await adminDb.collection('blog_register').doc(dupe.id).update({ blogNumber: newNumber, updatedAt: now });
+          await adminDb.collection('content_items').doc(dupe.id).update({ blogNumber: newNumber, updatedAt: now });
+          fixed.push({ id: dupe.id, oldNumber: key.split('|')[1], newNumber, title: dupe.title });
+        } catch (err: any) {
+          errors.push(`${dupe.id}: ${err?.message || err}`);
+        }
+      }
+    }
+
+    logServerActivity({ category: 'event', status: 'success', action: 'register_repair', title: `Blog register repair: ${fixed.length} duplicates re-numbered`, message: `Re-issued unique blog numbers for ${fixed.length} duplicate register entries.`, payload: { fixed: fixed.length, errors: errors.length } });
+    return res.json({ success: true, fixed, errors, fixedCount: fixed.length, errorCount: errors.length });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Repair failed.' });
   }
 });
 

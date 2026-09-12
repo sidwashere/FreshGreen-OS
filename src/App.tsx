@@ -572,7 +572,7 @@ export default function App() {
   // Shared shape for importing a real WordPress post into the pipeline.
   // Used by the Dashboard's single-post import AND the Content Hub's bulk pull,
   // so both surfaces always mirror posts identically.
-  const buildImportedWpItem = (post: any, brand: Brand): ContentItem & { userId: string } => {
+  const buildImportedWpItem = (post: any, brand: Brand, blogNumber: string): ContentItem & { userId: string } => {
     const now = new Date().toISOString();
     const link = post.link || '';
     return {
@@ -588,6 +588,7 @@ export default function App() {
       seoBrief: '',
       bodyHtml: post.content?.rendered || '',
       blocks: [],
+      blogNumber,
       wpPostId: post.id,
       wpLiveUrl: post.status === 'publish' ? link : '',
       wpPreviewUrl: link ? `${link}${link.includes('?') ? '&' : '?'}preview=true` : '',
@@ -595,6 +596,22 @@ export default function App() {
       updatedAt: now,
       userId: user!.uid,
     };
+  };
+
+  // Issue a unique blog number for a brand — server counter first (duplicate-
+  // proof), local monotonic fallback if the server is unreachable.
+  const issueBlogNumber = async (brandId: string): Promise<string> => {
+    try {
+      const resp = await fetch('/api/blogs/next-number', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brandId }),
+      });
+      const data = await resp.json();
+      if (data.success) return data.blogNumber;
+    } catch { /* fall through to local */ }
+    const brand = brands.find((b) => b.id === brandId);
+    return nextBlogNumber(brand, collectUsedNumbers(items, register, brandId)).number;
   };
 
   const handleImportWPPost = async (post: any) => {
@@ -610,10 +627,15 @@ export default function App() {
       return;
     }
 
-    const newItem = buildImportedWpItem(post, brand);
+    const blogNumber = await issueBlogNumber(brand.id);
+    const newItem = buildImportedWpItem(post, brand, blogNumber);
 
     try {
-      await setDoc(doc(db, 'content_items', newItem.id), newItem);
+      // Atomic: content item + register entry in one batch.
+      const batch = writeBatch(db);
+      batch.set(doc(db, 'content_items', newItem.id), newItem);
+      batch.set(doc(db, 'blog_register', newItem.id), sanitizeForFirestore(buildRegisterEntry(newItem as ContentItem, brand, user.uid)));
+      await batch.commit();
       setActiveItemId(newItem.id);
       setActiveTab('editor');
     } catch (err) {
@@ -629,9 +651,14 @@ export default function App() {
     for (const post of posts) {
       const existing = items.find((i) => i.wpPostId === post.id && i.brandId === brand.id);
       if (existing) continue;
-      const newItem = buildImportedWpItem(post, brand);
+      const blogNumber = await issueBlogNumber(brand.id);
+      const newItem = buildImportedWpItem(post, brand, blogNumber);
       try {
-        await setDoc(doc(db, 'content_items', newItem.id), newItem);
+        // Atomic: content item + register entry in one batch.
+        const batch = writeBatch(db);
+        batch.set(doc(db, 'content_items', newItem.id), newItem);
+        batch.set(doc(db, 'blog_register', newItem.id), sanitizeForFirestore(buildRegisterEntry(newItem as ContentItem, brand, user.uid)));
+        await batch.commit();
         imported++;
       } catch (err) {
         console.error('Failed to import post', err);

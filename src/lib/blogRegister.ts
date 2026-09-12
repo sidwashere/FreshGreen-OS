@@ -50,24 +50,25 @@ export function formatBlogNumber(seq: number): string {
 /**
  * Compute the next available blog number for a brand, given the set of
  * numbers already in use (from the register + existing content items).
- * Returns the lowest unused sequence so gaps are never reused and numbers
- * are never duplicated.
+ * MONOTONIC: returns max-used + 1, so a number can never be re-issued even
+ * if a blog is deleted, rescheduled or returned to draft (numbers are never
+ * reused — the design rule "a number can never be issued twice").
+ * This is the client-side fallback; the server counter is the primary path.
  */
 export function nextBlogNumber(
   brand: Brand | null | undefined,
   existingNumbers: string[],
 ): { number: string; seq: number } {
   const code = resolveBrandCode(brand);
-  const used = new Set(
-    existingNumbers
-      .map((n) => n?.trim().toUpperCase())
-      .filter(Boolean)
-      .map((n) => n as string),
-  );
-  let seq = 1;
-  while (used.has(`${code}${formatBlogNumber(seq)}`)) {
-    seq++;
+  let maxSeq = 0;
+  for (const n of existingNumbers) {
+    const m = /^[A-Z]{1,4}(\d{3,})$/.exec((n || '').trim().toUpperCase());
+    if (m) {
+      const seq = parseInt(m[1], 10);
+      if (seq > maxSeq) maxSeq = seq;
+    }
   }
+  const seq = maxSeq + 1;
   return { number: `${code}${formatBlogNumber(seq)}`, seq };
 }
 
@@ -126,7 +127,12 @@ export function buildRegisterEntry(
   const code = resolveBrandCode(brand);
   const entry: BlogRegisterEntry = {
     id: item.id,
-    blogNumber: item.blogNumber || `${code}${formatBlogNumber(1)}`,
+    // NEVER fabricate a number here. A missing blogNumber means the item has
+    // not been through number issuance yet (e.g. a WordPress import) — it must
+    // be issued via the server counter, not defaulted to {code}001 (which is
+    // how duplicate registers were created). The audit endpoint flags items
+    // without numbers so they can be issued.
+    blogNumber: item.blogNumber || '',
     brandId: item.brandId,
     brandCode: code,
     title: item.title,
