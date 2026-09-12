@@ -11,6 +11,10 @@ import {
   Tag,
   ArrowUpDown,
   RefreshCw,
+  Pencil,
+  Trash2,
+  Check,
+  X,
 } from 'lucide-react';
 
 interface BlogRegisterProps {
@@ -20,6 +24,8 @@ interface BlogRegisterProps {
   selectedBrandId: string;
   onSelectBrand: (id: string) => void;
   onEditItem: (item: ContentItem) => void;
+  onDeleteItem: (item: ContentItem) => Promise<{ success: boolean; message?: string }>;
+  onDeleteEntry: (entryId: string) => Promise<{ success: boolean; message?: string }>;
 }
 
 const statusChip: Record<string, string> = {
@@ -38,6 +44,20 @@ const fmtDate = (iso?: string): string => {
   return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
 };
 
+// Full timestamp (date + time) — used for Created / Published columns.
+const fmtDateTime = (iso?: string): string => {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '—';
+  return d.toLocaleString('en-GB', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+};
+
 export const BlogRegister: React.FC<BlogRegisterProps> = ({
   register,
   items,
@@ -45,10 +65,15 @@ export const BlogRegister: React.FC<BlogRegisterProps> = ({
   selectedBrandId,
   onSelectBrand,
   onEditItem,
+  onDeleteItem,
+  onDeleteEntry,
 }) => {
   const [search, setSearch] = useState('');
   const [sort, setSort] = useState<'number' | 'created' | 'published'>('number');
   const [sortAsc, setSortAsc] = useState(true);
+  const [armId, setArmId] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const brandScoped = selectedBrandId !== 'all';
   const scoped = useMemo(
@@ -111,6 +136,24 @@ export const BlogRegister: React.FC<BlogRegisterProps> = ({
     </button>
   );
 
+  // Two-step delete: first click arms the row, second click confirms.
+  const handleDelete = async (row: { entry: BlogRegisterEntry; item?: ContentItem }) => {
+    if (armId !== row.entry.id) { setArmId(row.entry.id); setError(null); return; }
+    setArmId(null);
+    setBusyId(row.entry.id);
+    setError(null);
+    try {
+      const res = row.item
+        ? await onDeleteItem(row.item)
+        : await onDeleteEntry(row.entry.id);
+      if (!res.success) setError(res.message || 'Delete failed.');
+    } catch (err: any) {
+      setError(err?.message || 'Delete failed.');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   return (
     <div className="space-y-4">
       {/* Header */}
@@ -149,6 +192,12 @@ export const BlogRegister: React.FC<BlogRegisterProps> = ({
         />
       </div>
 
+      {error && (
+        <div className="px-4 py-2.5 rounded-xl border border-red-200 bg-red-50 text-[12px] font-semibold text-red-700">
+          {error}
+        </div>
+      )}
+
       {/* Table */}
       <div className="bg-white rounded-2xl border border-slate-200/70 overflow-hidden">
         <div className="overflow-x-auto">
@@ -163,12 +212,13 @@ export const BlogRegister: React.FC<BlogRegisterProps> = ({
                 <th className="px-4 py-2.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">Refreshed</th>
                 <th className="px-4 py-2.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">Status</th>
                 <th className="px-4 py-2.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">Live Link</th>
+                <th className="px-4 py-2.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">Actions</th>
               </tr>
             </thead>
             <tbody>
               {sorted.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="px-4 py-10 text-center">
+                  <td colSpan={9} className="px-4 py-10 text-center">
                     <p className="text-[13px] font-semibold text-slate-500">No register entries yet.</p>
                     <p className="text-[12px] text-slate-400 mt-1">
                       Blog numbers are assigned automatically when posts are created and published.
@@ -207,10 +257,14 @@ export const BlogRegister: React.FC<BlogRegisterProps> = ({
                       )}
                     </td>
                     <td className="px-4 py-3 text-[11px] text-slate-500 whitespace-nowrap">
-                      <span className="inline-flex items-center gap-1"><Calendar className="w-3 h-3 text-slate-300" /> {fmtDate(entry.dateCreated)}</span>
+                      <span className="inline-flex items-center gap-1" title={entry.dateCreated ? new Date(entry.dateCreated).toLocaleString('en-GB') : undefined}>
+                        <Calendar className="w-3 h-3 text-slate-300" /> {fmtDateTime(entry.dateCreated)}
+                      </span>
                     </td>
                     <td className="px-4 py-3 text-[11px] text-slate-500 whitespace-nowrap">
-                      <span className="inline-flex items-center gap-1"><Calendar className="w-3 h-3 text-slate-300" /> {fmtDate(entry.datePublished)}</span>
+                      <span className="inline-flex items-center gap-1" title={entry.datePublished ? new Date(entry.datePublished).toLocaleString('en-GB') : undefined}>
+                        <Calendar className="w-3 h-3 text-slate-300" /> {fmtDateTime(entry.datePublished)}
+                      </span>
                     </td>
                     <td className="px-4 py-3 text-[11px] text-slate-500 whitespace-nowrap">
                       {entry.repurposeCount ? (
@@ -242,6 +296,51 @@ export const BlogRegister: React.FC<BlogRegisterProps> = ({
                       ) : (
                         <span className="text-[11px] text-slate-300">—</span>
                       )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => item && onEditItem(item)}
+                          disabled={!item || busyId === entry.id}
+                          title={item ? 'Open in ZenEditor' : 'No content item to edit (orphaned register entry)'}
+                          className="p-1.5 rounded-lg border border-slate-200 text-slate-500 hover:text-emerald-700 hover:border-emerald-300 hover:bg-emerald-50 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                        {armId === entry.id ? (
+                          <span className="inline-flex items-center gap-1">
+                            <button
+                              onClick={() => handleDelete({ entry, item })}
+                              disabled={busyId === entry.id}
+                              className="p-1.5 rounded-lg bg-red-600 text-white hover:bg-red-700 transition disabled:opacity-50"
+                              title="Confirm delete"
+                            >
+                              <Check className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => setArmId(null)}
+                              disabled={busyId === entry.id}
+                              className="p-1.5 rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-100 transition disabled:opacity-50"
+                              title="Cancel"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => handleDelete({ entry, item })}
+                            disabled={busyId === entry.id}
+                            title={item ? 'Delete item + register entry (trashes WordPress post)' : 'Delete register entry'}
+                            className="p-1.5 rounded-lg border border-slate-200 text-slate-500 hover:text-red-600 hover:border-red-300 hover:bg-red-50 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            {busyId === entry.id ? (
+                              <span className="block w-3.5 h-3.5 border-2 border-red-300 border-t-red-600 rounded-full animate-spin" />
+                            ) : (
+                              <Trash2 className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))

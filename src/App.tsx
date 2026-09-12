@@ -482,6 +482,19 @@ export default function App() {
     }
   };
 
+  // Deletes a Blog Register entry only (for orphaned entries whose content
+  // item no longer exists — e.g. legacy test artifacts).
+  const handleDeleteRegisterEntry = async (entryId: string): Promise<{ success: boolean; message?: string }> => {
+    if (!user) return { success: false, message: 'Not signed in.' };
+    try {
+      await deleteDoc(doc(db, 'blog_register', entryId));
+      return { success: true };
+    } catch (err: any) {
+      console.error('Failed to delete register entry', err);
+      return { success: false, message: err?.message || 'Failed to delete the register entry.' };
+    }
+  };
+
   const handleCreateNewItem = async (
     title: string,
     brandId: string,
@@ -857,6 +870,7 @@ export default function App() {
                 onSaveItem={handleSaveItem}
                 onCreateNewItem={handleCreateNewItem}
                 onDeleteItem={handleDeleteItem}
+                onDeleteEntry={handleDeleteRegisterEntry}
                 onImportWPPosts={handleImportWPPosts}
                 onNavigateTab={navigateTab}
                 register={register}

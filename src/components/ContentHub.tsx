@@ -34,6 +34,7 @@ interface ContentHubProps {
   onSaveItem: (item: ContentItem) => void;
   onCreateNewItem: (title: string, brandId: string, contentType: 'post' | 'page') => void;
   onDeleteItem: (item: ContentItem) => Promise<{ success: boolean; message?: string }>;
+  onDeleteEntry: (entryId: string) => Promise<{ success: boolean; message?: string }>;
   onImportWPPosts: (posts: any[], brand: Brand) => Promise<number>;
   onNavigateTab?: (tab: string) => void;
   register?: BlogRegisterEntry[];
@@ -74,6 +75,7 @@ export const ContentHub: React.FC<ContentHubProps> = ({
   onSaveItem,
   onCreateNewItem,
   onDeleteItem,
+  onDeleteEntry,
   onImportWPPosts,
   onNavigateTab,
   register = [],
@@ -369,6 +371,8 @@ export const ContentHub: React.FC<ContentHubProps> = ({
           selectedBrandId={selectedBrandId}
           onSelectBrand={onSelectBrand}
           onEditItem={onEditItem}
+          onDeleteItem={onDeleteItem}
+          onDeleteEntry={onDeleteEntry}
         />
       ) : (
       <>
