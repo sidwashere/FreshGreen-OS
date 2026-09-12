@@ -7331,6 +7331,7 @@ app.post('/api/blogs/audit', async (req, res) => {
       if (!brandId) { errors.push(`${doc.id}: no brandId — cannot re-issue`); continue; }
       try {
         const used = usedByBrand.get(brandId) || new Set<number>();
+        if (!usedByBrand.has(brandId)) usedByBrand.set(brandId, used);
         const brandSnap = await adminDb.collection('brands').doc(brandId).get();
         const code = resolveBrandCodeServer(brandSnap.exists ? brandSnap.data() : null);
         const newNumber = issueNext(brandId, used, code);
@@ -7354,6 +7355,7 @@ app.post('/api/blogs/audit', async (req, res) => {
       if (!brandId) { errors.push(`${doc.id}: no brandId — cannot register`); continue; }
       try {
         const used = usedByBrand.get(brandId) || new Set<number>();
+        if (!usedByBrand.has(brandId)) usedByBrand.set(brandId, used);
         const brandSnap = await adminDb.collection('brands').doc(brandId).get();
         const brand = brandSnap.exists ? brandSnap.data() : null;
         const code = resolveBrandCodeServer(brand);
@@ -7401,6 +7403,19 @@ app.post('/api/blogs/audit', async (req, res) => {
         } catch (err: any) {
           errors.push(`${id}: ${err?.message || err}`);
         }
+      }
+    }
+
+    // 5) Final pass: every brand touched by any repair step must have its
+    //    counter advanced past the highest number now in use, so the next
+    //    /api/blogs/next-number call can never collide with a repaired or
+    //    newly registered entry.
+    for (const [brandId, used] of usedByBrand) {
+      const counterRef = adminDb.collection('blog_counters').doc(brandId);
+      const counterSnap = await counterRef.get();
+      const counterNext = used.size ? Math.max(...used) + 1 : 1;
+      if (!counterSnap.exists || (counterSnap.data().nextSeq || 0) < counterNext) {
+        await counterRef.set({ brandId, nextSeq: counterNext, updatedAt: new Date().toISOString() });
       }
     }
 
