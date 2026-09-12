@@ -5,6 +5,7 @@ import { runSeoFix } from '../lib/seoFix';
 import { fetchAiPref } from '../lib/keys';
 import { BlogRegisterEntry } from '../lib/blogRegister';
 import { BlogRegister } from './BlogRegister';
+import { BrandSwitcher } from './BrandSwitcher';
 import {
   Search,
   RefreshCw,
@@ -395,15 +396,12 @@ export const ContentHub: React.FC<ContentHubProps> = ({
       <div className="bg-white rounded-2xl border border-slate-200/70 p-4 flex flex-col sm:flex-row gap-3 sm:items-center">
         <div className="flex items-center gap-2 shrink-0">
           <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Brand</span>
-          <select
-            value={selectedBrandId}
-            onChange={(e) => onSelectBrand(e.target.value)}
-            className="text-[13px] font-semibold px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-200"
-          >
-            {brands.map((b) => (
-              <option key={b.id} value={b.id}>{b.name}</option>
-            ))}
-          </select>
+          <BrandSwitcher
+            brands={brands}
+            selectedBrandId={selectedBrandId}
+            onSelectBrand={onSelectBrand}
+            size="sm"
+          />
         </div>
         <div className="flex-1 flex gap-2">
           <input

@@ -2,15 +2,18 @@ import { fetchGlobalKeys, fetchAiPref } from "../lib/keys";
 import React, { useState } from 'react';
 import { Brand } from '../types';
 import { Sparkles, Wand2, Image as ImageIcon, RefreshCw, Check, Copy } from 'lucide-react';
+import { BrandSwitcher } from './BrandSwitcher';
 
 interface NanoBananaStudioModalProps {
   brands: Brand[];
   selectedBrandId: string;
+  onSelectBrand: (id: string) => void;
 }
 
 export const NanoBananaStudioModal: React.FC<NanoBananaStudioModalProps> = ({
   brands,
   selectedBrandId,
+  onSelectBrand,
 }) => {
   const currentBrand = brands.find((b) => b.id === selectedBrandId) || brands[0];
   const [topic, setTopic] = useState('Fresh Organic Salmon Kibble for Senior Dogs');
@@ -131,14 +134,22 @@ export const NanoBananaStudioModal: React.FC<NanoBananaStudioModalProps> = ({
 
   return (
     <div className="max-w-6xl mx-auto p-6 space-y-6">
-      <div className="pb-4 border-b border-slate-200">
-        <h1 className="text-2xl font-bold text-slate-900 tracking-tight flex items-center gap-2">
-          <Wand2 className="w-6 h-6 text-amber-500" />
-          AI Image Generator
-        </h1>
-        <p className="text-sm text-slate-500 mt-1">
-          Architect high-impact AI visual prompts and generate brand-tailored featured images for WordPress.
-        </p>
+      <div className="pb-4 border-b border-slate-200 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900 tracking-tight flex items-center gap-2">
+            <Wand2 className="w-6 h-6 text-amber-500" />
+            AI Image Generator
+          </h1>
+          <p className="text-sm text-slate-500 mt-1">
+            Architect high-impact AI visual prompts and generate brand-tailored featured images for WordPress.
+          </p>
+        </div>
+        <BrandSwitcher
+          brands={brands}
+          selectedBrandId={selectedBrandId}
+          onSelectBrand={onSelectBrand}
+          size="sm"
+        />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">

@@ -3,6 +3,7 @@ import {
   Package, Search, Plus, Pencil, Trash2, X, ChevronLeft, ChevronRight,
   Loader2, AlertTriangle, CheckCircle2, RefreshCw, FolderTree, Settings2, Trash
 } from 'lucide-react';
+import { BrandSwitcher } from './BrandSwitcher';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -357,9 +358,9 @@ const EditPanel: React.FC<{
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-interface ProductManagerProps { brands: Brand[]; selectedBrandId: string; }
+interface ProductManagerProps { brands: Brand[]; selectedBrandId: string; onSelectBrand: (id: string) => void; }
 
-export const ProductManager: React.FC<ProductManagerProps> = ({ brands, selectedBrandId }) => {
+export const ProductManager: React.FC<ProductManagerProps> = ({ brands, selectedBrandId, onSelectBrand }) => {
   const activeBrand = useMemo(() => brands.find((b) => b.id === selectedBrandId) || brands[0], [brands, selectedBrandId]);
   const hasWcCreds = Boolean(activeBrand?.wcConsumerKey && activeBrand?.wcConsumerSecret);
 
@@ -633,6 +634,12 @@ export const ProductManager: React.FC<ProductManagerProps> = ({ brands, selected
             <p className="text-xs text-slate-500">{activeBrand?.name} — {productTotal} products</p>
           </div>
         </div>
+        <BrandSwitcher
+          brands={brands}
+          selectedBrandId={selectedBrandId}
+          onSelectBrand={onSelectBrand}
+          size="sm"
+        />
       </div>
 
       {/* Sub-tabs */}

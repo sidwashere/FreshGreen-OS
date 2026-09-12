@@ -7,6 +7,7 @@ import {
   logActivity 
 } from '../lib/activityLogger';
 import { Brand } from '../types';
+import { BrandSwitcher } from './BrandSwitcher';
 import {
   Activity,
   Search,
@@ -34,9 +35,10 @@ import {
 interface ActivityLogProps {
   brands: Brand[];
   selectedBrandId?: string;
+  onSelectBrand?: (id: string) => void;
 }
 
-export const ActivityLogView: React.FC<ActivityLogProps> = ({ brands, selectedBrandId }) => {
+export const ActivityLogView: React.FC<ActivityLogProps> = ({ brands, selectedBrandId, onSelectBrand }) => {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<ActivityCategory | 'all'>('all');
@@ -211,6 +213,15 @@ export const ActivityLogView: React.FC<ActivityLogProps> = ({ brands, selectedBr
 
         {/* Action Controls */}
         <div className="flex items-center gap-2">
+          {onSelectBrand && (
+            <BrandSwitcher
+              brands={brands}
+              selectedBrandId={selectedBrandId || 'all'}
+              onSelectBrand={onSelectBrand}
+              allLabel="All brands"
+              size="sm"
+            />
+          )}
           <button
             onClick={() => {
               logActivity({

@@ -868,7 +868,11 @@ export default function App() {
             )}
 
             {activeTab === 'nano-banana' && (
-              <NanoBananaStudioModal brands={brands} selectedBrandId={selectedBrandId} />
+              <NanoBananaStudioModal
+                brands={brands}
+                selectedBrandId={selectedBrandId}
+                onSelectBrand={setSelectedBrandId}
+              />
             )}
 
             {activeTab === 'content-hub' && (
@@ -904,6 +908,7 @@ export default function App() {
                 items={items}
                 brands={brands}
                 selectedBrandId={selectedBrandId}
+                onSelectBrand={setSelectedBrandId}
                 onSaveItem={handleSaveItem}
                 onCreateNewItem={handleCreateNewItem}
                 onDeleteItem={handleDeleteItem}
@@ -912,21 +917,34 @@ export default function App() {
             )}
 
             {activeTab === 'scoreboard' && (
-              <Scoreboard brands={brands} />
+              <Scoreboard
+                brands={brands}
+                selectedBrandId={selectedBrandId}
+                onSelectBrand={setSelectedBrandId}
+              />
             )}
 
             {activeTab === 'crm' && (
-              <CrmDashboard brands={brands} />
+              <CrmDashboard
+                brands={brands}
+                selectedBrandId={selectedBrandId}
+                onSelectBrand={setSelectedBrandId}
+              />
             )}
 
             {activeTab === 'products' && (
-              <ProductManager brands={brands} selectedBrandId={selectedBrandId} />
+              <ProductManager
+                brands={brands}
+                selectedBrandId={selectedBrandId}
+                onSelectBrand={setSelectedBrandId}
+              />
             )}
 
             {activeTab === 'activity-log' && (
               <ActivityLogView
                 brands={brands}
                 selectedBrandId={selectedBrandId}
+                onSelectBrand={setSelectedBrandId}
               />
             )}
 
@@ -942,6 +960,7 @@ export default function App() {
             <SettingsTab
               brands={brands}
               selectedBrandId={selectedBrandId}
+              onSelectBrand={setSelectedBrandId}
               currentUser={appUser}
             />
           )}

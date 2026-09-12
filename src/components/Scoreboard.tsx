@@ -7,6 +7,8 @@ import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
 } from 'recharts';
 import { fetchGlobalKeys } from '../lib/keys';
+import { Brand } from '../types';
+import { BrandSwitcher } from './BrandSwitcher';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -112,14 +114,15 @@ const KpiCard: React.FC<{ label: string; value: string; sub?: string; icon: Reac
 // ─── Main component ───────────────────────────────────────────────────────────
 
 interface ScoreboardProps {
-  brands: { id: string; name: string; baseOrderSources?: string[]; baseInventoryId?: number }[];
+  brands: Brand[];
+  selectedBrandId: string;
+  onSelectBrand: (id: string) => void;
 }
 
-export const Scoreboard: React.FC<ScoreboardProps> = ({ brands }) => {
+export const Scoreboard: React.FC<ScoreboardProps> = ({ brands, selectedBrandId, onSelectBrand }) => {
   const [token, setToken] = useState<string>('');
   const [tokenReady, setTokenReady] = useState(false);
   const [days, setDays] = useState(7);
-  const [brandId, setBrandId] = useState<string>('all');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [sources, setSources] = useState<SourceInfo[]>([]);
@@ -128,7 +131,7 @@ export const Scoreboard: React.FC<ScoreboardProps> = ({ brands }) => {
   const [products, setProducts] = useState<{ count: number; inStock: number; outOfStock: number; totalStock: number } | null>(null);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
 
-  const activeBrand = brands.find((b) => b.id === brandId) || null;
+  const activeBrand = brands.find((b) => b.id === selectedBrandId) || null;
   const sourceFilter = activeBrand?.baseOrderSources?.length
     ? activeBrand.baseOrderSources.join(',')
     : '';
@@ -198,18 +201,14 @@ export const Scoreboard: React.FC<ScoreboardProps> = ({ brands }) => {
           </p>
         </div>
         <div className="flex items-center gap-3">
-          {/* Brand selector — one brand at a time */}
-          <select
-            value={brandId}
-            onChange={(e) => setBrandId(e.target.value)}
-            className="px-3 py-2 rounded-lg border border-slate-200 bg-white text-sm font-medium text-slate-700 focus:ring-2 focus:ring-emerald-500 focus:outline-none"
-            title="Show one brand's orders & revenue at a time"
-          >
-            <option value="all">All brands</option>
-            {brands.map((b) => (
-              <option key={b.id} value={b.id}>{b.name}</option>
-            ))}
-          </select>
+          {/* Brand selector — one brand at a time (global switcher) */}
+          <BrandSwitcher
+            brands={brands}
+            selectedBrandId={selectedBrandId}
+            onSelectBrand={onSelectBrand}
+            allLabel="All brands"
+            size="sm"
+          />
           <div className="flex rounded-lg border border-slate-200 overflow-hidden">
             {[7, 30, 90].map((d) => (
               <button

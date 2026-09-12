@@ -1,6 +1,7 @@
 import React from 'react';
 import { Brand, AppUser } from '../types';
-import { Globe, ChevronDown, Plus, Settings, Menu, PanelLeftClose, PanelLeftOpen, ShieldCheck } from 'lucide-react';
+import { Globe, Plus, Settings, Menu, PanelLeftClose, PanelLeftOpen, ShieldCheck } from 'lucide-react';
+import { BrandSwitcher } from './BrandSwitcher';
 
 interface NavbarProps {
   brands: Brand[];
@@ -47,27 +48,14 @@ export const Navbar: React.FC<NavbarProps> = ({
           </button>
         )}
 
-        {/* Brand Selector Dropdown */}
-        <div className="relative group min-w-0">
-          <div className="flex items-center space-x-2 md:space-x-3 bg-white hover:bg-slate-50 border border-slate-200/60 shadow-sm rounded-xl px-2.5 md:px-4 py-2 transition cursor-pointer max-w-[52vw] md:max-w-none">
-            <div 
-              className="w-3 h-3 rounded-full shadow-sm shrink-0"
-              style={{ backgroundColor: currentBrand?.primaryColor || '#4f46e5' }}
-            />
-            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider hidden lg:inline">Active Brand:</span>
-            <select
-              value={selectedBrandId}
-              onChange={(e) => onSelectBrand(e.target.value)}
-              className="bg-transparent text-sm font-bold text-slate-800 focus:outline-none cursor-pointer pr-3 appearance-none truncate max-w-[32vw] md:max-w-[220px]"
-            >
-              {brands.map((b) => (
-                <option key={b.id} value={b.id} className="text-slate-900">
-                  {b.name}
-                </option>
-              ))}
-            </select>
-            <ChevronDown className="w-4 h-4 text-slate-400 pointer-events-none shrink-0" />
-          </div>
+        {/* Brand Selector Dropdown — global, applies to every screen */}
+        <div className="min-w-0">
+          <BrandSwitcher
+            brands={brands}
+            selectedBrandId={selectedBrandId}
+            onSelectBrand={onSelectBrand}
+            showAll={false}
+          />
         </div>
       </div>
 

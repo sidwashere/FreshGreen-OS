@@ -4,6 +4,7 @@ import {
   Loader2, AlertTriangle, Send, Tag, ListChecks, Key, ExternalLink
 } from 'lucide-react';
 import { fetchGlobalKeys } from '../lib/keys';
+import { BrandSwitcher } from './BrandSwitcher';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -86,9 +87,11 @@ const StatusPill: React.FC<{ ok: boolean; label: string }> = ({ ok, label }) => 
 
 interface CrmDashboardProps {
   brands: BrandLite[];
+  selectedBrandId: string;
+  onSelectBrand: (id: string) => void;
 }
 
-export const CrmDashboard: React.FC<CrmDashboardProps> = ({ brands }) => {
+export const CrmDashboard: React.FC<CrmDashboardProps> = ({ brands, selectedBrandId, onSelectBrand }) => {
   const [token, setToken] = useState<string>('');
   const [tokenReady, setTokenReady] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -217,14 +220,23 @@ export const CrmDashboard: React.FC<CrmDashboardProps> = ({ brands }) => {
             MailerLite + WooCommerce + Amelia — subscribers, groups, tags and automations in one place.
           </p>
         </div>
-        <button
-          onClick={load}
-          disabled={loading || !token}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 text-white text-sm font-medium hover:bg-emerald-700 disabled:opacity-50"
-        >
-          <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-          Refresh
-        </button>
+        <div className="flex items-center gap-3">
+          <BrandSwitcher
+            brands={brands}
+            selectedBrandId={selectedBrandId}
+            onSelectBrand={onSelectBrand}
+            allLabel="All brands"
+            size="sm"
+          />
+          <button
+            onClick={load}
+            disabled={loading || !token}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 text-white text-sm font-medium hover:bg-emerald-700 disabled:opacity-50"
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       {/* Token missing warning */}

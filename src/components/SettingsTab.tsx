@@ -7,10 +7,12 @@ import { fetchAiPref, saveAiPref, AI_MODEL_OPTIONS } from '../lib/keys';
 import { WPBridgeTester } from './WPBridgeTester';
 import { CPanelExporter } from './CPanelExporter';
 import { Wizard } from './Wizard';
+import { BrandSwitcher } from './BrandSwitcher';
 
 interface SettingsProps {
   brands: Brand[];
   selectedBrandId: string;
+  onSelectBrand: (id: string) => void;
   currentUser?: AppUser | null;
 }
 
@@ -781,7 +783,7 @@ const AiModelsTab: React.FC = () => {
   );
 };
 
-export const SettingsTab: React.FC<SettingsProps> = ({ brands, selectedBrandId, currentUser }) => {
+export const SettingsTab: React.FC<SettingsProps> = ({ brands, selectedBrandId, onSelectBrand, currentUser }) => {
   const [activeSubTab, setActiveSubTab] = useState<'api-keys' | 'ai-models' | 'wp-bridge' | 'deployment' | 'users' | 'wizard'>('api-keys');
 
   const subTabs = [
@@ -798,6 +800,14 @@ export const SettingsTab: React.FC<SettingsProps> = ({ brands, selectedBrandId, 
       {/* Settings Navigation Sidebar */}
       <div className="w-full md:w-64 shrink-0">
         <div className="sticky top-8 space-y-1">
+          <div className="px-4 mb-4">
+            <BrandSwitcher
+              brands={brands}
+              selectedBrandId={selectedBrandId}
+              onSelectBrand={onSelectBrand}
+              size="sm"
+            />
+          </div>
           <h2 className="text-xs font-bold text-slate-400 uppercase tracking-widest px-4 mb-4">Settings & Configs</h2>
           {subTabs.map((tab) => {
             const Icon = tab.icon;

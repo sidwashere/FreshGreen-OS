@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { ContentItem, Brand } from '../types';
 import { BlogRegisterEntry, resolveBrandCode } from '../lib/blogRegister';
+import { BrandSwitcher } from './BrandSwitcher';
 import {
   Search,
   ExternalLink,
@@ -169,15 +170,12 @@ export const BlogRegister: React.FC<BlogRegisterProps> = ({
         </div>
         <div className="flex items-center gap-2">
           <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Brand</span>
-          <select
-            value={selectedBrandId}
-            onChange={(e) => onSelectBrand(e.target.value)}
-            className="text-[13px] font-semibold px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-200"
-          >
-            {brands.map((b) => (
-              <option key={b.id} value={b.id}>{b.name}</option>
-            ))}
-          </select>
+          <BrandSwitcher
+            brands={brands}
+            selectedBrandId={selectedBrandId}
+            onSelectBrand={onSelectBrand}
+            size="sm"
+          />
         </div>
       </div>
 

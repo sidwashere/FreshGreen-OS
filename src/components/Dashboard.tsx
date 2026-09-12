@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { ContentItem, Brand } from '../types';
 import { countWords } from '../lib/wpSync';
+import { BrandSwitcher } from './BrandSwitcher';
 import {
   Plus,
   Search,
@@ -995,16 +996,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
             />
           </div>
           <Tip text="Which site(s) the dashboard stats cover: all four properties at once, or a single brand's numbers." side="bottom">
-            <select
-              value={selectedBrandId}
-              onChange={(e) => onSelectBrand(e.target.value)}
-              className="px-4 py-2.5 rounded-xl bg-white border border-slate-200 text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-sm cursor-pointer"
-            >
-              <option value="all">All Brands Properties ({items.length})</option>
-              {brands.map((b) => (
-                <option key={b.id} value={b.id}>{b.name}</option>
-              ))}
-            </select>
+            <BrandSwitcher
+              brands={brands}
+              selectedBrandId={selectedBrandId}
+              onSelectBrand={onSelectBrand}
+              allLabel={`All Brands Properties (${items.length})`}
+              size="sm"
+            />
           </Tip>
         </div>
 

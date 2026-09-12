@@ -4,6 +4,7 @@ import { db } from '../lib/firebase';
 import { logActivity } from '../lib/activityLogger';
 import { ContentItem, Brand, AutoBlogOverrides, SocialContentPackage } from '../types';
 import { GenerationInfoPanel } from './GenerationInfoPanel';
+import { BrandSwitcher } from './BrandSwitcher';
 import {
   FileSpreadsheet,
   RefreshCw,
@@ -36,6 +37,7 @@ interface AutoBlogSchedulerProps {
   items: ContentItem[];
   brands: Brand[];
   selectedBrandId: string;
+  onSelectBrand: (id: string) => void;
   onSaveItem: (item: ContentItem) => void;
   onCreateNewItem: (
     title: string,
@@ -427,6 +429,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
   items,
   brands,
   selectedBrandId,
+  onSelectBrand,
   onSaveItem,
   onCreateNewItem,
   onDeleteItem,
@@ -1603,15 +1606,12 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
 
             <div>
               <label className="block text-xs font-medium text-slate-500 mb-1">Default Brand</label>
-              <select
-                value={selectedBrandId}
-                className="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-violet-500 outline-none"
-                disabled
-              >
-                {brands.map((b) => (
-                  <option key={b.id} value={b.id}>{b.name}</option>
-                ))}
-              </select>
+              <BrandSwitcher
+                brands={brands}
+                selectedBrandId={selectedBrandId}
+                onSelectBrand={onSelectBrand}
+                size="sm"
+              />
             </div>
 
             <div className="grid grid-cols-2 gap-3">
