@@ -7066,6 +7066,81 @@ app.post('/api/logs/record', async (req, res) => {
   }
 });
 
+// ── Blog number issuance (transactional, duplicate-proof) ────────────────────
+// The client used to compute the next blog number locally, which could issue
+// duplicates when two clients created items at the same time. This endpoint
+// issues numbers atomically via a per-brand counter doc (`blog_counters`),
+// seeded from the existing register + content items on first use.
+const DEFAULT_BRAND_CODES_SERVER: Record<string, string> = {
+  'daniels-tasty-petfoods': 'DTP',
+  'organised-and-clean': 'OC',
+  'home-at-peace': 'HP',
+  'fresh-green-classics': 'FGC',
+};
+
+function resolveBrandCodeServer(brand: any): string {
+  if (!brand) return 'BR';
+  if (brand.brandCode && String(brand.brandCode).trim()) return String(brand.brandCode).trim().toUpperCase();
+  const def = DEFAULT_BRAND_CODES_SERVER[brand.slug];
+  if (def) return def;
+  const words = String(brand.slug || '')
+    .split(/[^a-z0-9]+/i)
+    .filter(Boolean)
+    .map((w: string) => w[0].toUpperCase())
+    .join('');
+  return (words || 'BR').slice(0, 4);
+}
+
+app.post('/api/blogs/next-number', async (req, res) => {
+  try {
+    const { brandId } = req.body;
+    if (!brandId || typeof brandId !== 'string') {
+      return res.status(400).json({ success: false, error: 'brandId required.' });
+    }
+    if (!adminDb) {
+      return res.status(503).json({ success: false, error: 'Database unavailable.' });
+    }
+    const brandSnap = await adminDb.collection('brands').doc(brandId).get();
+    if (!brandSnap.exists) {
+      return res.status(404).json({ success: false, error: 'Brand not found.' });
+    }
+    const brand = brandSnap.data();
+    const code = resolveBrandCodeServer(brand);
+
+    // Seed from existing numbers OUTSIDE the transaction (transactions cannot
+    // run collection queries). The counter doc then serialises issuance.
+    const counterRef = adminDb.collection('blog_counters').doc(brandId);
+    const counterSnap = await counterRef.get();
+    if (!counterSnap.exists) {
+      const regSnap = await adminDb.collection('blog_register').where('brandId', '==', brandId).get();
+      const itemsSnap = await adminDb.collection('content_items').where('brandId', '==', brandId).get();
+      const usedSeqs = new Set<number>();
+      [...regSnap.docs, ...itemsSnap.docs].forEach((d) => {
+        const n = d.data().blogNumber;
+        if (typeof n === 'string') {
+          const m = /^[A-Z]{1,4}(\d{3,})$/.exec(n.trim().toUpperCase());
+          if (m) usedSeqs.add(parseInt(m[1], 10));
+        }
+      });
+      const nextSeq = (usedSeqs.size ? Math.max(...usedSeqs) : 0) + 1;
+      await counterRef.set({ brandId, nextSeq, updatedAt: new Date().toISOString() });
+    }
+
+    const seq = await adminDb.runTransaction(async (tx) => {
+      const snap = await tx.get(counterRef);
+      const next = (snap.exists ? (snap.data().nextSeq || 0) : 0) + 1;
+      tx.set(counterRef, { brandId, nextSeq: next, updatedAt: new Date().toISOString() });
+      return next;
+    });
+
+    const blogNumber = `${code}${String(seq).padStart(3, '0')}`;
+    return res.json({ success: true, blogNumber, seq });
+  } catch (err: any) {
+    console.error('Error in /api/blogs/next-number:', err?.message || err);
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to issue blog number.' });
+  }
+});
+
 /** Health/status endpoint — shows whether the server-side scheduler is armed. */
 app.get('/api/autoblog/server-status', (req, res) => {
   res.json({

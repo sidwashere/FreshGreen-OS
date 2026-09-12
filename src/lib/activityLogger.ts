@@ -66,7 +66,10 @@ export function subscribeToLogs(
   options?: { category?: ActivityCategory; brandId?: string; maxLogs?: number }
 ) {
   const max = options?.maxLogs || 250;
-  const constraints: any[] = [orderBy('timestamp', 'desc'), limit(max)];
+  const uid = auth.currentUser?.uid || 'unknown';
+  // Scope to the current user's entries plus system-generated server entries.
+  // This matches the Firestore rules: userId in [uid, 'system'].
+  const constraints: any[] = [where('userId', 'in', [uid, 'system']), orderBy('timestamp', 'desc'), limit(max)];
 
   if (options?.category) {
     constraints.unshift(where('category', '==', options.category));

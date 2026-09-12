@@ -18,7 +18,7 @@ import { INITIAL_BRANDS, INITIAL_CONTENT } from './data/initialData';
 import { Brand, ContentItem, PipelineStatus, AppUser, FeatureRequest } from './types';
 import { initAuth, db, USE_EMULATORS, adminCreateAccount, usernameToEmail } from './lib/firebase';
 import { User } from 'firebase/auth';
-import { collection, query, where, onSnapshot, doc, setDoc, deleteDoc, getDoc, getDocs } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, doc, setDoc, deleteDoc, getDoc, getDocs, writeBatch } from 'firebase/firestore';
 import { BlogRegisterEntry, buildRegisterEntry, nextBlogNumber, collectUsedNumbers } from './lib/blogRegister';
 
 /** Firestore rejects `undefined` field values, so strip them before writing. */
@@ -491,9 +491,22 @@ export default function App() {
     if (!user) return;
     const brand = brands.find((b) => b.id === brandId) || brands[0];
     const newItemId = `item-${Date.now()}`;
-    // Assign the next available blog number for this brand (no duplicates).
-    const used = collectUsedNumbers(items, register, brandId);
-    const { number: blogNumber } = nextBlogNumber(brand, used);
+    // Issue the next blog number for this brand. Preferred path: the server
+    // issues it transactionally (duplicate-proof even with concurrent clients).
+    // Fallback: local computation from items + register if the server is
+    // unreachable (offline / dev without backend).
+    let blogNumber: string;
+    try {
+      const numResp = await fetch('/api/blogs/next-number', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brandId }),
+      });
+      const numData = await numResp.json();
+      blogNumber = numData.success ? numData.blogNumber : nextBlogNumber(brand, collectUsedNumbers(items, register, brandId)).number;
+    } catch {
+      blogNumber = nextBlogNumber(brand, collectUsedNumbers(items, register, brandId)).number;
+    }
     const newItem: ContentItem & { userId: string } = {
       id: newItemId,
       userId: user.uid,
@@ -523,10 +536,12 @@ export default function App() {
       // Optimistically add the item to local state immediately so the editor
       // has something to render before the Firestore onSnapshot catches up.
       setItems((prev) => [...prev, newItem as ContentItem]);
-      await setDoc(doc(db, 'content_items', newItemId), sanitizeForFirestore(newItem));
-      // Create the matching Blog Register entry so the number is recorded
-      // persistently from the moment the post exists.
-      await setDoc(doc(db, 'blog_register', newItemId), sanitizeForFirestore(buildRegisterEntry(newItem as ContentItem, brand, user.uid)));
+      // Atomic create: the content item and its Blog Register entry are written
+      // in one batch so the register can never be missing for an existing item.
+      const batch = writeBatch(db);
+      batch.set(doc(db, 'content_items', newItemId), sanitizeForFirestore(newItem));
+      batch.set(doc(db, 'blog_register', newItemId), sanitizeForFirestore(buildRegisterEntry(newItem as ContentItem, brand, user.uid)));
+      await batch.commit();
       setActiveItemId(newItem.id);
       setActiveTab('editor');
     } catch (err) {

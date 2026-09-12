@@ -9,6 +9,15 @@ service cloud.firestore {
     function isSignedIn() {
       return request.auth != null;
     }
+
+    // Admin = the owner: an approved app_users profile with role 'admin'.
+    // Used to gate privileged writes (settings, app_meta, user management).
+    function isAdmin() {
+      let caller = get(/databases/$(database)/documents/app_users/$(request.auth.uid));
+      return caller != null
+        && caller.data.role == 'admin'
+        && caller.data.approved == true;
+    }
     
     function isValidId(id) {
       return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
@@ -32,7 +41,10 @@ service cloud.firestore {
     }
 
     match /settings/{docId} {
-      allow read, write: if isSignedIn();
+      // Readable by any signed-in user (the app fetches global API keys for
+      // generation/CRM), but only admins may change them.
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
     }
     match /users/{userId} {
       allow read, write: if isSignedIn() && request.auth.uid == userId;
@@ -44,16 +56,11 @@ service cloud.firestore {
     // - app_users/{uid} holds username/role/approved; owners create their own
     //   profile, any signed-in user can read, and admins manage approval/roles
     //   from Settings → User Management.
-    function isAdmin() {
-      let caller = get(/databases/$(database)/documents/app_users/$(request.auth.uid));
-      return caller != null
-        && caller.data.role == 'admin'
-        && caller.data.approved == true;
-    }
-
     match /app_meta/{docId} {
+      // bootstrap is publicly readable so the login screen can detect first-run;
+      // only admins may write it.
       allow read: if true;
-      allow write: if isSignedIn();
+      allow write: if isAdmin();
     }
     match /app_users/{userId} {
       allow create: if isSignedIn() && request.auth.uid == userId && incoming().userId == request.auth.uid;
@@ -133,11 +140,16 @@ service cloud.firestore {
       allow delete: if isSignedIn() && isValidId(entryId) && existing().userId == request.auth.uid;
     }
 
-    // Activity log — signed-in users can read their own logs;
-    // anyone can create (the server writes on behalf of the user).
+    // Activity log — signed-in users can read their own entries plus
+    // system-generated entries (server writes userId 'system'); anyone can
+    // create (the client writes its own uid, the server bypasses rules).
+    // Entries are immutable — no update or delete.
     match /activity_logs/{logId} {
-      allow get: if isSignedIn() && isValidId(logId);
-      allow list: if isSignedIn();
+      function isOwnOrSystem() {
+        return resource.data.userId == request.auth.uid || resource.data.userId == 'system';
+      }
+      allow get: if isSignedIn() && isValidId(logId) && isOwnOrSystem();
+      allow list: if isSignedIn() && isOwnOrSystem();
       allow create: if isSignedIn();
       allow update, delete: if false;
     }
