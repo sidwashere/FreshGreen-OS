@@ -31,6 +31,7 @@ import {
   Layers,
   Download,
   Share2,
+  Search,
 } from 'lucide-react';
 
 interface AutoBlogSchedulerProps {
@@ -78,6 +79,7 @@ interface CalendarGridProps {
   onEditItem: (item: ContentItem) => void;
   onGenerate: (item: ContentItem) => void;
   onScheduleItem: (item: ContentItem, date: string, time: string) => void;
+  onUnschedule: (item: ContentItem) => void;
   generating: Set<string>;
   brands: Brand[];
 }
@@ -90,11 +92,13 @@ const calStatusColor = (item: ContentItem) => {
 };
 
 const CalendarGrid: React.FC<CalendarGridProps> = ({
-  year, month, items, onEditItem, onGenerate, onScheduleItem, generating, brands,
+  year, month, items, onEditItem, onGenerate, onScheduleItem, onUnschedule, generating, brands,
 }) => {
   const today = new Date();
   const todayStr = today.toISOString().split('T')[0];
   const [expandedDays, setExpandedDays] = useState<Set<string>>(new Set());
+  // Day selected for quick-placing unscheduled drafts (click a day cell).
+  const [targetDay, setTargetDay] = useState<string | null>(null);
 
   // Build the calendar days for the month
   const firstDay = new Date(year, month, 1);
@@ -119,6 +123,22 @@ const CalendarGrid: React.FC<CalendarGridProps> = ({
   // Unscheduled items — shown below calendar
   const unscheduledItems = useMemo(() => items.filter((i) => !i.scheduledPublishAt), [items]);
 
+  // Month stats for the strip above the grid
+  const monthPrefix = `${year}-${String(month + 1).padStart(2, '0')}`;
+  const monthItems = useMemo(
+    () => Object.entries(itemsByDate).filter(([k]) => k.startsWith(monthPrefix)).flatMap(([, v]) => v),
+    [itemsByDate, monthPrefix],
+  );
+  const monthScheduled = monthItems.length;
+  const monthPublished = monthItems.filter((i) => i.status === 'Published').length;
+  const monthDrafts = monthItems.filter((i) => i.status !== 'Published').length;
+
+  // Tomorrow (local) — the earliest date that can be scheduled; the past-guard
+  // in handleSchedule rejects today, so the date inputs must never default to it.
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const tomorrowStr = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, '0')}-${String(tomorrow.getDate()).padStart(2, '0')}`;
+
   const cells: { day: number | null; key: string }[] = [];
   for (let i = 0; i < startDow; i++) cells.push({ day: null, key: `empty-${i}` });
   for (let d = 1; d <= daysInMonth; d++) {
@@ -130,6 +150,15 @@ const CalendarGrid: React.FC<CalendarGridProps> = ({
 
   return (
     <div className="space-y-4">
+    {/* Month stats strip */}
+    <div className="flex flex-wrap items-center gap-x-6 gap-y-2 px-1">
+      <span className="text-xs font-bold text-slate-700">📅 {monthScheduled} scheduled</span>
+      <span className="text-xs font-bold text-emerald-600">✅ {monthPublished} published</span>
+      <span className="text-xs font-bold text-red-500">✍️ {monthDrafts} drafts</span>
+      <span className="text-xs font-bold text-slate-400">🗓️ {unscheduledItems.length} unscheduled</span>
+      <span className="ml-auto text-[11px] text-slate-400 hidden sm:block">Click a day to place unscheduled drafts on it</span>
+    </div>
+
     <div className="grid grid-cols-7 gap-1">
       {cells.map((cell, cellIdx) => {
         if (!cell.day) {
@@ -137,6 +166,7 @@ const CalendarGrid: React.FC<CalendarGridProps> = ({
         }
 
         const isToday = cell.key === todayStr;
+        const isTarget = cell.key === targetDay;
         const dayItems = itemsByDate[cell.key] || [];
         const isWeekend = (cellIdx % 7) >= 5;
         const isExpanded = expandedDays.has(cell.key);
@@ -145,25 +175,33 @@ const CalendarGrid: React.FC<CalendarGridProps> = ({
         return (
           <div
             key={cell.key}
-            className={`min-h-[90px] rounded-xl border p-1.5 transition ${
+            onClick={() => setTargetDay(isTarget ? null : cell.key)}
+            className={`min-h-[90px] rounded-xl border p-1.5 transition cursor-pointer ${
               isToday
                 ? 'border-violet-400 bg-violet-50/50 ring-2 ring-violet-200'
-                : isWeekend
-                  ? 'border-slate-100 bg-slate-50/30'
-                  : 'border-slate-200 bg-white hover:border-slate-300'
+                : isTarget
+                  ? 'border-violet-400 bg-violet-50 ring-2 ring-violet-300'
+                  : isWeekend
+                    ? 'border-slate-100 bg-slate-50/30'
+                    : 'border-slate-200 bg-white hover:border-slate-300'
             }`}
+            title={isTarget ? 'Click again to deselect' : 'Click to place unscheduled drafts here'}
           >
-            <div className={`text-[11px] font-bold mb-1 ${isToday ? 'text-violet-600' : 'text-slate-500'}`}>
-              {cell.day}
+            <div className={`text-[11px] font-bold mb-1 flex items-center justify-between ${isToday ? 'text-violet-600' : 'text-slate-500'}`}>
+              <span>{cell.day}</span>
+              {isTarget && <span className="text-[8px] font-bold text-violet-600 bg-violet-100 rounded px-1">PLACE</span>}
             </div>
             <div className="space-y-0.5">
               {visibleItems.map((item) => {
                 const colors = calStatusColor(item);
                 const isGen = generating.has(item.id);
+                const itemTime = item.scheduledPublishAt
+                  ? new Date(item.scheduledPublishAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                  : '';
                 return (
                   <div
                     key={item.id}
-                    onClick={() => onEditItem(item)}
+                    onClick={(e) => { e.stopPropagation(); onEditItem(item); }}
                     className={`group relative rounded-md px-1.5 py-0.5 cursor-pointer transition border ${colors.bg}`}
                     title={`${item.title} — ${item.status.replace('_', ' ')}`}
                   >
@@ -172,6 +210,15 @@ const CalendarGrid: React.FC<CalendarGridProps> = ({
                       <span className={`text-[9px] font-semibold truncate leading-tight ${colors.text}`}>
                         {item.title}
                       </span>
+                    </div>
+                    <div className="flex items-center gap-1 mt-0.5">
+                      {itemTime && <span className="text-[8px] text-slate-400 font-medium">{itemTime}</span>}
+                      {item.status === 'Published' && item.wpPostId && (
+                        <span className="text-[8px] text-emerald-500 font-bold">✓ WP</span>
+                      )}
+                      {item.socialContent?.status === 'ready' && (
+                        <span className="text-[8px] text-violet-500 font-bold">📱</span>
+                      )}
                     </div>
                     {item.status === 'Planned' && (
                       <button
@@ -183,17 +230,26 @@ const CalendarGrid: React.FC<CalendarGridProps> = ({
                         {isGen ? <Loader2 className="w-2 h-2 animate-spin" /> : <Sparkles className="w-2 h-2" />}
                       </button>
                     )}
+                    {item.scheduledPublishAt && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onUnschedule(item); }}
+                        className="absolute -top-1 -left-1 w-3.5 h-3.5 bg-slate-600 hover:bg-red-600 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition shadow-sm text-[9px] leading-none"
+                        title="Remove schedule"
+                      >
+                        ×
+                      </button>
+                    )}
                   </div>
                 );
               })}
               {dayItems.length > 4 && (
                 <button
-                  onClick={() => setExpandedDays((prev) => {
+                  onClick={(e) => { e.stopPropagation(); setExpandedDays((prev) => {
                     const next = new Set(prev);
                     if (next.has(cell.key)) next.delete(cell.key);
                     else next.add(cell.key);
                     return next;
-                  })}
+                  }); }}
                   className="w-full text-[8px] text-violet-500 font-semibold hover:text-violet-700 transition cursor-pointer"
                 >
                   {isExpanded ? 'Show less' : `+${dayItems.length - 4} more`}
@@ -205,13 +261,27 @@ const CalendarGrid: React.FC<CalendarGridProps> = ({
       })}
     </div>
 
+    {/* Legend */}
+    <div className="flex items-center gap-4 px-1 text-[11px] text-slate-500">
+      <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-emerald-500" /> Published</span>
+      <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-orange-500" /> Scheduled</span>
+      <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-red-400" /> Draft / Planned</span>
+      <span className="flex items-center gap-1.5 ml-auto"><span className="w-2 h-2 rounded-full bg-slate-600" /> × = remove schedule</span>
+    </div>
+
     {/* Unscheduled items — inline date picker to place on calendar */}
     {unscheduledItems.length > 0 && (
       <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
         <h3 className="font-bold text-slate-900 text-sm mb-3 flex items-center gap-2">
           <Clock className="w-4 h-4 text-slate-400" />
           Unscheduled ({unscheduledItems.length})
-          <span className="text-[11px] font-normal text-slate-400 ml-1">— set a publish date to place on calendar</span>
+          {targetDay ? (
+            <span className="text-[11px] font-bold text-violet-600 bg-violet-50 border border-violet-200 rounded-lg px-2 py-0.5">
+              Placing on {new Date(`${targetDay}T00:00:00`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })}
+            </span>
+          ) : (
+            <span className="text-[11px] font-normal text-slate-400 ml-1">— set a publish date, or click a day above to place drafts there</span>
+          )}
         </h3>
         <div className="space-y-1.5">
           {unscheduledItems.map((item) => {
@@ -224,19 +294,29 @@ const CalendarGrid: React.FC<CalendarGridProps> = ({
                 {item.primaryKeyword && (
                   <span className="text-[10px] text-slate-400 hidden md:block">🔑 {item.primaryKeyword}</span>
                 )}
-                <input
-                  type="date"
-                  className="px-2 py-1 border border-slate-200 rounded-lg text-xs focus:ring-2 focus:ring-violet-500 outline-none"
-                  defaultValue={new Date().toISOString().split('T')[0]}
-                  onChange={(e) => {
-                    if (e.target.value) onScheduleItem(item, e.target.value, '09:00');
-                  }}
-                />
+                {targetDay ? (
+                  <button
+                    onClick={() => onScheduleItem(item, targetDay, '09:00')}
+                    className="px-3 py-1 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-xs font-bold transition shrink-0"
+                  >
+                    Place here →
+                  </button>
+                ) : (
+                  <input
+                    type="date"
+                    min={tomorrowStr}
+                    className="px-2 py-1 border border-slate-200 rounded-lg text-xs focus:ring-2 focus:ring-violet-500 outline-none"
+                    defaultValue={tomorrowStr}
+                    onChange={(e) => {
+                      if (e.target.value) onScheduleItem(item, e.target.value, '09:00');
+                    }}
+                  />
+                )}
                 {item.status === 'Planned' && (
                   <button
                     onClick={() => onGenerate(item)}
                     disabled={isGen}
-                    className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 disabled:opacity-50"
+                    className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 disabled:opacity-50 shrink-0"
                   >
                     {isGen ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
                   </button>
@@ -503,6 +583,23 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
   const [calMonth, setCalMonth] = useState(() => new Date().getMonth());
   const [calYear, setCalYear] = useState(() => new Date().getFullYear());
 
+  // ── Queue state ───────────────────────────────────────────────────
+  const [queueScope, setQueueScope] = useState<'autoblog' | 'all'>('autoblog');
+  const [queueSearch, setQueueSearch] = useState('');
+  const [queueStatus, setQueueStatus] = useState('all');
+  const [queueSort, setQueueSort] = useState<'scheduled' | 'status' | 'updated' | 'title'>('scheduled');
+  const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
+  const [visibleLimit, setVisibleLimit] = useState(25);
+
+  // Tomorrow (local) — the earliest schedulable date; the past-guard in
+  // handleSchedule rejects today, so quick-schedule buttons must never use
+  // startDate when it's today or earlier.
+  const tomorrowDateStr = useMemo(() => {
+    const t = new Date();
+    t.setDate(t.getDate() + 1);
+    return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+  }, []);
+
   // Persist config to localStorage (sheet URL is per-brand)
   useEffect(() => {
     try {
@@ -532,6 +629,68 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
         .sort((a, b) => new Date(a.scheduledPublishAt!).getTime() - new Date(b.scheduledPublishAt!).getTime()),
     [autoBlogItems]
   );
+
+  // ── Queue filtering / sorting / stats ─────────────────────────────
+  const queueBase = queueScope === 'all' ? brandItems : autoBlogItems;
+
+  const statusCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const i of queueBase) counts[i.status] = (counts[i.status] || 0) + 1;
+    return counts;
+  }, [queueBase]);
+
+  const queueItems = useMemo(() => {
+    let list = queueBase;
+    if (queueStatus !== 'all') list = list.filter((i) => i.status === queueStatus);
+    const q = queueSearch.trim().toLowerCase();
+    if (q) {
+      list = list.filter((i) =>
+        (i.title || '').toLowerCase().includes(q) ||
+        (i.primaryKeyword || '').toLowerCase().includes(q) ||
+        (i.blogNumber || '').toLowerCase().includes(q) ||
+        (i.sourceSheetName || '').toLowerCase().includes(q)
+      );
+    }
+    const sorted = [...list];
+    switch (queueSort) {
+      case 'scheduled':
+        sorted.sort((a, b) => (a.scheduledPublishAt || '9999-12-31').localeCompare(b.scheduledPublishAt || '9999-12-31'));
+        break;
+      case 'status':
+        sorted.sort((a, b) => a.status.localeCompare(b.status));
+        break;
+      case 'updated':
+        sorted.sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+        break;
+      case 'title':
+        sorted.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
+        break;
+    }
+    return sorted;
+  }, [queueBase, queueStatus, queueSearch, queueSort]);
+
+  const visibleItems = queueItems.slice(0, visibleLimit);
+
+  const toggleSelect = (id: string) => {
+    setSelectedItems((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = (ids: string[]) => {
+    setSelectedItems((prev) => {
+      const next = new Set(prev);
+      const allSelected = ids.length > 0 && ids.every((id) => next.has(id));
+      if (allSelected) ids.forEach((id) => next.delete(id));
+      else ids.forEach((id) => next.add(id));
+      return next;
+    });
+  };
+
+  const clearSelection = () => setSelectedItems(new Set());
 
   // ── Auto-publish check ─────────────────────────────────────────────
   // NOTE: Auto-publishing is now handled SERVER-SIDE (firebase-admin on the
@@ -1334,6 +1493,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
           lastAutoPublishedAt: new Date().toISOString(),
           lastAutoPublishError: undefined,
           publishRetryCount: undefined,
+          publishRetryAt: undefined,
           updatedAt: new Date().toISOString(),
         });
         setNotice({ kind: 'ok', text: `Published "${item.title}" to WordPress` });
@@ -1394,6 +1554,88 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
 
   const handleCancelBatch = () => {
     batchCancelRef.current = true;
+  };
+
+  // ── Bulk actions (selection mode) ─────────────────────────────────
+  const handleBulkSchedule = () => {
+    const sel = queueItems.filter(
+      (i) => selectedItems.has(i.id) && i.status !== 'Published' && i.status !== 'Generating' && !i.scheduledPublishAt
+    );
+    if (sel.length === 0) {
+      setNotice({ kind: 'err', text: 'No selected posts can be scheduled (already scheduled, published, or generating).' });
+      return;
+    }
+    // Same past-guard as handleScheduleAll — never schedule into the past.
+    const startDateMs = new Date(`${startDate}T00:00:00`).getTime();
+    const tomorrow = new Date();
+    tomorrow.setHours(0, 0, 0, 0);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    if (isNaN(startDateMs) || startDateMs < tomorrow.getTime()) {
+      setNotice({ kind: 'err', text: 'Start date must be tomorrow or later — pick a future date in Sheet Settings.' });
+      return;
+    }
+    if (!window.confirm(`Schedule ${sel.length} selected post${sel.length > 1 ? 's' : ''} every ${cadenceDays} day${cadenceDays > 1 ? 's' : ''} starting ${startDate}?`)) return;
+    sel.forEach((item, i) => {
+      const schedDate = new Date(startDateMs + i * cadenceDays * 86_400_000);
+      onSaveItem({
+        ...item,
+        scheduledPublishAt: schedDate.toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+    });
+    setNotice({ kind: 'ok', text: `Scheduled ${sel.length} selected posts starting ${startDate}` });
+    clearSelection();
+  };
+
+  const handleBulkGenerate = async () => {
+    const sel = queueItems.filter((i) => selectedItems.has(i.id) && i.status === 'Planned');
+    if (sel.length === 0) {
+      setNotice({ kind: 'err', text: 'No selected posts are Planned — only Planned posts can be generated.' });
+      return;
+    }
+    let done = 0;
+    let failed = 0;
+    for (const item of sel) {
+      const ok = await handleGenerate(item);
+      if (ok) done += 1;
+      else failed += 1;
+    }
+    setNotice({ kind: failed ? 'err' : 'ok', text: `Generated ${done} post${done !== 1 ? 's' : ''}${failed ? `, ${failed} failed` : ''}.` });
+    clearSelection();
+  };
+
+  const handleBulkDelete = async () => {
+    const sel = queueItems.filter((i) => selectedItems.has(i.id));
+    if (sel.length === 0) return;
+    if (!window.confirm(`Delete ${sel.length} selected post${sel.length > 1 ? 's' : ''}? This cannot be undone.`)) return;
+    let ok = 0;
+    let failed = 0;
+    for (const item of sel) {
+      try {
+        await onDeleteItem(item);
+        ok += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    setNotice({ kind: failed ? 'err' : 'ok', text: `Deleted ${ok} post${ok !== 1 ? 's' : ''}${failed ? `, ${failed} failed` : ''}.` });
+    clearSelection();
+  };
+
+  // ── Manual retry for Error items ──────────────────────────────────
+  // The server marks an item Error only after 5 consecutive publish failures.
+  // This resets it to Draft_Ready AND clears publishRetryAt so the server tick
+  // stops skipping it (the backoff timestamp would otherwise block retries).
+  const handleRetryError = (item: ContentItem) => {
+    onSaveItem({
+      ...item,
+      status: 'Draft_Ready',
+      lastAutoPublishError: undefined,
+      publishRetryCount: undefined,
+      publishRetryAt: undefined,
+      updatedAt: new Date().toISOString(),
+    });
+    setNotice({ kind: 'ok', text: `"${item.title}" reset to Draft_Ready — it will retry on its next scheduled tick.` });
   };
 
   const formatDate = (iso?: string) => {
@@ -1731,10 +1973,12 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
                 <label className="block text-xs font-medium text-slate-500 mb-1">Start Date</label>
                 <input
                   type="date"
+                  min={tomorrowDateStr}
                   value={startDate}
                   onChange={(e) => setStartDate(e.target.value)}
                   className="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-violet-500 outline-none"
                 />
+                <p className="text-[10px] text-slate-400 mt-1">Earliest schedulable day — posts can't be scheduled in the past.</p>
               </div>
             </div>
 
@@ -1870,15 +2114,27 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
               <h2 className="text-lg font-bold text-slate-900">
                 {new Date(calYear, calMonth).toLocaleDateString('en-GB', { month: 'long', year: 'numeric' })}
               </h2>
-              <button
-                onClick={() => {
-                  if (calMonth === 11) { setCalMonth(0); setCalYear(calYear + 1); }
-                  else setCalMonth(calMonth + 1);
-                }}
-                className="p-2 hover:bg-slate-100 rounded-xl transition"
-              >
-                <ChevronRight className="w-5 h-5 text-slate-600" />
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    const now = new Date();
+                    setCalMonth(now.getMonth());
+                    setCalYear(now.getFullYear());
+                  }}
+                  className="px-3 py-1.5 text-xs font-bold text-violet-600 bg-violet-50 hover:bg-violet-100 rounded-xl transition"
+                >
+                  Today
+                </button>
+                <button
+                  onClick={() => {
+                    if (calMonth === 11) { setCalMonth(0); setCalYear(calYear + 1); }
+                    else setCalMonth(calMonth + 1);
+                  }}
+                  className="p-2 hover:bg-slate-100 rounded-xl transition"
+                >
+                  <ChevronRight className="w-5 h-5 text-slate-600" />
+                </button>
+              </div>
             </div>
 
             {/* Calendar grid */}
@@ -1900,6 +2156,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
                 onEditItem={onEditItem}
                 onGenerate={handleGenerate}
                 onScheduleItem={handleSchedule}
+                onUnschedule={handleUnschedule}
                 generating={generating}
                 brands={brands}
               />
@@ -1975,8 +2232,129 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
             </div>
           )}
 
+          {/* Stats strip */}
+          {queueBase.length > 0 && (
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 bg-white rounded-2xl border border-slate-200 px-5 py-3 shadow-sm">
+              <span className="text-xs font-bold text-slate-700">{queueBase.length} total</span>
+              {(['Planned', 'Draft_Ready', 'Scheduled', 'Published', 'Error'] as const).map((s) => {
+                const n = statusCounts[s] || 0;
+                if (n === 0) return null;
+                const color =
+                  s === 'Published' ? 'text-emerald-600' :
+                  s === 'Error' ? 'text-red-600' :
+                  s === 'Scheduled' ? 'text-violet-600' :
+                  s === 'Draft_Ready' ? 'text-sky-600' : 'text-slate-600';
+                return (
+                  <button
+                    key={s}
+                    onClick={() => setQueueStatus(queueStatus === s ? 'all' : s)}
+                    className={`text-xs font-bold ${color} ${queueStatus === s ? 'underline underline-offset-4 decoration-2' : 'opacity-80 hover:opacity-100'}`}
+                    title={`Click to filter by ${s.replace('_', ' ')}`}
+                  >
+                    {s.replace('_', ' ')}: {n}
+                  </button>
+                );
+              })}
+              {selectedItems.size > 0 && (
+                <span className="ml-auto text-xs font-bold text-violet-600">
+                  {selectedItems.size} selected
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* Filter bar */}
+          {queueBase.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="relative flex-1 min-w-[180px] max-w-xs">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  value={queueSearch}
+                  onChange={(e) => setQueueSearch(e.target.value)}
+                  placeholder="Search title, keyword, blog #, sheet…"
+                  className="w-full pl-8 pr-3 py-2 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-violet-500 outline-none bg-white"
+                />
+              </div>
+              <select
+                value={queueStatus}
+                onChange={(e) => setQueueStatus(e.target.value)}
+                className="px-3 py-2 border border-slate-200 rounded-xl text-xs bg-white focus:ring-2 focus:ring-violet-500 outline-none"
+              >
+                <option value="all">All statuses</option>
+                {['Planned', 'Draft_Ready', 'Scheduled', 'Published', 'Error'].map((s) => (
+                  <option key={s} value={s}>{s.replace('_', ' ')}</option>
+                ))}
+              </select>
+              <select
+                value={queueSort}
+                onChange={(e) => setQueueSort(e.target.value as typeof queueSort)}
+                className="px-3 py-2 border border-slate-200 rounded-xl text-xs bg-white focus:ring-2 focus:ring-violet-500 outline-none"
+              >
+                <option value="scheduled">Sort: publish date</option>
+                <option value="status">Sort: status</option>
+                <option value="updated">Sort: last updated</option>
+                <option value="title">Sort: title</option>
+              </select>
+              <div className="flex items-center bg-white border border-slate-200 rounded-xl p-0.5">
+                <button
+                  onClick={() => setQueueScope('autoblog')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${queueScope === 'autoblog' ? 'bg-violet-600 text-white' : 'text-slate-500 hover:text-slate-700'}`}
+                >
+                  AutoBlog
+                </button>
+                <button
+                  onClick={() => setQueueScope('all')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${queueScope === 'all' ? 'bg-violet-600 text-white' : 'text-slate-500 hover:text-slate-700'}`}
+                >
+                  All posts
+                </button>
+              </div>
+              <button
+                onClick={() => toggleSelectAll(queueItems.map((i) => i.id))}
+                className="px-3 py-2 bg-white border border-slate-200 text-slate-600 rounded-xl text-xs font-semibold hover:bg-slate-50 transition"
+                title="Select / deselect all filtered posts"
+              >
+                {selectedItems.size > 0 && selectedItems.size === queueItems.length ? 'Deselect all' : `Select all (${queueItems.length})`}
+              </button>
+              {selectedItems.size > 0 && (
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleBulkSchedule}
+                    className="px-3 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1"
+                    title="Schedule selected drafts starting from the Sheet Settings start date"
+                  >
+                    <CalendarClock className="w-3.5 h-3.5" />
+                    Schedule
+                  </button>
+                  <button
+                    onClick={handleBulkGenerate}
+                    className="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1"
+                    title="Generate articles for selected Planned posts"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    Generate
+                  </button>
+                  <button
+                    onClick={handleBulkDelete}
+                    className="px-3 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1"
+                    title="Delete selected posts (asks for confirmation)"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Delete
+                  </button>
+                  <button
+                    onClick={clearSelection}
+                    className="px-3 py-2 bg-white border border-slate-200 text-slate-600 rounded-xl text-xs font-semibold hover:bg-slate-50 transition"
+                  >
+                    Clear
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Empty state */}
-          {autoBlogItems.length === 0 && (
+          {queueBase.length === 0 && (
             <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center shadow-sm">
               <div className="w-16 h-16 bg-violet-100 rounded-2xl mx-auto flex items-center justify-center mb-4">
                 <CalendarClock className="w-8 h-8 text-violet-500" />
@@ -1996,7 +2374,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
           )}
 
           {/* Items list */}
-          {autoBlogItems.map((item) => {
+          {visibleItems.map((item) => {
             const isExpanded = expandedItem === item.id;
             const isGenerating = generating.has(item.id);
             const isPublishing = publishing.has(item.id);
@@ -2013,6 +2391,14 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
               >
                 {/* Main row */}
                 <div className="flex items-center gap-4 p-4">
+                  {/* Selection checkbox */}
+                  <input
+                    type="checkbox"
+                    checked={selectedItems.has(item.id)}
+                    onChange={() => toggleSelect(item.id)}
+                    className="rounded border-slate-300 text-violet-600 focus:ring-violet-500 shrink-0"
+                    title="Select for bulk actions"
+                  />
                   {/* Status badge */}
                   <div className="shrink-0">
                     <span className={`inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-bold ${statusColors[item.status] || 'bg-slate-100 text-slate-600'}`}>
@@ -2040,7 +2426,10 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
 
                   {/* Title + meta */}
                   <div className="flex-1 min-w-0">
-                    <div className="font-semibold text-sm text-slate-900 truncate">{item.title}</div>
+                    <div className="font-semibold text-sm text-slate-900 truncate">
+                      {item.blogNumber && <span className="text-violet-500 mr-1.5">#{item.blogNumber}</span>}
+                      {item.title}
+                    </div>
                     <div className="flex items-center gap-3 mt-1 text-[11px] text-slate-400">
                       {item.primaryKeyword && <span>🔑 {item.primaryKeyword}</span>}
                       {brand && <span>🏷️ {brand.name}</span>}
@@ -2068,11 +2457,23 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
 
                     {item.status !== 'Published' && item.status !== 'Generating' && !isScheduled && (
                       <button
-                        onClick={() => handleSchedule(item, startDate, '09:00')}
+                        onClick={() => handleSchedule(item, tomorrowDateStr, '09:00')}
                         className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1"
+                        title="Schedules for tomorrow 09:00 — use the expanded panel to pick a specific date/time"
                       >
                         <Calendar className="w-3 h-3" />
                         Schedule
+                      </button>
+                    )}
+
+                    {item.status === 'Error' && (
+                      <button
+                        onClick={() => handleRetryError(item)}
+                        className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1"
+                        title="Reset to Draft_Ready so the scheduler retries it on the next tick"
+                      >
+                        <RefreshCw className="w-3 h-3" />
+                        Retry
                       </button>
                     )}
 
@@ -2142,7 +2543,8 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
                           <label className="block text-[11px] font-medium text-slate-500 mb-1">Publish Date</label>
                           <input
                             type="date"
-                            defaultValue={item.scheduledPublishAt ? localDateInput(item.scheduledPublishAt) : startDate}
+                            min={tomorrowDateStr}
+                            defaultValue={item.scheduledPublishAt ? localDateInput(item.scheduledPublishAt) : tomorrowDateStr}
                             onChange={(e) => {
                               if (e.target.value) {
                                 const time = item.scheduledPublishAt
@@ -2215,6 +2617,18 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
               </div>
             );
           })}
+
+          {/* Show more */}
+          {queueItems.length > visibleLimit && (
+            <div className="text-center">
+              <button
+                onClick={() => setVisibleLimit((n) => n + 25)}
+                className="px-5 py-2.5 bg-white border border-slate-200 text-slate-600 rounded-xl text-sm font-semibold hover:bg-slate-50 transition"
+              >
+                Show {Math.min(25, queueItems.length - visibleLimit)} more ({queueItems.length - visibleLimit} remaining)
+              </button>
+            </div>
+          )}
 
           {/* Timeline preview */}
           {scheduledItems.length > 1 && (

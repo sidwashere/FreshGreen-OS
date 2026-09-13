@@ -302,6 +302,10 @@ export interface ContentItem {
   };
   /** Consecutive auto-publish failures so far (server-side retry counter). */
   publishRetryCount?: number;
+  /** Epoch ms when the next server-side publish retry is allowed (backoff).
+   *  The client must clear this when manually resetting an item so the
+   *  server tick doesn't keep skipping it. */
+  publishRetryAt?: number;
 }
 
 /** Complete context from a single Google Sheet row. Every field maps to a
