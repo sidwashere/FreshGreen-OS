@@ -64,4 +64,25 @@ export const fetchAiPref = (): AiModelPref => {
 
 export const saveAiPref = (pref: AiModelPref) => {
   localStorage.setItem('fgos_ai_pref', JSON.stringify(pref));
+  // Mirror to Firestore so the pref survives device changes and browser
+  // clears. Best-effort: the local copy is the fast path and still works
+  // offline; the cloud copy is restored on the next app start.
+  setDoc(doc(db, 'settings', 'global'), { aiPref: pref }, { merge: true }).catch(() => {});
+};
+
+/**
+ * Hydrate the AI pref from Firestore into localStorage. Call once at app
+ * start (after auth). The cloud copy wins over the local one so a pref
+ * saved on another device is restored here.
+ */
+export const syncAiPrefFromCloud = async (): Promise<void> => {
+  try {
+    const snap = await getDoc(doc(db, 'settings', 'global'));
+    const cloud = snap.data()?.aiPref;
+    if (cloud && isValidPref(cloud)) {
+      localStorage.setItem('fgos_ai_pref', JSON.stringify({ ...DEFAULT_AI_PREF, ...cloud }));
+    }
+  } catch (err) {
+    console.debug('AI pref cloud sync skipped (using local):', err);
+  }
 };

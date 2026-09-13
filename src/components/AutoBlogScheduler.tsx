@@ -2,7 +2,9 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { doc, getDoc, setDoc, onSnapshot } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { logActivity } from '../lib/activityLogger';
-import { ContentItem, Brand, AutoBlogOverrides, SocialContentPackage } from '../types';
+import { ContentItem, Brand, AutoBlogOverrides, SocialContentPackage, GenerationLogEntry } from '../types';
+import { loadAutoblogConfig, saveAutoblogConfigLocal, fetchAutoblogConfigCloud, saveAutoblogConfigCloud, AutoblogConfig } from '../lib/autoblogConfig';
+import { countWords } from '../lib/wpSync';
 import { GenerationInfoPanel } from './GenerationInfoPanel';
 import { BrandSwitcher } from './BrandSwitcher';
 import {
@@ -516,11 +518,12 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
   onEditItem,
 }) => {
   // ── Sheet connection state ──────────────────────────────────────────
-  // Sheet URL is per-brand to prevent cross-brand leakage
-  const sheetUrlKey = `fgos_autoblog_sheet_url_${selectedBrandId || 'none'}`;
-  const [sheetUrl, setSheetUrl] = useState(() => {
-    try { return localStorage.getItem(sheetUrlKey) || ''; } catch { return ''; }
-  });
+  // Sheet URL is per-brand to prevent cross-brand leakage. The whole AutoBlog
+  // config (sheet, cadence, start date, auto-publish, tone, word count, image/
+  // SEO/humanize toggles) is persisted per brand: Firestore is the source of
+  // truth, localStorage is the offline cache (see lib/autoblogConfig.ts).
+  const initialCfg = useMemo(() => loadAutoblogConfig(selectedBrandId || 'none'), [selectedBrandId]);
+  const [sheetUrl, setSheetUrl] = useState(initialCfg.sheetUrl);
   const [tabs, setTabs] = useState<SheetTab[]>([]);
   const [selectedTab, setSelectedTab] = useState<string>('');
   const [sheetRows, setSheetRows] = useState<SheetRow[]>([]);
@@ -533,11 +536,18 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
   const [connStatus, setConnStatus] = useState<{ ok: boolean; message: string; latencyMs?: number; lastChecked?: number } | null>(null);
   const [pinging, setPinging] = useState(false);
 
-  // ── When brand changes, reload the sheet URL + clear stale state ───
+  // ── When brand changes, reload the per-brand config + clear stale state ──
   useEffect(() => {
-    const newKey = `fgos_autoblog_sheet_url_${selectedBrandId || 'none'}`;
-    const newUrl = localStorage.getItem(newKey) || '';
-    setSheetUrl(newUrl);
+    const cfg = loadAutoblogConfig(selectedBrandId || 'none');
+    setSheetUrl(cfg.sheetUrl);
+    setCadenceDays(cfg.cadenceDays);
+    setStartDate(cfg.startDate);
+    setAutoPublish(cfg.autoPublish);
+    setDefaultTone(cfg.defaultTone);
+    setDefaultWordCount(cfg.defaultWordCount);
+    setAutoGenerateImages(cfg.autoGenerateImages);
+    setAutoSeoAnalysis(cfg.autoSeoAnalysis);
+    setAutoHumanize(cfg.autoHumanize);
     setTabs([]);
     setSelectedTab('');
     setSheetRows([]);
@@ -545,23 +555,31 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
     setSelectedRows(new Set());
     setConnStatus(null);
     setError(null);
+    // Hydrate from Firestore — the cloud copy wins over the local cache so a
+    // config saved on another device (or after a browser clear) is restored.
+    fetchAutoblogConfigCloud(selectedBrandId || 'none').then((cloud) => {
+      if (!cloud) return;
+      setSheetUrl(cloud.sheetUrl);
+      setCadenceDays(cloud.cadenceDays);
+      setStartDate(cloud.startDate);
+      setAutoPublish(cloud.autoPublish);
+      setDefaultTone(cloud.defaultTone);
+      setDefaultWordCount(cloud.defaultWordCount);
+      setAutoGenerateImages(cloud.autoGenerateImages);
+      setAutoSeoAnalysis(cloud.autoSeoAnalysis);
+      setAutoHumanize(cloud.autoHumanize);
+    });
   }, [selectedBrandId]);
 
   // ── Schedule config ────────────────────────────────────────────────
-  const [cadenceDays, setCadenceDays] = useState(() => {
-    try { return parseInt(localStorage.getItem('fgos_autoblog_cadence') || '3', 10); } catch { return 3; }
-  });
-  const [startDate, setStartDate] = useState(() => {
-    try { return localStorage.getItem('fgos_autoblog_start_date') || new Date().toISOString().split('T')[0]; } catch { return new Date().toISOString().split('T')[0]; }
-  });
-  const [autoPublish, setAutoPublish] = useState(() => {
-    try { return localStorage.getItem('fgos_autoblog_auto_publish') !== '0'; } catch { return true; }
-  });
-  const [defaultTone, setDefaultTone] = useState<string>('professional');
-  const [defaultWordCount, setDefaultWordCount] = useState<number>(1500);
-  const [autoGenerateImages, setAutoGenerateImages] = useState(true);
-  const [autoSeoAnalysis, setAutoSeoAnalysis] = useState(true);
-  const [autoHumanize, setAutoHumanize] = useState(false);
+  const [cadenceDays, setCadenceDays] = useState(initialCfg.cadenceDays);
+  const [startDate, setStartDate] = useState(initialCfg.startDate);
+  const [autoPublish, setAutoPublish] = useState(initialCfg.autoPublish);
+  const [defaultTone, setDefaultTone] = useState(initialCfg.defaultTone);
+  const [defaultWordCount, setDefaultWordCount] = useState(initialCfg.defaultWordCount);
+  const [autoGenerateImages, setAutoGenerateImages] = useState(initialCfg.autoGenerateImages);
+  const [autoSeoAnalysis, setAutoSeoAnalysis] = useState(initialCfg.autoSeoAnalysis);
+  const [autoHumanize, setAutoHumanize] = useState(initialCfg.autoHumanize);
 
   // ── UI state ───────────────────────────────────────────────────────
   const [view, setView] = useState<ViewMode>('queue');
@@ -600,15 +618,26 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
     return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
   }, []);
 
-  // Persist config to localStorage (sheet URL is per-brand)
+  // Persist config: localStorage (instant, offline) + Firestore (debounced,
+  // durable — survives browser clears and device changes).
   useEffect(() => {
-    try {
-      localStorage.setItem(sheetUrlKey, sheetUrl);
-      localStorage.setItem('fgos_autoblog_cadence', String(cadenceDays));
-      localStorage.setItem('fgos_autoblog_start_date', startDate);
-      localStorage.setItem('fgos_autoblog_auto_publish', autoPublish ? '1' : '0');
-    } catch { /* ignore */ }
-  }, [sheetUrl, sheetUrlKey, cadenceDays, startDate, autoPublish]);
+    const cfg: AutoblogConfig = {
+      sheetUrl,
+      cadenceDays,
+      startDate,
+      autoPublish,
+      defaultTone,
+      defaultWordCount,
+      autoGenerateImages,
+      autoSeoAnalysis,
+      autoHumanize,
+    };
+    saveAutoblogConfigLocal(selectedBrandId || 'none', cfg);
+    const t = setTimeout(() => {
+      void saveAutoblogConfigCloud(selectedBrandId || 'none', cfg);
+    }, 800);
+    return () => clearTimeout(t);
+  }, [sheetUrl, cadenceDays, startDate, autoPublish, defaultTone, defaultWordCount, autoGenerateImages, autoSeoAnalysis, autoHumanize, selectedBrandId]);
 
   // ── Brand-scoped items: ONLY items belonging to the selected brand ─
   const brandItems = useMemo(
@@ -1012,6 +1041,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
   // Returns true on success, false on failure — lets the batch runner report
   // per-item results instead of a blanket "all done".
   const handleGenerate = async (item: ContentItem): Promise<boolean> => {
+    const genStartedAt = Date.now();
     setGenerating((prev) => new Set(prev).add(item.id));
     setExpandedItem(item.id);
     setGenState((prev) => ({
@@ -1319,11 +1349,36 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
         }
       }
 
-      onSaveItem(updatedItem);
-      logActivity({ category: 'generation', status: 'success', action: 'generate_complete', title: `Generation complete: ${item.title}`, message: autoSocial && socialContent?.status === 'ready' ? 'Article and social package generated.' : 'Article generated.', brandId: item.brandId, brandName: brands.find((b) => b.id === item.brandId)?.name, payload: { socialStatus: socialContent?.status || 'none', seoScore: updatedItem.seoScore } });
+      // Per-item generation history: timestamped, model-attributed record of
+      // every Auto-Write run, persisted with the item in Firestore (bounded to
+      // the last 30 runs, same convention as ZenEditor).
+      const genEntry: GenerationLogEntry = {
+        at: new Date().toISOString(),
+        action: 'Auto-Write',
+        provider: genData.provider || 'gemini',
+        model: genData.model || 'unknown',
+        words: genData.wordCount || countWords(bodyHtml),
+        durationMs: Date.now() - genStartedAt,
+        ok: true,
+        insight: updatedItem.seoScore != null ? `SEO score ${updatedItem.seoScore}` : undefined,
+      };
+      onSaveItem({ ...updatedItem, generationLog: [genEntry, ...(item.generationLog || [])].slice(0, 30) });
+      logActivity({ category: 'generation', status: 'success', action: 'generate_complete', title: `Generation complete: ${item.title}`, message: autoSocial && socialContent?.status === 'ready' ? 'Article and social package generated.' : 'Article generated.', brandId: item.brandId, brandName: brands.find((b) => b.id === item.brandId)?.name, payload: { socialStatus: socialContent?.status || 'none', seoScore: updatedItem.seoScore, model: genData.model, provider: genData.provider } });
       setNotice({ kind: 'ok', text: autoHumanize ? `Generated & humanised: "${item.title}"` : `Generated: "${item.title}"` });
       return true;
     } catch (err: any) {
+      // Record the failed run on the item too, so the failure history is
+      // visible next to the article (not just in the global activity log).
+      const failEntry: GenerationLogEntry = {
+        at: new Date().toISOString(),
+        action: 'Auto-Write',
+        provider: 'gemini',
+        model: 'unknown',
+        durationMs: Date.now() - genStartedAt,
+        ok: false,
+        error: (err?.message || 'Generation failed.').slice(0, 300),
+      };
+      onSaveItem({ ...item, generationLog: [failEntry, ...(item.generationLog || [])].slice(0, 30), updatedAt: new Date().toISOString() });
       logActivity({ category: 'error', status: 'error', action: 'generate_failed', title: `Generation failed: ${item.title}`, message: err.message || 'Generation failed.', brandId: item.brandId, brandName: brands.find((b) => b.id === item.brandId)?.name });
       setNotice({ kind: 'err', text: `Generation failed: ${stalled ? 'the model went quiet — please retry' : err.message}` });
       return false;

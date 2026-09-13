@@ -21,6 +21,7 @@ import { initAuth, db, USE_EMULATORS, adminCreateAccount, usernameToEmail } from
 import { User } from 'firebase/auth';
 import { collection, query, where, onSnapshot, doc, setDoc, deleteDoc, getDoc, getDocs, writeBatch } from 'firebase/firestore';
 import { BlogRegisterEntry, buildRegisterEntry, nextBlogNumber, collectUsedNumbers } from './lib/blogRegister';
+import { syncAiPrefFromCloud } from './lib/keys';
 
 /** Firestore rejects `undefined` field values, so strip them before writing. */
 function sanitizeForFirestore<T>(obj: T): T {
@@ -164,7 +165,11 @@ export default function App() {
 
   useEffect(() => {
     if (!user) return;
-    
+
+    // Restore the AI model pref from Firestore (survives device changes and
+    // browser clears) — the cloud copy wins over the local one.
+    void syncAiPrefFromCloud();
+
     // One-time check for new user seeding
     const checkAndSeed = async () => {
       const storageKey = `fgos_seeded_${user.uid}`;

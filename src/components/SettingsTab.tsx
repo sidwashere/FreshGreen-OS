@@ -1,9 +1,10 @@
 import { doc, getDoc, setDoc, collection, query, onSnapshot, deleteDoc } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import React, { useState, useEffect } from 'react';
-import { Key, Save, CheckCircle2, ShieldAlert, Globe, Server, Users, Settings, UserPlus, Trash2, ShieldCheck, UserCheck, UserX, Cpu, Zap, RefreshCcw } from 'lucide-react';
+import { Key, Save, CheckCircle2, ShieldAlert, Globe, Server, Users, Settings, UserPlus, Trash2, ShieldCheck, UserCheck, UserX, Cpu, Zap, RefreshCcw, Download, Upload, DatabaseBackup } from 'lucide-react';
 import { Brand, AppUser, AiModelPref } from '../types';
 import { fetchAiPref, saveAiPref, AI_MODEL_OPTIONS } from '../lib/keys';
+import { fetchAllAutoblogConfigsCloud, restoreAllAutoblogConfigsCloud, AutoblogConfig } from '../lib/autoblogConfig';
 import { WPBridgeTester } from './WPBridgeTester';
 import { CPanelExporter } from './CPanelExporter';
 import { Wizard } from './Wizard';
@@ -783,8 +784,136 @@ const AiModelsTab: React.FC = () => {
   );
 };
 
+// ── Backup & Restore ─────────────────────────────────────────────────
+// Exports/imports the durable app configuration as a single JSON file:
+//   - settings/global (BYOK API keys + AI model pref)
+//   - settings/autoblog (per-brand AutoBlog config)
+// Content items, brands, and the blog register live in Firestore already and
+// are NOT part of this backup (they are the durable store itself).
+const BackupTab: React.FC = () => {
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+  const fileRef = React.useRef<HTMLInputElement>(null);
+
+  const exportBackup = async () => {
+    setBusy(true);
+    setNotice(null);
+    try {
+      const [globalSnap, autoblog] = await Promise.all([
+        getDoc(doc(db, 'settings', 'global')),
+        fetchAllAutoblogConfigsCloud(),
+      ]);
+      const global = globalSnap.exists() ? globalSnap.data() : {};
+      const backup = {
+        app: 'FreshGreen-OS',
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        settings: { global, autoblog },
+      };
+      const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `freshgreen-backup-${new Date().toISOString().split('T')[0]}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setNotice({ kind: 'ok', text: `Backup exported (${Object.keys(autoblog || {}).length} brand configs). Keep it somewhere safe — it contains API keys.` });
+    } catch (err: any) {
+      setNotice({ kind: 'err', text: `Export failed: ${err?.message || err}` });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const importBackup = async (file: File) => {
+    setBusy(true);
+    setNotice(null);
+    try {
+      const parsed = JSON.parse(await file.text());
+      const global = parsed?.settings?.global;
+      const autoblog = parsed?.settings?.autoblog;
+      if (!global && !autoblog) {
+        throw new Error('Not a FreshGreen-OS backup file (missing settings.global / settings.autoblog).');
+      }
+      // Restore Firestore (source of truth) first…
+      if (global && typeof global === 'object') {
+        await setDoc(doc(db, 'settings', 'global'), global, { merge: true });
+      }
+      if (autoblog && typeof autoblog === 'object') {
+        await restoreAllAutoblogConfigsCloud(autoblog as Record<string, AutoblogConfig>);
+      }
+      // …then refresh the localStorage mirrors so this device picks it up
+      // immediately without a reload.
+      if (global?.apiKeys && typeof global.apiKeys === 'object') {
+        localStorage.setItem('fgos_byok_keys', JSON.stringify(global.apiKeys));
+      }
+      if (global?.aiPref && typeof global.aiPref === 'object') {
+        localStorage.setItem('fgos_ai_pref', JSON.stringify(global.aiPref));
+      }
+      setNotice({ kind: 'ok', text: 'Backup restored to Firestore and this device.' });
+    } catch (err: any) {
+      setNotice({ kind: 'err', text: `Import failed: ${err?.message || err}` });
+    } finally {
+      setBusy(false);
+      if (fileRef.current) fileRef.current.value = '';
+    }
+  };
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-6">
+      <h2 className="text-xl font-bold text-slate-900 flex items-center gap-2">
+        <DatabaseBackup className="w-5 h-5 text-indigo-600" /> Backup & Restore
+      </h2>
+      <p className="text-sm text-slate-600">
+        Export the app configuration (API keys, AI model preference, and every brand's AutoBlog
+        settings) as a single JSON file, or restore it on this or another device. Content items,
+        brands, and the blog register are already stored in Firestore and are not part of this file.
+      </p>
+      <div className="flex flex-col sm:flex-row gap-3">
+        <button
+          onClick={exportBackup}
+          disabled={busy}
+          className="flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition shrink-0"
+        >
+          <Download className="w-4 h-4" /> {busy ? 'Exporting…' : 'Export backup'}
+        </button>
+        <button
+          onClick={() => fileRef.current?.click()}
+          disabled={busy}
+          className="flex items-center justify-center gap-2 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-700 px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition shrink-0"
+        >
+          <Upload className="w-4 h-4" /> {busy ? 'Importing…' : 'Restore from file'}
+        </button>
+        <input
+          ref={fileRef}
+          type="file"
+          accept="application/json"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) void importBackup(f);
+          }}
+        />
+      </div>
+      {notice && (
+        <p className={`text-sm font-medium ${notice.kind === 'ok' ? 'text-emerald-600' : 'text-rose-600'}`}>
+          {notice.text}
+        </p>
+      )}
+      <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-800">
+        <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5" />
+        <span>
+          The backup file contains your API keys in plain text. Store it somewhere private (password
+          manager, encrypted drive) and never share it. Restoring overwrites the current settings on
+          this device.
+        </span>
+      </div>
+    </div>
+  );
+};
+
 export const SettingsTab: React.FC<SettingsProps> = ({ brands, selectedBrandId, onSelectBrand, currentUser }) => {
-  const [activeSubTab, setActiveSubTab] = useState<'api-keys' | 'ai-models' | 'wp-bridge' | 'deployment' | 'users' | 'wizard'>('api-keys');
+  const [activeSubTab, setActiveSubTab] = useState<'api-keys' | 'ai-models' | 'wp-bridge' | 'deployment' | 'users' | 'wizard' | 'backup'>('api-keys');
 
   const subTabs = [
     { id: 'api-keys', label: 'API Keys & BYOK', icon: Key },
@@ -792,7 +921,8 @@ export const SettingsTab: React.FC<SettingsProps> = ({ brands, selectedBrandId, 
     { id: 'wp-bridge', label: 'WP REST API Bridge', icon: Globe },
     { id: 'deployment', label: 'cPanel Deployment', icon: Server },
     { id: 'users', label: 'User Management', icon: Users },
-    { id: 'wizard', label: 'Setup Wizard', icon: Settings }
+    { id: 'wizard', label: 'Setup Wizard', icon: Settings },
+    { id: 'backup', label: 'Backup & Restore', icon: DatabaseBackup }
   ] as const;
 
   return (
@@ -839,6 +969,7 @@ export const SettingsTab: React.FC<SettingsProps> = ({ brands, selectedBrandId, 
           {activeSubTab === 'deployment' && <CPanelExporter />}
           {activeSubTab === 'users' && <UserManagementTab currentUser={currentUser} />}
           {activeSubTab === 'wizard' && <Wizard />}
+          {activeSubTab === 'backup' && <BackupTab />}
         </div>
       </div>
     </div>
