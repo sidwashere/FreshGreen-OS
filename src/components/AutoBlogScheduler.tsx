@@ -1019,12 +1019,19 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
       [item.id]: { phase: 'Connecting to the model…', percent: 0, words: 0, text: '', elapsed: 0, lastUpdate: Date.now(), stalled: false, generationInfo: null, history: [] },
     }));
     logActivity({ category: 'generation', status: 'info', action: 'generate_start', title: `Generation started: ${item.title}`, message: 'Auto-Write generation initiated for this article.', brandId: item.brandId, brandName: brands.find((b) => b.id === item.brandId)?.name });
-    // Client-side stall watchdog: the server heartbeats every 15s, so if no
-    // chunk arrives for 90s the connection is dead — abort instead of spinning
-    // forever with a stuck "Generating…" button.
+    // Client-side stall watchdog: re-armed on EVERY progress event (the server
+    // heartbeats every 15s during streaming) and on every client-side phase
+    // update, so it only fires when NOTHING has progressed for 120s — a dead
+    // connection, not a slow-but-alive generation. (A one-shot 90s timer here
+    // used to abort every generation that took longer than 90s total.)
     const genController = new AbortController();
     let stalled = false;
-    const genWatchdog = setTimeout(() => { stalled = true; genController.abort(); }, 90_000);
+    let genWatchdog: ReturnType<typeof setTimeout>;
+    const armWatchdog = () => {
+      clearTimeout(genWatchdog);
+      genWatchdog = setTimeout(() => { stalled = true; genController.abort(); }, 120_000);
+    };
+    armWatchdog();
     try {
       // Step 1: Generate SEO keywords
       const kwResp = await fetch('/api/ai/suggest-keywords', {
@@ -1068,10 +1075,12 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
       let genData: any = null;
 
       const patch = (fn: (prev: any) => any) => {
+        armWatchdog(); // any UI progress means the job is alive
         setGenState((prev) => ({ ...prev, [item.id]: fn(prev[item.id] || { phase: '', percent: 0, words: 0, text: '', elapsed: 0, lastUpdate: Date.now(), stalled: false, generationInfo: null, history: [] }) }));
       };
 
       const handleEvent = (evt: any) => {
+        armWatchdog(); // any server event (stream chunk, heartbeat, status…) means the connection is alive
         if (evt.type === 'generationInfo') {
           patch((prev) => ({ ...prev, generationInfo: evt, history: prev.history || [] }));
         } else if (evt.type === 'status') {
