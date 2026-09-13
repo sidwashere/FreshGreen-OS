@@ -1455,15 +1455,14 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
   };
 
   // ── Publish now (manual push to WordPress) ────────────────────────
-  const handlePublishNow = async (item: ContentItem) => {
+  // Shared by the single-item button and the bulk publish action.
+  const publishOne = async (item: ContentItem): Promise<{ ok: boolean; message?: string }> => {
     const brand = brands.find((b) => b.id === item.brandId);
     if (!brand?.wpUrl || !brand?.wpUsername) {
-      setNotice({ kind: 'err', text: `"${item.title}" — brand has no WordPress credentials configured. Go to Settings → Brand DNA to add them.` });
-      return;
+      return { ok: false, message: `"${item.title}" — brand has no WordPress credentials configured. Go to Settings → Brand DNA to add them.` };
     }
     if (!item.bodyHtml || item.bodyHtml.trim().length < 50) {
-      setNotice({ kind: 'err', text: `"${item.title}" has no article body yet — generate the draft before publishing.` });
-      return;
+      return { ok: false, message: `"${item.title}" has no article body yet — generate the draft before publishing.` };
     }
     setPublishing((prev) => new Set(prev).add(item.id));
     try {
@@ -1496,20 +1495,19 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
           publishRetryAt: undefined,
           updatedAt: new Date().toISOString(),
         });
-        setNotice({ kind: 'ok', text: `Published "${item.title}" to WordPress` });
-      } else {
-        // Keep the item retryable (Draft_Ready) — the server-side tick will
-        // retry it with exponential backoff when its schedule comes due.
-        onSaveItem({
-          ...item,
-          status: 'Draft_Ready',
-          lastAutoPublishError: result?.message || 'Publish failed',
-          updatedAt: new Date().toISOString(),
-        });
-        setNotice({ kind: 'err', text: `Publish failed: ${result?.message || 'Unknown error'} — will retry automatically.` });
+        return { ok: true, message: `Published "${item.title}" to WordPress` };
       }
+      // Keep the item retryable (Draft_Ready) — the server-side tick will
+      // retry it with exponential backoff when its schedule comes due.
+      onSaveItem({
+        ...item,
+        status: 'Draft_Ready',
+        lastAutoPublishError: result?.message || 'Publish failed',
+        updatedAt: new Date().toISOString(),
+      });
+      return { ok: false, message: `Publish failed: ${result?.message || 'Unknown error'} — will retry automatically.` };
     } catch (err: any) {
-      setNotice({ kind: 'err', text: `Publish error: ${err?.name === 'AbortError' ? 'timed out after 30s' : err.message}` });
+      return { ok: false, message: `Publish error: ${err?.name === 'AbortError' ? 'timed out after 30s' : err.message}` };
     } finally {
       setPublishing((prev) => {
         const next = new Set(prev);
@@ -1517,6 +1515,11 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
         return next;
       });
     }
+  };
+
+  const handlePublishNow = async (item: ContentItem) => {
+    const res = await publishOne(item);
+    setNotice({ kind: res.ok ? 'ok' : 'err', text: res.message || 'Publish failed.' });
   };
 
   // ── Delete item ────────────────────────────────────────────────────
@@ -1636,6 +1639,103 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
       updatedAt: new Date().toISOString(),
     });
     setNotice({ kind: 'ok', text: `"${item.title}" reset to Draft_Ready — it will retry on its next scheduled tick.` });
+  };
+
+  // ── Bulk publish now (Draft_Ready items with a body) ──────────────
+  const handleBulkPublish = async () => {
+    const sel = queueItems.filter(
+      (i) => selectedItems.has(i.id) && i.status === 'Draft_Ready' && i.bodyHtml && i.bodyHtml.trim().length >= 50
+    );
+    if (sel.length === 0) {
+      setNotice({ kind: 'err', text: 'No selected posts are ready to publish (Draft_Ready with an article body).' });
+      return;
+    }
+    if (!window.confirm(`Publish ${sel.length} selected post${sel.length > 1 ? 's' : ''} to WordPress now?`)) return;
+    let ok = 0;
+    let failed = 0;
+    for (const item of sel) {
+      const res = await publishOne(item);
+      if (res.ok) ok += 1;
+      else failed += 1;
+    }
+    setNotice({ kind: failed ? 'err' : 'ok', text: `Published ${ok} post${ok !== 1 ? 's' : ''}${failed ? `, ${failed} failed` : ''}.` });
+    clearSelection();
+  };
+
+  // ── Bulk clear schedule (scheduled items) ─────────────────────────
+  const handleBulkUnschedule = () => {
+    const sel = queueItems.filter((i) => selectedItems.has(i.id) && i.scheduledPublishAt);
+    if (sel.length === 0) {
+      setNotice({ kind: 'err', text: 'No selected posts have a schedule to clear.' });
+      return;
+    }
+    if (!window.confirm(`Remove the publish schedule from ${sel.length} selected post${sel.length > 1 ? 's' : ''}?`)) return;
+    sel.forEach((item) => handleUnschedule(item));
+    setNotice({ kind: 'ok', text: `Cleared the schedule on ${sel.length} post${sel.length > 1 ? 's' : ''}.` });
+    clearSelection();
+  };
+
+  // ── Bulk retry (Error items) ──────────────────────────────────────
+  const handleBulkRetry = () => {
+    const sel = queueItems.filter((i) => selectedItems.has(i.id) && i.status === 'Error');
+    if (sel.length === 0) {
+      setNotice({ kind: 'err', text: 'No selected posts are in Error state.' });
+      return;
+    }
+    sel.forEach((item) => handleRetryError(item));
+    setNotice({ kind: 'ok', text: `Reset ${sel.length} post${sel.length > 1 ? 's' : ''} to Draft_Ready — they will retry on their next scheduled tick.` });
+    clearSelection();
+  };
+
+  // ── Bulk SEO analysis (Draft_Ready items with a body) ─────────────
+  // Best-effort: a failure on one item never aborts the rest, and the score
+  // is just attached when available (same pattern as autoSeoAnalysis).
+  const handleBulkSeo = async () => {
+    const sel = queueItems.filter(
+      (i) => selectedItems.has(i.id) && i.status === 'Draft_Ready' && i.bodyHtml && i.bodyHtml.trim().length >= 50
+    );
+    if (sel.length === 0) {
+      setNotice({ kind: 'err', text: 'No selected posts have an article body to analyse.' });
+      return;
+    }
+    let ok = 0;
+    let failed = 0;
+    for (const item of sel) {
+      try {
+        const seoResp = await fetch('/api/seo/analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: item.metaTitle || item.title,
+            metaDescription: item.metaDescription || '',
+            focusKeyphrase: item.primaryKeyword || '',
+            secondaryKeyphrases: item.secondaryKeywords || [],
+            bodyHtml: item.bodyHtml,
+          }),
+        });
+        const seoData = await seoResp.json();
+        if (seoData.success && seoData.data) {
+          onSaveItem({
+            ...item,
+            seoScore: seoData.data.pct,
+            seoAnalysis: {
+              pct: seoData.data.pct,
+              status: seoData.data.status,
+              summary: seoData.data.summary,
+              recommendations: seoData.data.recommendations || [],
+            },
+            updatedAt: new Date().toISOString(),
+          });
+          ok += 1;
+        } else {
+          failed += 1;
+        }
+      } catch {
+        failed += 1;
+      }
+    }
+    setNotice({ kind: failed ? 'err' : 'ok', text: `Analysed ${ok} post${ok !== 1 ? 's' : ''}${failed ? `, ${failed} failed` : ''}.` });
+    clearSelection();
   };
 
   const formatDate = (iso?: string) => {
@@ -2318,7 +2418,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
                 {selectedItems.size > 0 && selectedItems.size === queueItems.length ? 'Deselect all' : `Select all (${queueItems.length})`}
               </button>
               {selectedItems.size > 0 && (
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <button
                     onClick={handleBulkSchedule}
                     className="px-3 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1"
@@ -2334,6 +2434,38 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
                   >
                     <Sparkles className="w-3.5 h-3.5" />
                     Generate
+                  </button>
+                  <button
+                    onClick={handleBulkPublish}
+                    className="px-3 py-2 bg-sky-600 hover:bg-sky-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1"
+                    title="Publish selected Draft_Ready posts to WordPress now"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    Publish
+                  </button>
+                  <button
+                    onClick={handleBulkSeo}
+                    className="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1"
+                    title="Run the SEO analysis on selected Draft_Ready posts"
+                  >
+                    <Zap className="w-3.5 h-3.5" />
+                    SEO check
+                  </button>
+                  <button
+                    onClick={handleBulkUnschedule}
+                    className="px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1"
+                    title="Remove the publish schedule from selected posts"
+                  >
+                    <Calendar className="w-3.5 h-3.5" />
+                    Unschedule
+                  </button>
+                  <button
+                    onClick={handleBulkRetry}
+                    className="px-3 py-2 bg-orange-600 hover:bg-orange-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1"
+                    title="Reset selected Error posts to Draft_Ready so they retry"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    Retry
                   </button>
                   <button
                     onClick={handleBulkDelete}

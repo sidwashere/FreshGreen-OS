@@ -75,6 +75,10 @@ export const BlogRegister: React.FC<BlogRegisterProps> = ({
   const [armId, setArmId] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  // ── Multiselect / bulk delete ─────────────────────────────────────
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   const brandScoped = selectedBrandId !== 'all';
   const scoped = useMemo(
@@ -155,6 +159,59 @@ export const BlogRegister: React.FC<BlogRegisterProps> = ({
     }
   };
 
+  // ── Multiselect helpers ───────────────────────────────────────────
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      const allSelected = sorted.length > 0 && sorted.every((r) => next.has(r.entry.id));
+      if (allSelected) sorted.forEach((r) => next.delete(r.entry.id));
+      else sorted.forEach((r) => next.add(r.entry.id));
+      return next;
+    });
+  };
+
+  const clearSelection = () => setSelectedIds(new Set());
+
+  // Selected rows that are currently visible under the active search/sort.
+  const visibleSelected = useMemo(
+    () => sorted.filter((r) => selectedIds.has(r.entry.id)),
+    [sorted, selectedIds],
+  );
+
+  // Bulk delete: items with a content post also trash their WordPress post
+  // (recoverable); orphaned register entries are removed directly. Failures
+  // are isolated per row and reported in a summary.
+  const handleBulkDelete = async () => {
+    const sel = visibleSelected;
+    if (sel.length === 0) return;
+    if (!window.confirm(`Delete ${sel.length} selected register entr${sel.length > 1 ? 'ies' : 'y'}? Entries linked to a post also trash its WordPress post (recoverable).`)) return;
+    setBulkBusy(true);
+    setError(null);
+    setNotice(null);
+    let ok = 0;
+    let failed = 0;
+    for (const row of sel) {
+      try {
+        const res = row.item ? await onDeleteItem(row.item) : await onDeleteEntry(row.entry.id);
+        if (res.success) ok += 1;
+        else failed += 1;
+      } catch { failed += 1; }
+    }
+    setBulkBusy(false);
+    if (failed) setError(`Deleted ${ok} entr${ok !== 1 ? 'ies' : 'y'}, ${failed} failed.`);
+    else setNotice(`Deleted ${ok} register entr${ok !== 1 ? 'ies' : 'y'}.`);
+    clearSelection();
+  };
+
   return (
     <div className="space-y-4">
       {/* Header */}
@@ -196,12 +253,56 @@ export const BlogRegister: React.FC<BlogRegisterProps> = ({
         </div>
       )}
 
+      {notice && (
+        <div className="px-4 py-2.5 rounded-xl border border-emerald-200 bg-emerald-50 text-[12px] font-semibold text-emerald-700">
+          {notice}
+        </div>
+      )}
+
+      {/* Bulk actions bar (multiselect) */}
+      {visibleSelected.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 bg-emerald-50/60 border border-emerald-200 rounded-2xl px-4 py-3">
+          <span className="text-[12px] font-bold text-emerald-700">
+            {visibleSelected.length} selected
+          </span>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <button
+              onClick={() => void handleBulkDelete()}
+              disabled={bulkBusy}
+              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-bold bg-red-600 hover:bg-red-700 text-white transition disabled:opacity-40"
+              title="Delete the selected register entries (linked posts go to WordPress trash)"
+            >
+              <Trash2 className="w-3.5 h-3.5" /> Delete
+            </button>
+            <button
+              onClick={clearSelection}
+              disabled={bulkBusy}
+              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-bold border border-slate-200 bg-white text-slate-500 hover:bg-slate-50 transition disabled:opacity-40"
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Table */}
       <div className="bg-white rounded-2xl border border-slate-200/70 overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-left">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50/60">
+                <th className="px-4 py-2.5 w-10">
+                  {sorted.length > 0 && (
+                    <label className="inline-flex items-center cursor-pointer select-none" title="Select / deselect all visible entries">
+                      <input
+                        type="checkbox"
+                        checked={sorted.length > 0 && sorted.every((r) => selectedIds.has(r.entry.id))}
+                        onChange={toggleSelectAll}
+                        className="w-4 h-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                      />
+                    </label>
+                  )}
+                </th>
                 <th className="px-4 py-2.5"><SortBtn label="Blog No." k="number" /></th>
                 <th className="px-4 py-2.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">Title</th>
                 <th className="px-4 py-2.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">Keywords</th>
@@ -216,7 +317,7 @@ export const BlogRegister: React.FC<BlogRegisterProps> = ({
             <tbody>
               {sorted.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-4 py-10 text-center">
+                  <td colSpan={10} className="px-4 py-10 text-center">
                     <p className="text-[13px] font-semibold text-slate-500">No register entries yet.</p>
                     <p className="text-[12px] text-slate-400 mt-1">
                       Blog numbers are assigned automatically when posts are created and published.
@@ -226,6 +327,16 @@ export const BlogRegister: React.FC<BlogRegisterProps> = ({
               ) : (
                 sorted.map(({ entry, item, title, keywords, status, liveUrl, wpPostId }) => (
                   <tr key={entry.id} className="border-b border-slate-100 hover:bg-slate-50/60 transition">
+                    <td className="px-4 py-3">
+                      <label className="inline-flex items-center cursor-pointer select-none" title="Select for bulk actions">
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.has(entry.id)}
+                          onChange={() => toggleSelect(entry.id)}
+                          className="w-4 h-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                        />
+                      </label>
+                    </td>
                     <td className="px-4 py-3">
                       <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-700 font-mono text-[12px] font-bold">
                         <Hash className="w-3 h-3" /> {entry.blogNumber}

@@ -95,6 +95,9 @@ export const ContentHub: React.FC<ContentHubProps> = ({
   const [importing, setImporting] = useState(false);
   const [fixingId, setFixingId] = useState<string | null>(null);
   const [view, setView] = useState<'posts' | 'register'>('posts');
+  // ── Multiselect / bulk actions ────────────────────────────────────
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   const brand = brands.find((b) => b.id === selectedBrandId) || null;
   const brandScoped = selectedBrandId !== 'all';
@@ -150,6 +153,38 @@ export const ContentHub: React.FC<ContentHubProps> = ({
     setNotice({ kind, text });
     window.setTimeout(() => setNotice((n) => (n?.text === text ? null : n)), 5000);
   };
+
+  // ── Multiselect helpers ───────────────────────────────────────────
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      const allSelected = filtered.length > 0 && filtered.every(({ item }) => next.has(item.id));
+      if (allSelected) filtered.forEach(({ item }) => next.delete(item.id));
+      else filtered.forEach(({ item }) => next.add(item.id));
+      return next;
+    });
+  };
+
+  const clearSelection = () => setSelectedIds(new Set());
+
+  // Selected items that are currently visible under the active filter/search.
+  const visibleSelected = useMemo(
+    () => filtered.filter(({ item }) => selectedIds.has(item.id)),
+    [filtered, selectedIds],
+  );
+
+  // Resolve the brand that owns a specific item (bulk ops must never use the
+  // selected brand for items belonging to another brand).
+  const brandFor = (item: ContentItem) => brands.find((b) => b.id === item.brandId) || null;
 
   const run = async (id: string, fn: () => Promise<string>) => {
     setBusy((prev) => new Set(prev).add(id));
@@ -214,6 +249,94 @@ export const ContentHub: React.FC<ContentHubProps> = ({
       if (res.success) return `Deleted "${item.title}" — its WordPress post was moved to the trash.`;
       throw new Error(res.message || 'Could not delete the item.');
     });
+  };
+
+  // ── Bulk actions (multiselect) ────────────────────────────────────
+  // Each op resolves the item's OWN brand so cross-brand selections never
+  // publish to the wrong site. Failures are isolated per item and reported
+  // in a summary — one bad row never aborts the rest.
+
+  const handleBulkPublish = async () => {
+    const ready = visibleSelected.filter(({ item, state }) => {
+      const b = brandFor(item);
+      const gate = b ? publishGate(item, b, state === 'live') : { ok: false, reason: 'No brand connection.' };
+      return gate.ok;
+    });
+    if (ready.length === 0) {
+      flash('err', 'None of the selected posts can be published right now (check the publish-gate reasons on each row).');
+      return;
+    }
+    if (!window.confirm(`Publish ${ready.length} selected post${ready.length > 1 ? 's' : ''} to WordPress?`)) return;
+    setBulkBusy(true);
+    let ok = 0;
+    let failed = 0;
+    for (const { item } of ready) {
+      const b = brandFor(item);
+      if (!b) { failed += 1; continue; }
+      try {
+        const res = await syncItemToWp(b, item, 'publish');
+        if (res.ok && res.updated) { onSaveItem(res.updated); ok += 1; }
+        else failed += 1;
+      } catch { failed += 1; }
+    }
+    setBulkBusy(false);
+    flash(failed ? 'err' : 'ok', `Published ${ok} post${ok !== 1 ? 's' : ''}${failed ? `, ${failed} failed` : ''}.`);
+    clearSelection();
+  };
+
+  const handleBulkSaveDraft = async () => {
+    const ready = visibleSelected.filter(({ item, state }) => state !== 'draft' || item.status !== 'Published');
+    if (ready.length === 0) {
+      flash('err', 'No selected posts to save as draft.');
+      return;
+    }
+    if (!window.confirm(`Save ${ready.length} selected post${ready.length > 1 ? 's' : ''} as WordPress drafts?`)) return;
+    setBulkBusy(true);
+    let ok = 0;
+    let failed = 0;
+    for (const { item } of ready) {
+      const b = brandFor(item);
+      if (!b) { failed += 1; continue; }
+      try {
+        const res = await syncItemToWp(b, item, 'draft');
+        if (res.ok && res.updated) { onSaveItem(res.updated); ok += 1; }
+        else failed += 1;
+      } catch { failed += 1; }
+    }
+    setBulkBusy(false);
+    flash(failed ? 'err' : 'ok', `Saved ${ok} post${ok !== 1 ? 's' : ''} as drafts${failed ? `, ${failed} failed` : ''}.`);
+    clearSelection();
+  };
+
+  const handleBulkTrash = async () => {
+    const sel = visibleSelected;
+    if (sel.length === 0) return;
+    if (!window.confirm(`Trash ${sel.length} selected post${sel.length > 1 ? 's' : ''}? Their WordPress posts move to the trash (recoverable) and they are removed from the app.`)) return;
+    setBulkBusy(true);
+    let ok = 0;
+    let failed = 0;
+    for (const { item } of sel) {
+      try {
+        const res = await onDeleteItem(item);
+        if (res.success) ok += 1;
+        else failed += 1;
+      } catch { failed += 1; }
+    }
+    setBulkBusy(false);
+    flash(failed ? 'err' : 'ok', `Trashed ${ok} post${ok !== 1 ? 's' : ''}${failed ? `, ${failed} failed` : ''}.`);
+    clearSelection();
+  };
+
+  const handleBulkClearSchedule = () => {
+    const sel = visibleSelected.filter(({ item }) => item.scheduledPublishAt);
+    if (sel.length === 0) {
+      flash('err', 'No selected posts have a publish date to clear.');
+      return;
+    }
+    if (!window.confirm(`Remove the publish date from ${sel.length} selected post${sel.length > 1 ? 's' : ''}?`)) return;
+    sel.forEach(({ item }) => onSaveItem({ ...item, scheduledPublishAt: undefined, updatedAt: new Date().toISOString() }));
+    flash('ok', `Cleared the publish date on ${sel.length} post${sel.length > 1 ? 's' : ''}.`);
+    clearSelection();
   };
 
   // Shared AI SEO fix pipeline: audit the noted issues, fix them with best
@@ -513,6 +636,17 @@ export const ContentHub: React.FC<ContentHubProps> = ({
               </span>
             </button>
           ))}
+          {filtered.length > 0 && (
+            <label className="inline-flex items-center gap-1.5 ml-2 px-2 py-1 rounded-lg bg-white border border-slate-200 text-[11px] font-bold text-slate-500 cursor-pointer hover:bg-slate-50 transition select-none">
+              <input
+                type="checkbox"
+                checked={filtered.length > 0 && filtered.every(({ item }) => selectedIds.has(item.id))}
+                onChange={toggleSelectAll}
+                className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+              />
+              Select all
+            </label>
+          )}
         </div>
         <div className="relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
@@ -524,6 +658,56 @@ export const ContentHub: React.FC<ContentHubProps> = ({
           />
         </div>
       </div>
+
+      {/* Bulk actions bar (multiselect) */}
+      {visibleSelected.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 bg-indigo-50/60 border border-indigo-200 rounded-2xl px-4 py-3">
+          <span className="text-[12px] font-bold text-indigo-700">
+            {visibleSelected.length} selected
+          </span>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <button
+              onClick={() => void handleBulkPublish()}
+              disabled={bulkBusy}
+              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-bold bg-emerald-600 hover:bg-emerald-700 text-white transition disabled:opacity-40"
+              title="Publish the selected posts to their own WordPress sites"
+            >
+              <Send className="w-3.5 h-3.5" /> Publish
+            </button>
+            <button
+              onClick={() => void handleBulkSaveDraft()}
+              disabled={bulkBusy}
+              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-bold border border-sky-200 bg-white text-sky-700 hover:bg-sky-50 transition disabled:opacity-40"
+              title="Save the selected posts as WordPress drafts"
+            >
+              <PenLine className="w-3.5 h-3.5" /> Save draft
+            </button>
+            <button
+              onClick={handleBulkClearSchedule}
+              disabled={bulkBusy}
+              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-bold border border-amber-200 bg-white text-amber-700 hover:bg-amber-50 transition disabled:opacity-40"
+              title="Remove the publish date from the selected posts"
+            >
+              <Calendar className="w-3.5 h-3.5" /> Clear date
+            </button>
+            <button
+              onClick={() => void handleBulkTrash()}
+              disabled={bulkBusy}
+              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-bold bg-red-600 hover:bg-red-700 text-white transition disabled:opacity-40"
+              title="Trash the selected posts (WordPress trash is recoverable)"
+            >
+              <Trash2 className="w-3.5 h-3.5" /> Trash
+            </button>
+            <button
+              onClick={clearSelection}
+              disabled={bulkBusy}
+              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-bold border border-slate-200 bg-white text-slate-500 hover:bg-slate-50 transition disabled:opacity-40"
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* List */}
       <div className="space-y-2.5">
@@ -544,6 +728,15 @@ export const ContentHub: React.FC<ContentHubProps> = ({
             return (
               <div key={item.id} className="bg-white rounded-2xl border border-slate-200/70 overflow-hidden">
                 <div className="flex flex-col lg:flex-row lg:items-center gap-3 p-4">
+                  {/* Multiselect checkbox */}
+                  <label className="shrink-0 flex items-center cursor-pointer select-none" title="Select for bulk actions">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(item.id)}
+                      onChange={() => toggleSelect(item.id)}
+                      className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                    />
+                  </label>
                   {/* Identity */}
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
