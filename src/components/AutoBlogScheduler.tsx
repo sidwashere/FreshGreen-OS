@@ -2263,8 +2263,9 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
             </div>
           )}
 
-          {/* Filter bar */}
-          {queueBase.length > 0 && (
+          {/* Filter bar — visible whenever the brand has ANY posts, so the
+              AutoBlog / All posts scope toggle is always reachable */}
+          {brandItems.length > 0 && (
             <div className="flex flex-wrap items-center gap-2">
               <div className="relative flex-1 min-w-[180px] max-w-xs">
                 <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -2353,23 +2354,53 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
             </div>
           )}
 
-          {/* Empty state */}
+          {/* Empty state — scope-aware */}
           {queueBase.length === 0 && (
             <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center shadow-sm">
-              <div className="w-16 h-16 bg-violet-100 rounded-2xl mx-auto flex items-center justify-center mb-4">
-                <CalendarClock className="w-8 h-8 text-violet-500" />
-              </div>
-              <h3 className="text-lg font-bold text-slate-900 mb-2">No AutoBlog posts yet</h3>
-              <p className="text-sm text-slate-500 max-w-md mx-auto mb-6">
-                Connect a Google Sheet to import blog topics, then generate and schedule them for automatic publishing.
-              </p>
-              <button
-                onClick={() => setView('settings')}
-                className="px-6 py-3 bg-violet-600 hover:bg-violet-700 text-white rounded-xl text-sm font-bold transition inline-flex items-center gap-2"
-              >
-                <FileSpreadsheet className="w-4 h-4" />
-                Connect Google Sheet
-              </button>
+              {queueScope === 'autoblog' && brandItems.length > 0 ? (
+                <>
+                  <div className="w-16 h-16 bg-violet-100 rounded-2xl mx-auto flex items-center justify-center mb-4">
+                    <CalendarClock className="w-8 h-8 text-violet-500" />
+                  </div>
+                  <h3 className="text-lg font-bold text-slate-900 mb-2">No AutoBlog posts yet</h3>
+                  <p className="text-sm text-slate-500 max-w-md mx-auto mb-6">
+                    This brand has {brandItems.length} post{brandItems.length !== 1 ? 's' : ''} but none imported from a sheet or scheduled.
+                    Connect a Google Sheet to import blog topics, or switch to <strong>All posts</strong> to see every post for this brand.
+                  </p>
+                  <div className="flex items-center justify-center gap-2">
+                    <button
+                      onClick={() => setQueueScope('all')}
+                      className="px-6 py-3 bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 rounded-xl text-sm font-bold transition"
+                    >
+                      Show all {brandItems.length} posts
+                    </button>
+                    <button
+                      onClick={() => setView('settings')}
+                      className="px-6 py-3 bg-violet-600 hover:bg-violet-700 text-white rounded-xl text-sm font-bold transition inline-flex items-center gap-2"
+                    >
+                      <FileSpreadsheet className="w-4 h-4" />
+                      Connect Google Sheet
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="w-16 h-16 bg-violet-100 rounded-2xl mx-auto flex items-center justify-center mb-4">
+                    <CalendarClock className="w-8 h-8 text-violet-500" />
+                  </div>
+                  <h3 className="text-lg font-bold text-slate-900 mb-2">No posts yet</h3>
+                  <p className="text-sm text-slate-500 max-w-md mx-auto mb-6">
+                    Connect a Google Sheet to import blog topics, then generate and schedule them for automatic publishing.
+                  </p>
+                  <button
+                    onClick={() => setView('settings')}
+                    className="px-6 py-3 bg-violet-600 hover:bg-violet-700 text-white rounded-xl text-sm font-bold transition inline-flex items-center gap-2"
+                  >
+                    <FileSpreadsheet className="w-4 h-4" />
+                    Connect Google Sheet
+                  </button>
+                </>
+              )}
             </div>
           )}
 
