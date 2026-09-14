@@ -1024,17 +1024,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
               <span>{syncing ? 'Syncing...' : 'Sync Data'}</span>
             </button>
           </Tip>
-          <Tip text="Start a new blog post or landing page in the editor for the selected brand." side="bottom">
-            <button
-              onClick={onOpenWizard}
-              disabled={brands.length === 0}
-              title={brands.length === 0 ? "Please create a brand first" : ""}
-              className="flex items-center space-x-2 px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-sm transition shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Create New Blog</span>
-            </button>
-          </Tip>
+          {/* Remove note: not closing this */}
+          
         </div>
       </div>
 
@@ -2011,12 +2002,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
                     ? 'Start by creating a new blog from scratch.'
                     : 'Move posts forward through the workflow to see them here.'}
                 </p>
-                <button
-                  onClick={onOpenWizard}
-                  className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition"
-                >
-                  Create New Blog
-                </button>
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
