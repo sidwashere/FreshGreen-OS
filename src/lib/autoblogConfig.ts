@@ -1,5 +1,6 @@
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { doc, setDoc } from 'firebase/firestore';
 import { db } from './firebase';
+import { readDocCached } from './firestoreCache';
 
 /**
  * Per-brand AutoBlog configuration.
@@ -78,7 +79,12 @@ export function saveAutoblogConfigLocal(brandId: string, cfg: AutoblogConfig): v
 /** Fetch the per-brand config from Firestore (source of truth). Null if absent. */
 export async function fetchAutoblogConfigCloud(brandId: string): Promise<AutoblogConfig | null> {
   try {
-    const snap = await getDoc(doc(db, 'settings', 'autoblog'));
+    // Cache-first (readDocCached): the durable IndexedDB copy paints instantly
+    // on every swoop and refresh — no one-shot network wait. The network copy
+    // is fetched in the background and lands in the cache for the next swoop,
+    // so live changes always win a swoop later automatically.
+    const docRef = doc(db, 'settings', 'autoblog');
+    const snap = await readDocCached(docRef);
     const perBrand = snap.data()?.brands?.[brandId];
     if (perBrand && typeof perBrand === 'object') {
       return { ...defaultAutoblogConfig(), ...perBrand };

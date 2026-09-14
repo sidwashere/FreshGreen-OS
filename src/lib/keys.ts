@@ -1,13 +1,18 @@
 import { doc, getDoc } from 'firebase/firestore';
 import { db } from './firebase';
+import { readDocCached } from './firestoreCache';
 import type { AiModelPref } from '../types';
 
 export const fetchGlobalKeys = async () => {
   try {
+    // Cache-first: the durable (IndexedDB) copy paints instantly on every
+    // refresh and brand swoop — no one-shot network wait. The network copy is
+    // still fetched in the background by readDocCached and lands in the cache
+    // for the next swoop automatically.
     const docRef = doc(db, 'settings', 'global');
-    const docSnap = await getDoc(docRef);
-    if (docSnap.exists() && docSnap.data().apiKeys) {
-      return docSnap.data().apiKeys;
+    const snap = await readDocCached(docRef, undefined, { useCacheForever: true });
+    if (snap.exists() && snap.data().apiKeys) {
+      return snap.data().apiKeys;
     }
   } catch (err) {
     console.debug("Skipped fetching global keys from cloud due to network or permissions.", err);
