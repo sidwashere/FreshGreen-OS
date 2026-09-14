@@ -84,7 +84,7 @@ export const NewBlogWizard: React.FC<NewBlogWizardProps> = ({
   // Per-step validation — Next is disabled until the step is complete.
   const stepValid = useMemo(() => {
     if (step === 0) return !!brandId;
-    if (step === 1) return title.trim().length >= 3;
+    if (step === 1) return String(title ?? '').trim().length >= 3;
     return true;
   }, [step, brandId, title]);
 
@@ -109,12 +109,12 @@ export const NewBlogWizard: React.FC<NewBlogWizardProps> = ({
   };
 
   const handleCreate = () => {
-    if (!brandId || !title.trim()) return;
+    if (!brandId || !String(title ?? '').trim()) return;
     setCreating(true);
     setError(null);
     try {
       onCreateNewItem(
-        title.trim(),
+        String(title ?? '').trim(),
         brandId,
         contentType,
         {
