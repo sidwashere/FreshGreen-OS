@@ -4,6 +4,7 @@ import { db } from '../lib/firebase';
 import { logActivity } from '../lib/activityLogger';
 import { ContentItem, Brand, AutoBlogOverrides, SocialContentPackage, GenerationLogEntry } from '../types';
 import { loadAutoblogConfig, saveAutoblogConfigLocal, fetchAutoblogConfigCloud, saveAutoblogConfigCloud, AutoblogConfig } from '../lib/autoblogConfig';
+import { fetchGlobalKeys } from '../lib/keys';
 import { countWords } from '../lib/wpSync';
 import { GenerationInfoPanel } from './GenerationInfoPanel';
 import { BrandSwitcher } from './BrandSwitcher';
@@ -1089,7 +1090,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
           targetWordCount: defaultWordCount,
           tone: defaultTone,
           generateImages: autoGenerateImages,
-          byokKeys: JSON.parse(localStorage.getItem('fgos_byok_keys') || '{}'),
+          byokKeys: await fetchGlobalKeys(),
         }),
         signal: genController.signal,
       });
@@ -1178,7 +1179,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
             body: JSON.stringify({
               html: bodyHtml,
               brand: brands.find((b) => b.id === item.brandId),
-              byokKeys: JSON.parse(localStorage.getItem('fgos_byok_keys') || '{}'),
+              byokKeys: await fetchGlobalKeys(),
             }),
           });
           const hData = await hResp.json();
@@ -1248,7 +1249,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
               blogNumber: item.blogNumber,
               featuredImageUrl: genData.heroImg || item.featuredImageUrl,
               callToAction: item.sheetContext?.callToAction,
-              byokKeys: JSON.parse(localStorage.getItem('fgos_byok_keys') || '{}'),
+              byokKeys: await fetchGlobalKeys(),
             }),
           });
           const socData = await socResp.json();
@@ -1404,7 +1405,7 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
   const handleRegenerateSocial = async (item: ContentItem) => {
     setGeneratingSocial((prev) => new Set(prev).add(item.id));
     try {
-      const byokKeys = JSON.parse(localStorage.getItem('fgos_byok_keys') || '{}');
+      const byokKeys = await fetchGlobalKeys();
       const brand = brands.find((b) => b.id === item.brandId);
       const resp = await fetch('/api/ai/generate-social', {
         method: 'POST',
