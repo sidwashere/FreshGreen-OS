@@ -434,6 +434,21 @@ export const BrandManager: React.FC<BrandManagerProps> = ({
                 These colours and fonts drive every styled component the editor generates — hero bands, FAQ accordions, card grids, quotes, CTA bands and carousels. Everything is inline-styled and responsive (fluid type, auto-stacking grids, scroll-snap carousels), so posts look sharp on phones and desktop alike. Save Brand DNA to apply.
               </p>
 
+              <label className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2.5 cursor-pointer transition hover:border-emerald-300">
+                <span className="text-xs font-semibold text-slate-700 leading-snug">
+                  Elementor-family widget scaffold
+                  <span className="block text-[10.5px] font-normal text-slate-500 -mt-0.5">
+                    Wrap every block in Elementor's standard widget+container scaffold so Hello Elementor's CSS flex-aligns it. Additive — Kadence and other fully-styled themes ignore the wrappers and stay untouched.
+                  </span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={!!editingBrand.elementorScaffold}
+                  onChange={(e) => setEditingBrand({ ...editingBrand, elementorScaffold: e.target.checked })}
+                  className="w-4 h-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 shrink-0"
+                />
+              </label>
+
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                 {([
                   ['primary', 'Primary action'],
