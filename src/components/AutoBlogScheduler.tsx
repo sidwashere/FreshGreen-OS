@@ -986,16 +986,23 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
           const row = data.newRows[i];
           try {
             await onCreateNewItem(
-              row['Blog Title'] || row['Title'] || 'Untitled',
+              row['Blog Title'] || row['Title'] || row['Blog Title'] || 'Untitled',
               selectedBrandId,
               'post',
               {
-                primaryKeyword: row['Primary Keyword'] || '',
-                secondaryKeywords: (row['Secondary Keywords'] || '').split(/[,;|]/).map((s: string) => s.trim()).filter(Boolean),
-                seoBrief: row['Search Intent'] || row['One Line Summary'] || '',
-                initialPrompt: row['One Line Summary'] || row['Blog Title'] || '',
+                primaryKeyword: String(row['Primary Keyword'] || row['Primary'] || ''),
+                secondaryKeywords: (row['Secondary Keywords'] || row['Secondary Keywords'] || row['Secondary'] || '').split(/[,;|]/).map((s: string) => s.trim()).filter(Boolean),
+                seoBrief: String(row['Search Intent'] || row['One Line Summary'] || row['Summary'] || ''),
+                initialPrompt: String(row['One Line Summary'] || row['Blog Title'] || ''),
+                // A — lossless: forward the FULL tagged row so no research cell
+                // is ever dropped by hardcoded header names. Unknown columns,
+                // longtails, questions, CTAs and research all survive here.
                 sheetContext: row,
-                sourceSheetId: sheetUrl,
+                taggedResearch: Object.fromEntries(
+                  Object.entries(row as Record<string, any>)
+                    .filter(([, v]) => v != null && String(v).trim())
+                    .map(([k, v]) => [k, String(v)])
+                ),
               }
             );
             createdCount++;
@@ -1014,14 +1021,17 @@ export const AutoBlogScheduler: React.FC<AutoBlogSchedulerProps> = ({
         for (const ch of data.changedRows) {
           const existing = autoBlogItems.find((it) => it.title === ch.existingTitle);
           if (!existing) continue;
-          const sheetSummary = ch.row['One Line Summary'] || ch.row['Summary'] || '';
-          const sheetKeyword = ch.row['Primary Keyword'] || ch.row['Primary'] || '';
-          onSaveItem({
-            ...existing,
-            seoBrief: sheetSummary || existing.seoBrief,
-            primaryKeyword: sheetKeyword || existing.primaryKeyword,
-            updatedAt: new Date().toISOString(),
-          });
+            // Resync must NEVER clobber a hand-tuned brief/keyword — the
+            // in-app value wins; the sheet only *fills* empty fields. This is
+            // the "my params get lost after every update" root fix.
+            const sheetSummary = ch.row['One Line Summary'] || ch.row['Summary'] || '';
+            const sheetKeyword = ch.row['Primary Keyword'] || ch.row['Primary'] || '';
+            onUpdateExistingItem({
+              ...existing,
+              seoBrief: existing.seoBrief || sheetSummary,
+              primaryKeyword: existing.primaryKeyword || sheetKeyword,
+              updatedAt: new Date().toISOString(),
+            });
           updatedCount++;
         }
       }
