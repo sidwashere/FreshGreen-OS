@@ -4582,12 +4582,12 @@ app.post('/api/wp/test-connection', async (req, res) => {
 // no classes, and no wrappers. This allows the master template's theme CSS
 // to fully govern the layout and typography.
 // ---------------------------------------------------------------------------
-function blocksToCleanHtml(blocks: any[]): string {
+function blocksToCleanHtml(blocks: any[], brand?: any): string {
   if (!blocks || !blocks.length) return '';
 
   return blocks.map(block => {
-    // Skip the hero block entirely when using a master template,
-    // because the template already handles the H1 title and featured image.
+    // Skip the hero block entirely when using a master template or clean HTML,
+    // because the template/theme already handles the H1 title and featured image.
     if (block.type === 'hero') return '';
 
     const title = (block.title || '').trim();
@@ -4615,7 +4615,7 @@ function blocksToCleanHtml(blocks: any[]): string {
     // Render content
     if (content) {
       // Handle bullet points
-      const lines = content.split('\n').map(l => l.trim()).filter(Boolean);
+      const lines = content.split('\n').map((l: string) => l.trim()).filter(Boolean);
       const isBullet = (l: string) => /^[•\-*]\s*/.test(l);
       
       if (lines.some(isBullet)) {
@@ -4632,7 +4632,7 @@ function blocksToCleanHtml(blocks: any[]): string {
         if (inList) html += `</ul>\n`;
       } else {
         // Standard paragraphs
-        html += lines.map(line => `<p>${line}</p>\n`).join('');
+        html += lines.map((line: string) => `<p>${line}</p>\n`).join('');
       }
     }
 
@@ -4645,6 +4645,10 @@ function blocksToCleanHtml(blocks: any[]): string {
         }
       }
       html += `</div>\n`;
+    }
+
+    if (brand?.elementorScaffold) {
+      return `<div class="elementor-widget elementor-widget-fg-block"><div class="elementor-widget-container">${html}</div></div>`;
     }
 
     return html;
@@ -4661,10 +4665,11 @@ async function applyMasterTemplateLayout(
   masterTemplateId: number,
   masterTemplateType: 'page' | 'post',
   newArticleTitle: string,
-  blocks: any[]
+  blocks: any[],
+  brand?: any
 ): Promise<{ content: string; templateSlug?: string }> {
   // Generate clean, semantic HTML from blocks (bypassing Blog Style Kit entirely)
-  const cleanBody = blocksToCleanHtml(blocks);
+  const cleanBody = blocksToCleanHtml(blocks, brand);
 
   try {
     const endpoint = masterTemplateType === 'page' ? 'pages' : 'posts';
@@ -4801,7 +4806,7 @@ app.post('/api/wp/sync-content', async (req, res) => {
 
     const payload: any = {
       title: contentItem.title,
-      content: contentItem.bodyHtml,
+      content: blocksToCleanHtml(contentItem.blocks || [], brand),
       status: wpStatus,
       slug: contentItem.slug || undefined,
     };
@@ -4841,7 +4846,8 @@ app.post('/api/wp/sync-content', async (req, res) => {
           masterId,
           masterType,
           contentItem.title || '',
-          contentItem.blocks || []
+          contentItem.blocks || [],
+          brand
         );
         payload.content = cloned.content;
         if (cloned.templateSlug) {
