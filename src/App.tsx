@@ -404,7 +404,20 @@ export default function App() {
     if (!user) return;
     try {
       const brandToSave = { ...updatedBrand, userId: user.uid };
-      await setDoc(doc(db, 'brands', updatedBrand.id), brandToSave);
+      // Firestore rejects 'undefined' values. Deep-strip them out.
+      const stripUndefined = (v: any): any => {
+        if (Array.isArray(v)) return v.map(stripUndefined);
+        if (v && typeof v === 'object') {
+          const o: Record<string, any> = {};
+          for (const [k, val] of Object.entries(v)) {
+            if (val !== undefined) o[k] = stripUndefined(val);
+          }
+          return o;
+        }
+        return v;
+      };
+      const cleanBrand = stripUndefined(brandToSave);
+      await setDoc(doc(db, 'brands', updatedBrand.id), cleanBrand);
     } catch (err) {
       console.error('Failed to save brand', err);
     }
