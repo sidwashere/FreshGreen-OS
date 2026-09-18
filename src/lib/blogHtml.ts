@@ -722,10 +722,23 @@ export function blocksToHtml(
   const scope = stableScope(list, kit);
   const head = frameHead(kit, meta, estimateReadMins(list));
   const foot = frameFoot(kit, meta);
+
+  // Per-brand Elementor-family bridge (Brand DNA > Blog Style Kit switch):
+  // when the brand opts in, each block is wrapped in Elementor's standard
+  // widget scaffold so Hello Elementor's own CSS flex-aligns it. Kadence and
+  // other fully-styled themes ignore these wrappers and keep working
+  // untouched — this is strictly additive for Elementor-target brands.
+  const emitBlock = (b: VisualBlock) => {
+    const html = renderBlock(b, kit, brand);
+    return brand?.elementorScaffold
+      ? `<div class="elementor-widget elementor-widget-fg-block"><div class="elementor-widget-container">${html}</div></div>`
+      : html;
+  };
+
   return `<div class="fg-art fg-art-${scope}" style="font-family:${kit.bodyFont} !important;color:${kit.text} !important;line-height:1.7 !important;max-width:800px !important;margin:0 auto !important;padding:0 !important;box-sizing:border-box !important;background:transparent !important;">
 ${scopedStyles(scope, kit)}
 ${head}
-${list.map((b) => renderBlock(b, kit, brand)).join('\n\n')}
+${list.map(emitBlock).join('\n\n')}
 ${foot}
 </div>`;
 }
