@@ -4585,36 +4585,46 @@ app.post('/api/wp/test-connection', async (req, res) => {
 function blocksToCleanHtml(blocks: any[], brand?: any): string {
   if (!blocks || !blocks.length) return '';
 
-  return blocks.map(block => {
-    // Skip the hero block entirely when using a master template or clean HTML,
-    // because the template/theme already handles the H1 title and featured image.
-    if (block.type === 'hero') return '';
+  const isElementor = !!brand?.elementorScaffold;
+
+  const innerHtml = blocks.map(block => {
+    let html = '';
+
+    if (block.type === 'hero') {
+      // Standard themes handle the H1 and featured image automatically.
+      // But if we are using the Elementor Scaffold (blank canvas), we must render them.
+      if (!isElementor) return ''; 
+      
+      const escTitle = (block.title || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      if (escTitle) html += `<h1 style="text-align: center; margin-bottom: 24px; font-size: 2.5em; line-height: 1.2; color: #111;">${escTitle}</h1>\n`;
+      if (block.imageUrl) html += `<img src="${block.imageUrl}" alt="${block.imageAlt || escTitle}" style="width: 100%; height: auto; display: block; margin: 0 auto 32px; border-radius: 12px;" />\n`;
+      if (block.subtitle) html += `<p style="text-align: center; font-size: 1.25em; color: #555; margin-bottom: 40px;">${block.subtitle}</p>\n`;
+      
+      return html;
+    } 
+    
+    if (block.type === 'image_banner') {
+      // Standard themes rely on the featured image. Elementor Scaffold renders in-body images.
+      if (!isElementor || !block.imageUrl) return '';
+      html += `<img src="${block.imageUrl}" alt="${block.imageAlt || ''}" style="width: 100%; height: auto; display: block; margin: 32px auto; border-radius: 12px;" />\n`;
+      if (block.imageCaption) html += `<p style="text-align: center; font-size: 0.9em; color: #777; margin-top: -20px; margin-bottom: 32px;">${block.imageCaption}</p>\n`;
+      return html;
+    }
 
     const title = (block.title || '').trim();
     const content = (block.content || '').trim();
     const hasFaq = block.type === 'faq' && Array.isArray(block.faqItems) && block.faqItems.length > 0;
 
-    // Skip blocks that would render nothing meaningful (no content, no FAQ).
-    // A title-only block would otherwise produce a dangling empty heading.
-    if (!content && !hasFaq) return '';
+    if (!content && !hasFaq && !title) return '';
 
-    let html = '';
-
-    // Render heading if present
     if (title) {
-      // Escape HTML entities in title
       const escTitle = title.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      html += `<h2>${escTitle}</h2>\n`;
+      html += isElementor 
+        ? `<h2 style="margin-top: 40px; margin-bottom: 16px; font-size: 1.8em; color: #222;">${escTitle}</h2>\n`
+        : `<h2>${escTitle}</h2>\n`;
     }
 
-    // NOTE: no in-body images are rendered here. Master-template publishes
-    // carry exactly one image — the WordPress featured image — so image
-    // blocks (image_banner) are intentionally dropped to avoid any secondary
-    // or duplicate image in the body.
-
-    // Render content
     if (content) {
-      // Handle bullet points
       const lines = content.split('\n').map((l: string) => l.trim()).filter(Boolean);
       const isBullet = (l: string) => /^[•\-*]\s*/.test(l);
       
@@ -4622,37 +4632,44 @@ function blocksToCleanHtml(blocks: any[], brand?: any): string {
         let inList = false;
         for (const line of lines) {
           if (isBullet(line)) {
-            if (!inList) { html += `<ul>\n`; inList = true; }
-            html += `  <li>${line.replace(/^[•\-*]\s*/, '')}</li>\n`;
+            if (!inList) { html += isElementor ? `<ul style="margin-bottom: 24px; padding-left: 24px;">\n` : `<ul>\n`; inList = true; }
+            html += `  <li${isElementor ? ' style="margin-bottom: 8px;"' : ''}>${line.replace(/^[•\-*]\s*/, '')}</li>\n`;
           } else {
             if (inList) { html += `</ul>\n`; inList = false; }
-            html += `<p>${line}</p>\n`;
+            html += `<p${isElementor ? ' style="margin-bottom: 20px;"' : ''}>${line}</p>\n`;
           }
         }
         if (inList) html += `</ul>\n`;
       } else {
-        // Standard paragraphs
-        html += lines.map((line: string) => `<p>${line}</p>\n`).join('');
+        html += lines.map((line: string) => `<p${isElementor ? ' style="margin-bottom: 20px;"' : ''}>${line}</p>\n`).join('');
       }
     }
 
-    // Render FAQ items
     if (hasFaq) {
-      html += `<div class="faq-section">\n`;
+      html += isElementor ? `<div class="faq-section" style="margin-top: 32px;">\n` : `<div class="faq-section">\n`;
       for (const item of block.faqItems) {
         if (item.question && item.answer) {
-          html += `  <h3>${item.question}</h3>\n  <p>${item.answer}</p>\n`;
+          html += isElementor 
+            ? `  <h3 style="margin-top: 24px; margin-bottom: 12px; font-size: 1.4em; color: #333;">${item.question}</h3>\n  <p style="margin-bottom: 20px;">${item.answer}</p>\n`
+            : `  <h3>${item.question}</h3>\n  <p>${item.answer}</p>\n`;
         }
       }
       html += `</div>\n`;
     }
 
-    if (brand?.elementorScaffold) {
-      return `<div class="elementor-widget elementor-widget-fg-block"><div class="elementor-widget-container">${html}</div></div>`;
-    }
-
     return html;
-  }).filter(Boolean).join('\n');
+  }).filter(Boolean).join('\n\n');
+
+  if (isElementor) {
+    // Wrap the entire output in a single Elementor widget container with basic typography and alignment
+    return `<div class="elementor-widget elementor-widget-text-editor" style="max-width: 800px; margin: 0 auto; padding: 20px; font-family: system-ui, -apple-system, sans-serif; line-height: 1.7; color: #444; font-size: 17px;">
+  <div class="elementor-widget-container">
+    ${innerHtml}
+  </div>
+</div>`;
+  }
+
+  return innerHtml;
 }
 
 // MASTER TEMPLATE CLONING ENGINE
