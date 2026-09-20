@@ -204,7 +204,6 @@ export async function syncItemToWp(
       // Persist images the sync generated/hosted so the next push is
       // deterministic (no regeneration, no duplicate media uploads).
       featuredImageUrl: data.images?.heroUrl || item.featuredImageUrl,
-      secondaryImageUrl: data.images?.secondaryUrl || item.secondaryImageUrl,
       wpPreviewUrl: data.previewUrl,
       wpLiveUrl: data.link,
       status: (data.status === 'Draft_Ready' ? 'Draft_Ready' : 'Published') as PipelineStatus,

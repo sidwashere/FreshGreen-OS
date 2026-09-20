@@ -245,8 +245,6 @@ export interface ContentItem {
   nanoBananaPrompt?: string;
   nanoBananaStyle?: string;
   featuredImageUrl?: string;
-  /** AI-generated in-body image (hosted WP media URL, or data URI fallback). */
-  secondaryImageUrl?: string;
   /** WP media id of the AI-generated featured image (avoids re-upload on push). */
   featuredMediaId?: number;
   wpPostId?: number;

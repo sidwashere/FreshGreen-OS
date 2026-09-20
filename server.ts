@@ -2079,7 +2079,6 @@ Headline: craft your own fresh article title as the single <h1> — do not repea
     let metaDescription = '';
     let seoBriefOut = '';
     let suggestedNanoPrompt = '';
-    let suggestedSecondaryPrompt = '';
     try {
       const metaInstruction = `You are an SEO metadata specialist for "${brand.name}". Brand voice: ${brand.voiceGuidelines || 'professional'}.
 Return ONLY JSON matching the schema, no markdown:
@@ -2087,7 +2086,6 @@ Return ONLY JSON matching the schema, no markdown:
 2. "metaDescription": 120-160 characters, keyword used naturally, a value promise, and a call to action.
 3. "seoBrief": a 2-3 sentence SEO strategy summary for this article.
 4. "suggestedNanoPrompt": a 5-8 word photorealistic image prompt for the featured (hero) image.
-5. "suggestedSecondaryPrompt": a 5-8 word photorealistic prompt for ONE in-body/lifestyle image that matches the article's mid-section context (a scene, object or detail the article actually discusses).
 Keep the JSON compact — no whitespace, no code fences.`;
       const metaResult = await completeWithProvider(byokKeys, pref, {
         systemInstruction: metaInstruction,
@@ -2103,9 +2101,8 @@ Keep the JSON compact — no whitespace, no code fences.`;
             metaDescription: { type: Type.STRING },
             seoBrief: { type: Type.STRING },
             suggestedNanoPrompt: { type: Type.STRING },
-            suggestedSecondaryPrompt: { type: Type.STRING },
           },
-          required: ['metaTitle', 'metaDescription', 'seoBrief', 'suggestedNanoPrompt', 'suggestedSecondaryPrompt'],
+          required: ['metaTitle', 'metaDescription', 'seoBrief', 'suggestedNanoPrompt'],
         },
         maxTokens: 1024,
       });
@@ -2114,7 +2111,6 @@ Keep the JSON compact — no whitespace, no code fences.`;
       metaDescription = parsedMeta.metaDescription || '';
       seoBriefOut = parsedMeta.seoBrief || '';
       suggestedNanoPrompt = parsedMeta.suggestedNanoPrompt || '';
-      suggestedSecondaryPrompt = parsedMeta.suggestedSecondaryPrompt || '';
       console.log(`[AI] Metadata via ${metaResult.provider}/${metaResult.model}${metaResult.fallback ? ' (fallback)' : ''}.`);
     } catch (metaErr: any) {
       console.warn('[AI] Meta call failed, deriving metadata locally:', metaErr?.message?.slice(0, 120));
@@ -2122,22 +2118,21 @@ Keep the JSON compact — no whitespace, no code fences.`;
       metaDescription = stripHtml(articleHtml).slice(0, 155);
       seoBriefOut = `Optimise for "${primaryKeyword || title}" — natural keyword usage, clear headings, and a persuasive meta description to lift click-through rate.`;
       suggestedNanoPrompt = `${primaryKeyword || title} ${contentType === 'page' ? 'brand' : 'lifestyle'} hero photo`;
-      suggestedSecondaryPrompt = `${primaryKeyword || title} lifestyle detail photo`;
     }
     emit({ type: 'status', message: 'Metadata ready — polishing content…', percent: 87 });
 
-    // --- Phase 2.5: auto-generate 2 Nano Banana images (87-92%) -----------
-    // At least TWO brand-consistent images are ALWAYS generated for every
-    // article, driven by the blog topic + body context, using the PAID Nano
-    // Banana chain (Gemini gemini-3.1-flash-image, then OpenRouter's paid
-    // google/gemini-3.1-flash-image). Both are uploaded to the brand's WP
-    // media library right away so the item only stores small hosted URLs —
-    // full-res base64 blobs would blow the Firestore 1 MiB doc limit. Each
-    // render streams an "image" event; the done payload also carries both.
+    // --- Phase 2.5: auto-generate the featured (hero) image (87-92%) -------
+    // ONE brand-consistent image is ALWAYS generated for every article, driven
+    // by the blog topic + body context, using the PAID Nano Banana chain
+    // (Gemini gemini-3.1-flash-image, then OpenRouter's paid
+    // google/gemini-3.1-flash-image). It is uploaded to the brand's WP media
+    // library right away so the item only stores a small hosted URL — a
+    // full-res base64 blob would blow the Firestore 1 MiB doc limit. The
+    // render streams an "image" event; the done payload also carries it.
     // Image hiccups NEVER fail the article — a warning event is emitted and
     // the draft still completes (same philosophy as sync).
     const generatedImages: Array<{
-      role: 'hero' | 'secondary';
+      role: 'hero';
       url: string;
       mediaId?: number;
       model: string;
@@ -2148,62 +2143,57 @@ Keep the JSON compact — no whitespace, no code fences.`;
       prompt?: string;
     }> = [];
     if (generateImages !== false) {
-      emit({ type: 'status', message: 'Generating 2 branded images with the paid Nano Banana model…', percent: 88 });
+      emit({ type: 'status', message: 'Generating the featured image with the paid Nano Banana model…', percent: 88 });
       const imageTopicCtx = `Images for a blog article${title ? ` titled "${title}"` : ''}${primaryKeyword ? ` about "${primaryKeyword}"` : ''}. Brand: ${brand?.name || 'the site'}. Editorial, photorealistic, warm and authentic — no text, captions, logos or watermarks.`;
-      for (const img of [
-        { role: 'hero' as const, prompt: suggestedNanoPrompt || `${primaryKeyword || title} hero photo`, aspectRatio: '16:9', filename: 'featured-image' },
-        { role: 'secondary' as const, prompt: suggestedSecondaryPrompt || `${primaryKeyword || title} lifestyle detail photo`, aspectRatio: '4:3', filename: 'article-image-2' },
-      ]) {
-        lastChunkAt = Date.now();
-        emit({ type: 'status', message: `Rendering ${img.role === 'hero' ? 'hero' : 'in-body'} image with Nano Banana…`, percent: img.role === 'hero' ? 89 : 91 });
-        try {
-          const r = await generateAiImage({
-            prompt: `${imageTopicCtx}\n\nImage prompt: ${img.prompt}`,
-            aspectRatio: img.aspectRatio,
-            byokKeys,
-          });
-          let url = r.imageUrl;
-          let mediaId: number | undefined;
-          const isDataUri = /^data:image/i.test(url);
-          // Host on the brand's WP media library so the item stores URLs only.
-          if (!r.isPlaceholder && brand?.wpUrl && brand?.wpUsername && brand?.wpAppPassword) {
-            try {
-              const up = await uploadImageToWp(
-                brand,
-                isDataUri ? { dataBase64: url, filename: img.filename } : { imageUrl: url, filename: img.filename },
-              );
-              url = up.wpMediaUrl;
-              mediaId = up.wpMediaId;
-            } catch (upErr: any) {
-              console.warn(`[Images] ${img.role} upload skipped (keeping ${isDataUri ? 'data URI' : 'remote URL'}):`, String(upErr?.message || upErr).slice(0, 140));
-            }
+      const img = { role: 'hero' as const, prompt: suggestedNanoPrompt || `${primaryKeyword || title} hero photo`, aspectRatio: '16:9', filename: 'featured-image' };
+      lastChunkAt = Date.now();
+      emit({ type: 'status', message: 'Rendering the hero image with Nano Banana…', percent: 89 });
+      try {
+        const r = await generateAiImage({
+          prompt: `${imageTopicCtx}\n\nImage prompt: ${img.prompt}`,
+          aspectRatio: img.aspectRatio,
+          byokKeys,
+        });
+        let url = r.imageUrl;
+        let mediaId: number | undefined;
+        const isDataUri = /^data:image/i.test(url);
+        // Host on the brand's WP media library so the item stores URLs only.
+        if (!r.isPlaceholder && brand?.wpUrl && brand?.wpUsername && brand?.wpAppPassword) {
+          try {
+            const up = await uploadImageToWp(
+              brand,
+              isDataUri ? { dataBase64: url, filename: img.filename } : { imageUrl: url, filename: img.filename },
+            );
+            url = up.wpMediaUrl;
+            mediaId = up.wpMediaId;
+          } catch (upErr: any) {
+            console.warn(`[Images] ${img.role} upload skipped (keeping ${isDataUri ? 'data URI' : 'remote URL'}):`, String(upErr?.message || upErr).slice(0, 140));
           }
-          const entry = {
-            role: img.role,
-            url,
-            mediaId,
-            model: r.model,
-            provider: r.provider,
-            isAiGenerated: r.isAiGenerated,
-            isPlaceholder: r.isPlaceholder,
-            isDataUri,
-            prompt: img.prompt,
-          };
-          generatedImages.push(entry);
-          lastChunkAt = Date.now();
-          emit({ type: 'image', ...entry });
-        } catch (imgErr: any) {
-          console.warn(`[Images] ${img.role} generation failed:`, String(imgErr?.message || imgErr).slice(0, 160));
-          lastChunkAt = Date.now();
-          emit({ type: 'imageWarning', role: img.role, message: String(imgErr?.message || imgErr).slice(0, 160) });
         }
+        const entry = {
+          role: img.role,
+          url,
+          mediaId,
+          model: r.model,
+          provider: r.provider,
+          isAiGenerated: r.isAiGenerated,
+          isPlaceholder: r.isPlaceholder,
+          isDataUri,
+          prompt: img.prompt,
+        };
+        generatedImages.push(entry);
+        lastChunkAt = Date.now();
+        emit({ type: 'image', ...entry });
+      } catch (imgErr: any) {
+        console.warn(`[Images] ${img.role} generation failed:`, String(imgErr?.message || imgErr).slice(0, 160));
+        lastChunkAt = Date.now();
+        emit({ type: 'imageWarning', role: img.role, message: String(imgErr?.message || imgErr).slice(0, 160) });
       }
     } else {
       emit({ type: 'status', message: 'Image generation skipped (setting disabled) — using placeholder images.', percent: 92 });
     }
     const heroImg = generatedImages.find((g) => g.role === 'hero');
-    const secondaryImg = generatedImages.find((g) => g.role === 'secondary');
-    emit({ type: 'status', message: heroImg && secondaryImg ? 'Both AI images ready.' : 'Image step finished — the draft still completes.', percent: 92 });
+    emit({ type: 'status', message: heroImg ? 'Featured image ready.' : 'Image step finished — the draft still completes.', percent: 92 });
 
     // --- Phase 3.5: Completeness check & fix (the final accuracy gate, 92-96%) ---
     // NO draft is marked done without passing this: structural cleanup, word-
@@ -2465,10 +2455,10 @@ Return ONLY the JSON array — no markdown fences, no commentary, no surrounding
     }
 
     // 4) In-body image guarantee: if the model wrote NO <img> at all, inject
-    //    the generated, already-hosted secondary (or hero) image as an
-    //    idempotent figure so the draft always carries imagery.
+    //    the generated, already-hosted hero image as an idempotent figure so
+    //    the draft always carries imagery.
     if (!/<img\b/i.test(completeHtml)) {
-      const injectUrl = [secondaryImg?.url, heroImg?.url].find((u) => /^https?:\/\//i.test(String(u || '')));
+      const injectUrl = heroImg?.url && /^https?:\/\//i.test(heroImg.url) ? heroImg.url : undefined;
       if (injectUrl) {
         const alt = `${primaryKeyword || title || 'Article'} — ${brand?.name || 'article'} illustration`.replace(/["<>]/g, '');
         const figure = `<figure class="fg-art-figure fg-art-secondary"><img src="${injectUrl}" alt="${alt}" loading="lazy" /></figure>`;
@@ -2912,11 +2902,9 @@ Return ONLY the JSON array — no markdown fences, no commentary, no surrounding
         metaTitle,
         metaDescription,
         suggestedNanoPrompt,
-        suggestedSecondaryPrompt,
         blocks,
         images: generatedImages,
         featuredImageUrl: heroImg?.url,
-        secondaryImageUrl: secondaryImg?.url,
         featuredMediaId: typeof heroImg?.mediaId === 'number' ? heroImg.mediaId : undefined,
         wordCount: countWords(finalHtml),
         completeness,
@@ -3238,7 +3226,6 @@ ${internalLinkingText}`;
     let metaDescription = '';
     let seoBriefOut = '';
     let suggestedNanoPrompt = '';
-    let suggestedSecondaryPrompt = '';
     try {
       const metaInstruction = `You are an SEO metadata specialist for "${brand.name}". Brand voice: ${brand.voiceGuidelines || 'professional'}.
 Return ONLY JSON matching the schema, no markdown:
@@ -3246,7 +3233,6 @@ Return ONLY JSON matching the schema, no markdown:
 2. "metaDescription": 120-160 characters, keyword used naturally, value promise, CTA.
 3. "seoBrief": a 2-3 sentence SEO strategy summary.
 4. "suggestedNanoPrompt": a 5-8 word photorealistic image prompt for the hero image.
-5. "suggestedSecondaryPrompt": a 5-8 word photorealistic prompt for an in-body image.
 Keep the JSON compact — no whitespace, no code fences.`;
       const metaResult = await completeWithProvider(byokKeys || {}, pref, {
         systemInstruction: metaInstruction,
@@ -3262,9 +3248,8 @@ Keep the JSON compact — no whitespace, no code fences.`;
             metaDescription: { type: Type.STRING },
             seoBrief: { type: Type.STRING },
             suggestedNanoPrompt: { type: Type.STRING },
-            suggestedSecondaryPrompt: { type: Type.STRING },
           },
-          required: ['metaTitle', 'metaDescription', 'seoBrief', 'suggestedNanoPrompt', 'suggestedSecondaryPrompt'],
+          required: ['metaTitle', 'metaDescription', 'seoBrief', 'suggestedNanoPrompt'],
         },
         maxTokens: 1024,
       });
@@ -3273,19 +3258,17 @@ Keep the JSON compact — no whitespace, no code fences.`;
       metaDescription = parsedMeta.metaDescription || '';
       seoBriefOut = parsedMeta.seoBrief || '';
       suggestedNanoPrompt = parsedMeta.suggestedNanoPrompt || '';
-      suggestedSecondaryPrompt = parsedMeta.suggestedSecondaryPrompt || '';
     } catch (metaErr: any) {
       metaTitle = ((title || originalTitle || '').slice(0, 55) + (brand?.name ? ` | ${brand.name}` : '')).slice(0, 60);
       metaDescription = stripHtml(enhancedText).slice(0, 155);
       seoBriefOut = `Enhanced for "${primaryKeyword || title || originalTitle || ''}" — natural keyword usage, clear headings, persuasive meta description.`;
       suggestedNanoPrompt = `${primaryKeyword || title || originalTitle || ''} lifestyle hero photo`;
-      suggestedSecondaryPrompt = `${primaryKeyword || title || originalTitle || ''} detail photo`;
     }
     emit({ type: 'status', message: 'Metadata ready — generating images…', percent: 87 });
 
-    // --- Phase 2.5: Nano Banana images (87-92%) ---------------------------
+    // --- Phase 2.5: Nano Banana featured image (87-92%) --------------------
     const generatedImages: Array<{
-      role: 'hero' | 'secondary';
+      role: 'hero';
       url: string;
       mediaId?: number;
       model: string;
@@ -3295,47 +3278,42 @@ Keep the JSON compact — no whitespace, no code fences.`;
       isDataUri?: boolean;
       prompt?: string;
     }> = [];
-    emit({ type: 'status', message: 'Generating 2 branded images with Nano Banana…', percent: 88 });
+    emit({ type: 'status', message: 'Generating the featured image with Nano Banana…', percent: 88 });
     const imageTopicCtx = `Images for a blog article${title ? ` titled "${title}"` : originalTitle ? ` titled "${originalTitle}"` : ''}${primaryKeyword ? ` about "${primaryKeyword}"` : ''}. Brand: ${brand?.name || 'the site'}. Editorial, photorealistic, warm and authentic — no text, captions, logos or watermarks.`;
-    for (const img of [
-      { role: 'hero' as const, prompt: suggestedNanoPrompt || `${primaryKeyword || title || originalTitle || ''} hero photo`, aspectRatio: '16:9', filename: 'featured-image' },
-      { role: 'secondary' as const, prompt: suggestedSecondaryPrompt || `${primaryKeyword || title || originalTitle || ''} lifestyle detail photo`, aspectRatio: '4:3', filename: 'article-image-2' },
-    ]) {
-      lastChunkAt = Date.now();
-      emit({ type: 'status', message: `Rendering ${img.role === 'hero' ? 'hero' : 'in-body'} image…`, percent: img.role === 'hero' ? 89 : 91 });
-      try {
-        const r = await generateAiImage({
-          prompt: `${imageTopicCtx}\n\nImage prompt: ${img.prompt}`,
-          aspectRatio: img.aspectRatio,
-          byokKeys: byokKeys || {},
-        });
-        let url = r.imageUrl;
-        let mediaId: number | undefined;
-        const isDataUri = /^data:image/i.test(url);
-        if (!r.isPlaceholder && brand?.wpUrl && brand?.wpUsername && brand?.wpAppPassword) {
-          try {
-            const up = await uploadImageToWp(
-              brand,
-              isDataUri ? { dataBase64: url, filename: img.filename } : { imageUrl: url, filename: img.filename },
-            );
-            url = up.wpMediaUrl;
-            mediaId = up.wpMediaId;
-          } catch (upErr: any) {
-            console.warn(`[Enhance-Images] ${img.role} upload skipped:`, String(upErr?.message || upErr).slice(0, 140));
-          }
+    const img = { role: 'hero' as const, prompt: suggestedNanoPrompt || `${primaryKeyword || title || originalTitle || ''} hero photo`, aspectRatio: '16:9', filename: 'featured-image' };
+    lastChunkAt = Date.now();
+    emit({ type: 'status', message: 'Rendering the hero image…', percent: 89 });
+    try {
+      const r = await generateAiImage({
+        prompt: `${imageTopicCtx}\n\nImage prompt: ${img.prompt}`,
+        aspectRatio: img.aspectRatio,
+        byokKeys: byokKeys || {},
+      });
+      let url = r.imageUrl;
+      let mediaId: number | undefined;
+      const isDataUri = /^data:image/i.test(url);
+      if (!r.isPlaceholder && brand?.wpUrl && brand?.wpUsername && brand?.wpAppPassword) {
+        try {
+          const up = await uploadImageToWp(
+            brand,
+            isDataUri ? { dataBase64: url, filename: img.filename } : { imageUrl: url, filename: img.filename },
+          );
+          url = up.wpMediaUrl;
+          mediaId = up.wpMediaId;
+        } catch (upErr: any) {
+          console.warn(`[Enhance-Images] ${img.role} upload skipped:`, String(upErr?.message || upErr).slice(0, 140));
         }
-        generatedImages.push({ role: img.role, url, mediaId, model: r.model, provider: r.provider, isAiGenerated: r.isAiGenerated, isPlaceholder: r.isPlaceholder, isDataUri, prompt: img.prompt });
-        lastChunkAt = Date.now();
-        emit({ type: 'image', ...generatedImages[generatedImages.length - 1] });
-      } catch (imgErr: any) {
-        console.warn(`[Enhance-Images] ${img.role} failed:`, String(imgErr?.message || imgErr).slice(0, 160));
-        lastChunkAt = Date.now();
-        emit({ type: 'imageWarning', role: img.role, message: String(imgErr?.message || imgErr).slice(0, 160) });
       }
+      generatedImages.push({ role: img.role, url, mediaId, model: r.model, provider: r.provider, isAiGenerated: r.isAiGenerated, isPlaceholder: r.isPlaceholder, isDataUri, prompt: img.prompt });
+      lastChunkAt = Date.now();
+      emit({ type: 'image', ...generatedImages[generatedImages.length - 1] });
+    } catch (imgErr: any) {
+      console.warn(`[Enhance-Images] ${img.role} failed:`, String(imgErr?.message || imgErr).slice(0, 160));
+      lastChunkAt = Date.now();
+      emit({ type: 'imageWarning', role: img.role, message: String(imgErr?.message || imgErr).slice(0, 160) });
     }
     const heroImg = generatedImages.find((g) => g.role === 'hero');
-    const secondaryImg = generatedImages.find((g) => g.role === 'secondary');
-    emit({ type: 'status', message: heroImg && secondaryImg ? 'Both images ready.' : 'Images step finished.', percent: 92 });
+    emit({ type: 'status', message: heroImg ? 'Featured image ready.' : 'Images step finished.', percent: 92 });
 
     // --- Phase 3.5: Completeness check (92-96%) — same as generate-article -
     emit({ type: 'status', message: 'Running completeness check…', percent: 93 });
@@ -3448,9 +3426,10 @@ Keep the JSON compact — no whitespace, no code fences.`;
       }
     }
 
-    // In-body image guarantee
+    // In-body image guarantee: if the model wrote NO <img> at all, inject the
+    // generated, already-hosted hero image so the draft always carries imagery.
     if (!/<img\b/i.test(completeHtml)) {
-      const injectUrl = [secondaryImg?.url, heroImg?.url].find((u) => /^https?:\/\//i.test(String(u || '')));
+      const injectUrl = heroImg?.url && /^https?:\/\//i.test(heroImg.url) ? heroImg.url : undefined;
       if (injectUrl) {
         const alt = `${primaryKeyword || title || originalTitle || 'Article'} — ${brand?.name || 'article'} illustration`.replace(/["<>]/g, '');
         completeHtml = `<figure class="fg-art-figure fg-art-secondary"><img src="${injectUrl}" alt="${alt}" loading="lazy" /></figure>\n` + completeHtml;
@@ -3483,11 +3462,9 @@ Keep the JSON compact — no whitespace, no code fences.`;
         metaTitle,
         metaDescription,
         suggestedNanoPrompt,
-        suggestedSecondaryPrompt,
         blocks,
         images: generatedImages,
         featuredImageUrl: heroImg?.url,
-        secondaryImageUrl: secondaryImg?.url,
         featuredMediaId: typeof heroImg?.mediaId === 'number' ? heroImg.mediaId : undefined,
         wordCount: finalWords,
         completeness,
@@ -4885,20 +4862,13 @@ app.post('/api/wp/sync-content', async (req, res) => {
     }
 
     // --- Sync-time AI image guarantee -----------------------------------------
-    // Every pushed article must carry at least 2 topic-matched images:
-    //  1. featured (hero) — from featuredMediaId / wpMediaId, or uploaded from
-    //     pickHeroImage(); items with NO hero image at all get one GENERATED
-    //     on the fly with the paid Nano Banana chain (topic + body context).
-    //  2. in-body (secondary) — the item's stored secondaryImageUrl, or a
-    //     GENERATED one embedded as an idempotent <figure class="fg-art-
-    //     secondary">. Old items whose blocks already hold a real (non-
-    //     placeholder) image skip generation — they already have 2 images.
-    // Generated images are returned so the client persists them for
-    // deterministic re-pushes. Any hiccup here never fails the publish.
-    const imagesReturn: { heroUrl?: string; heroMediaId?: number; secondaryUrl?: string; secondaryMediaId?: number } = {};
-    const blocksHaveRealImage = (contentItem.blocks || []).some(
-      (b: any) => b && String(b.imageUrl || '').trim() && !/placehold\.co|picsum\.photos/i.test(String(b.imageUrl)),
-    );
+    // Every pushed article must carry a topic-matched featured image: from
+    // featuredMediaId / wpMediaId, or uploaded from pickHeroImage(); items with
+    // NO hero image at all get one GENERATED on the fly with the paid Nano
+    // Banana chain (topic + body context). Generated images are returned so
+    // the client persists them for deterministic re-pushes. Any hiccup here
+    // never fails the publish.
+    const imagesReturn: { heroUrl?: string; heroMediaId?: number } = {};
 
     let featuredMediaId: number | null = null;
     if (!payload.featured_media) {
@@ -4931,49 +4901,6 @@ app.post('/api/wp/sync-content', async (req, res) => {
         } catch (featErr: any) {
           console.warn('[Sync] featured-image upload skipped:', String(featErr?.message || featErr).slice(0, 160));
         }
-      }
-    }
-
-    // Secondary (in-body) image: only for the default fg-art layout. Master
-    // template publishes carry exactly one image (the WordPress featured
-    // image) — no secondary image is generated or injected.
-    if (!masterId) {
-      const bodyHasSecondary = /fg-art-secondary/.test(payload.content || '');
-      const storedSecondary = String(contentItem.secondaryImageUrl || '').trim();
-      let secondarySrc = storedSecondary;
-      if (!secondarySrc && !bodyHasSecondary && !blocksHaveRealImage) {
-        try {
-          const gen = await generateAiImage({
-            prompt: `${buildImageTopicContext(contentItem, brand)}\n\nImage prompt: ${contentItem.primaryKeyword || contentItem.title} lifestyle detail photo`,
-            aspectRatio: '4:3',
-            byokKeys: imageKeys,
-          });
-          if (!gen.isPlaceholder) secondarySrc = gen.imageUrl;
-        } catch (genErr: any) {
-          console.warn('[Sync] secondary image generation skipped:', String(genErr?.message || genErr).slice(0, 140));
-        }
-      }
-      if (secondarySrc && !bodyHasSecondary) {
-        let embedSrc = secondarySrc;
-        if (/^data:image/i.test(secondarySrc)) {
-          try {
-            const up = await uploadImageToWp(brand, { dataBase64: secondarySrc, filename: 'article-image-2' });
-            embedSrc = up.wpMediaUrl;
-            imagesReturn.secondaryUrl = up.wpMediaUrl;
-            imagesReturn.secondaryMediaId = up.wpMediaId;
-          } catch (secErr: any) {
-            console.warn('[Sync] secondary image upload skipped:', String(secErr?.message || secErr).slice(0, 140));
-          }
-        } else {
-          imagesReturn.secondaryUrl = secondarySrc;
-        }
-        payload.content = embedSecondaryFigure(
-          payload.content || '',
-          embedSrc,
-          // Alt text must be a full descriptive sentence, not a raw keyword fragment.
-          // "natural treats for our" is not a usable alt — generate a meaningful description.
-          `${String(contentItem.primaryKeyword || '').trim() || String(contentItem.title || '').trim() || 'Article'} — ${brand?.name || 'article'} illustration`.replace(/["<>]/g, ''),
-        );
       }
     }
 
@@ -5678,32 +5605,6 @@ function buildImageTopicContext(contentItem: any, brand: any): string {
   return `Images for a blog article${title ? ` titled "${title}"` : ''}${kw ? ` about "${kw}"` : ''}. Brand: ${brand?.name || 'the site'}.${
     excerpt ? ` Article context: "${excerpt}"` : ''
   } Editorial, photorealistic, warm and authentic — no text, captions, logos or watermarks.`;
-}
-
-/**
- * Embed the generated in-body image as an idempotent figure:
- *   1. an existing <figure class="fg-art-secondary"> gets its <img> src
- *      updated in place (deterministic re-pushes);
- *   2. otherwise the model's first placehold.co placeholder image is replaced;
- *   3. otherwise the figure is inserted right after the first paragraph.
- */
-function embedSecondaryFigure(content: string, src: string, alt: string): string {
-  const figure = `<figure class="fg-art-figure fg-art-secondary" style="margin:2rem 0;text-align:center;"><img src="${escapeHtmlAttr(src)}" alt="${escapeHtmlAttr(alt)}" style="max-width:100%;height:auto;border-radius:12px;" loading="lazy" /></figure>`;
-  const existing = /<figure[^>]*class="[^"]*fg-art-secondary[^"]*"[^>]*>[\s\S]*?<\/figure>/i.exec(content);
-  if (existing) {
-    return content.replace(
-      existing[0],
-      existing[0].replace(
-        /<img\b[^>]*src\s*=\s*["'][^"']*["']/i,
-        `<img src="${escapeHtmlAttr(src)}" alt="${escapeHtmlAttr(alt)}" style="max-width:100%;height:auto;border-radius:12px;" loading="lazy"`,
-      ),
-    );
-  }
-  const placeholder = /<img\b[^>]*src\s*=\s*["'][^"']*placehold\.co[^"']*["'][^>]*>/i.exec(content);
-  if (placeholder) return content.replace(placeholder[0], figure);
-  const p = /<\/p\s*>/i.exec(content);
-  if (p) return content.slice(0, p.index + p[0].length) + figure + content.slice(p.index + p[0].length);
-  return content + figure;
 }
 
 // Shared WP media upload — used by /api/wp/upload-media (editor image upload)

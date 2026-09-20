@@ -576,7 +576,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
           setGenState((prev) => (prev ? { ...prev, elapsed: evt.elapsed ?? prev.elapsed, stalled: false } : prev));
         } else if (evt.type === 'image') {
           // Auto-generated Nano Banana image (paid chain) from Phase 2.5 —
-          // hero is the featured image, secondary is the in-body image.
+          // the hero image becomes the featured image.
           lastUpdateRef.current = Date.now();
           const img = evt as any;
           if (img.role === 'hero') {
@@ -594,28 +594,22 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
               model: img.model,
               isAiGenerated: !!img.isAiGenerated,
             });
-          } else if (img.role === 'secondary') {
-            setEditingItem((prev) => ({
-              ...prev,
-              secondaryImageUrl: img.url || prev?.secondaryImageUrl,
-              updatedAt: new Date().toISOString(),
-            }));
           }
           setGenState((prev) => (prev ? {
             ...prev,
-            phase: img.role === 'hero' ? 'Hero image ready — rendering in-body image…' : 'Both AI images ready.',
-            percent: img.role === 'hero' ? 90 : 92,
+            phase: 'Hero image ready.',
+            percent: 90,
             stalled: false,
             history: [
               ...prev.history,
-              { message: img.role === 'hero' ? 'Hero image ready — rendering in-body image…' : 'Both AI images ready.', percent: img.role === 'hero' ? 90 : 92, at: Date.now() },
+              { message: 'Hero image ready.', percent: 90, at: Date.now() },
             ],
           } : prev));
         } else if (evt.type === 'imageWarning') {
           lastUpdateRef.current = Date.now();
           const w = evt as any;
           console.warn(`[Images] ${w.role} warning:`, w.message);
-          setGenState((prev) => (prev ? { ...prev, phase: `${w.role === 'hero' ? 'Hero' : 'In-body'} image failed (${w.message || 'model error'}) — draft still completes.`, stalled: false } : prev));
+          setGenState((prev) => (prev ? { ...prev, phase: `Hero image failed (${w.message || 'model error'}) — draft still completes.`, stalled: false } : prev));
         } else if (evt.type === 'error') {
           // Record the REAL error instead of throwing here — the caller wraps
           // handleEvent in a catch that would swallow the exception and surface
@@ -785,26 +779,20 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
       });
     }
 
-    // Merge the 2 auto-generated Nano Banana images (Phase 2.5): hero becomes
-    // the featured image AND the frame's hero-band media; the secondary image
-    // replaces the model's placeholder <img> (image_banner block) so the frame
-    // renders a second real image in the body. Deterministic — the same block
-    // mapping reproduces byte-identical pushes.
+    // Merge the auto-generated Nano Banana hero image (Phase 2.5): it becomes
+    // the featured image AND the frame's hero-band media. Deterministic — the
+    // same block mapping reproduces byte-identical pushes.
     const imgs: any[] = Array.isArray(aiData.images) ? aiData.images : [];
     const heroImg = imgs.find((i: any) => i?.role === 'hero') || (aiData.featuredImageUrl ? { url: aiData.featuredImageUrl, mediaId: aiData.featuredMediaId, prompt: aiData.suggestedNanoPrompt } : null);
-    const secondaryImg = imgs.find((i: any) => i?.role === 'secondary') || (aiData.secondaryImageUrl ? { url: aiData.secondaryImageUrl } : null);
     const isPlaceholderSrc = (u?: string) => !u || /placehold\.co|picsum\.photos/i.test(String(u));
     const remappedBlocks: VisualBlock[] = updatedBlocks.map((b: any) => {
       if (b.type === 'hero' && heroImg?.url && isPlaceholderSrc(b.imageUrl)) {
         return { ...b, imageUrl: heroImg.url, imageAlt: b.imageAlt || b.title || aiData.articleTitle || 'Featured image' };
       }
-      if (b.type === 'image_banner' && secondaryImg?.url && isPlaceholderSrc(b.imageUrl)) {
-        return { ...b, imageUrl: secondaryImg.url, imageAlt: b.imageAlt || 'Article image' };
-      }
       return b;
     });
-    // Secondary image block removed — only the hero image is shown, at the top.
-    // No image is ever appended at the bottom of the article.
+    // Only the hero image is shown, at the top. No image is ever appended at
+    // the bottom of the article.
     setEditingItem((prev) => ({
       ...prev,
       // The AI's crafted h1 becomes the article's real title (the seed stays
@@ -818,7 +806,6 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
       nanoBananaPrompt: aiData.suggestedNanoPrompt || prev.nanoBananaPrompt,
       featuredImageUrl: heroImg?.url || prev.featuredImageUrl,
       featuredMediaId: typeof heroImg?.mediaId === 'number' ? heroImg.mediaId : prev.featuredMediaId,
-      secondaryImageUrl: secondaryImg?.url || prev.secondaryImageUrl,
       blocks: remappedBlocks.length > 0 ? remappedBlocks : prev.blocks,
       status: 'Draft_Ready',
       updatedAt: new Date().toISOString(),
@@ -1114,10 +1101,8 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
           const img = evt as any;
           if (img.role === 'hero') {
             setEditingItem((prev) => ({ ...prev, featuredImageUrl: img.url || prev?.featuredImageUrl, featuredMediaId: typeof img.mediaId === 'number' ? img.mediaId : prev?.featuredMediaId, nanoBananaPrompt: img.prompt || prev?.nanoBananaPrompt, updatedAt: new Date().toISOString() }));
-          } else if (img.role === 'secondary') {
-            setEditingItem((prev) => ({ ...prev, secondaryImageUrl: img.url || prev?.secondaryImageUrl, updatedAt: new Date().toISOString() }));
           }
-          setGenState((prev) => (prev ? { ...prev, phase: img.role === 'hero' ? 'Hero image ready…' : 'Both images ready.', percent: img.role === 'hero' ? 90 : 92, stalled: false } : prev));
+          setGenState((prev) => (prev ? { ...prev, phase: 'Hero image ready.', percent: 90, stalled: false } : prev));
         } else if (evt.type === 'imageWarning') {
           lastUpdateRef.current = Date.now();
         } else if (evt.type === 'error') {
@@ -3323,40 +3308,7 @@ export const ZenEditor: React.FC<ZenEditorProps> = ({
                 </button>
               </div>
 
-              {/* Secondary (in-body) image */}
-              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 space-y-4">
-                <div className="flex items-center justify-between">
-                  <h3 className="font-bold text-slate-900 text-sm flex items-center gap-2">
-                    <ImageIcon className="w-4 h-4 text-slate-400" /> Secondary Image
-                  </h3>
-                  {editingItem.secondaryImageUrl && (
-                    <span className="text-[10px] font-bold px-2 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">Set ✓</span>
-                  )}
-                </div>
-
-                {editingItem.secondaryImageUrl ? (
-                  <div className="relative rounded-xl overflow-hidden group border border-slate-200">
-                    <img src={editingItem.secondaryImageUrl} alt="Secondary" className="w-full h-56 object-cover" />
-                    <button
-                      onClick={() => { setEditingItem({ ...editingItem, secondaryImageUrl: undefined, updatedAt: new Date().toISOString() }); }}
-                      className="absolute top-2 right-2 bg-white/90 text-red-600 p-1.5 rounded-lg shadow-sm opacity-0 group-hover:opacity-100 transition"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                ) : (
-                  <div className="h-56 rounded-xl border-2 border-dashed border-slate-200 bg-slate-50 flex flex-col items-center justify-center text-slate-400">
-                    <ImagePlus className="w-8 h-8 mb-2" />
-                    <span className="text-sm font-medium">No secondary image yet</span>
-                    <span className="text-xs text-slate-400 mt-1">Auto-Write generates one; it renders inside the article body.</span>
-                  </div>
-                )}
-                <p className="text-[11px] text-slate-400 leading-snug">
-                  In-body editorial image generated from the article topic + context with the paid Nano Banana model. It appears as a figure inside the published post.
-                </p>
-              </div>
-
-              {/* Prompt library + studio */}
+              // Prompt library + studio
               <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 space-y-4">
                 <div className="flex items-center justify-between flex-wrap gap-2">
                   <h3 className="font-bold text-slate-900 text-sm flex items-center gap-2">
