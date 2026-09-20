@@ -1,8 +1,9 @@
 # 🌿 FGOS — Fresh Green Operating System
 
-> **The AI content studio that writes, scores, and ships on-brand blog posts to WordPress — with the styling intact.**
+> **The AI content studio that writes, SEO scores, and Publishes on-brand blog posts to WordPress — with the styling intact.**
 
-**FGOS** (Fresh Green Operating System) is a full-stack content operating system built by **Sid** for pet-food brands. It generates SEO-scored, brand-voiced articles with Gemini, lets you fine-tune every block in a visual editor, and publishes to WordPress as rich, self-styled HTML — complete with real WooCommerce product suggestions, generated imagery, and the site's own header/footer templates.
+**FGOS** (Fresh Green Operating System) is a full-stack content operating system for WordPress hosted brands. 
+It generates SEO-scored, brand-voiced articles with Gemini or any model of your choice using BYOK, lets you fine-tune every block in a visual editor, and publishes to WordPress as rich, self-styled HTML — complete with real WooCommerce product suggestions, generated imagery, and the site's own header/footer templates.
 
 ---
 
@@ -10,7 +11,7 @@
 
 | | |
 |---|---|
-| 🧠 **AI Article Generation** | Full-length, brand-voiced articles via Google Gemini, with deterministic SEO guardrails that push every draft past a **70%+ SEO score** before it ever ships. |
+| 🧠 **AI Article Generation** | Full-length, brand-voiced articles via Google Gemini OR any model of your choice, with deterministic SEO guardrails that push every draft past a **70%+ SEO score** before it ever ships. |
 | 📊 **SEO Analyzer & Improver** | Real-time scoring (TL;DR, facts, intent, E-E-A-T, freshness, structure) with one-click improvement passes. |
 | 🎨 **ZenEditor** | Visual block editor — heroes, card grids, carousels, quotes, CTA bands, product cards, FAQs, image banners — every block editable, reorderable, rewritable. |
 | 📝 **WordPress Publishing** | One-click publish/draft to WP with a fully styled article frame: byline, share bar, author box, related posts, newsletter CTA. Auto full-width template + styled H1 on publish. |
@@ -36,7 +37,7 @@
                 │  /api/*                      │  /api/wp/* · /api/wc/*
 ┌───────────────▼──────────────────────────────▼──────────────┐
 │                      Express Server (Node)                  │
-│   Gemini (GenAI) · @power-seo/content-analysis · Firestore  │
+│   (GenAI) · @power-seo/content-analysis · Firestore  │
 │   WordPress REST · WooCommerce REST (v3 + Store API)        │
 └───────────────┬──────────────────────────────┬──────────────┘
                 │                              │
