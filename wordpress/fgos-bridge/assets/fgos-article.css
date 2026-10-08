@@ -1,13 +1,16 @@
 /*!
  * FGOS Bridge — article design system
  *
- * Contract: this stylesheet never overrides the theme. Every token defaults to
- * `inherit`, so an unconfigured article renders with the site's own font-family,
- * size, colour and measure. Brand tokens are opt-in via per-site overrides or a
- * theme probe.
+ * Contract: never override the theme.
+ *   • Every token defaults to `inherit`, so an unconfigured article renders with
+ *     the site's own font-family, size, colour and measure.
+ *   • All selectors are scoped to `.fgos-article`, so the theme's header, footer,
+ *     navigation and sidebar are never affected.
+ *   • No `!important` on typography or colour.
  *
- * All selectors are scoped to `.fgos-article`, so the theme header, footer, nav,
- * sidebar and its own buttons are never affected.
+ * Layout safety and rhythm are ours to guarantee: images never overflow, tables
+ * scroll, grids collapse on mobile, and vertical spacing follows a consistent
+ * scale so sections breathe evenly.
  */
 
 .fgos-article {
@@ -26,9 +29,15 @@
   --fgos-color-surface: inherit;
   --fgos-color-border: inherit;
 
+  /* Spacing scale — one rhythm used everywhere. */
   --fgos-gap: 24px;
   --fgos-gap-sm: 12px;
+  --fgos-gap-lg: 40px;
+  --fgos-gap-xl: 64px;
+
   --fgos-radius: 8px;
+  --fgos-radius-sm: 6px;
+  --fgos-image-max: 860px;
 
   /* ---- Inherit from the theme by default ---- */
   font-family: var(--fgos-font-body);
@@ -39,7 +48,9 @@
   margin-inline: auto;
 }
 
-/* ---- Layout safety: nothing ever overflows the column ---- */
+/* =====================================================================
+   Layout safety
+   ===================================================================== */
 .fgos-article img,
 .fgos-article video,
 .fgos-article canvas,
@@ -59,16 +70,17 @@
 }
 
 .fgos-article figure {
-  margin: var(--fgos-gap) 0;
+  margin: var(--fgos-gap-lg) 0;
 }
 
 .fgos-article figure img {
   margin-inline: auto;
+  max-width: min(100%, var(--fgos-image-max));
 }
 
-.fgos-article figcaption,
 .fgos-figure__caption {
   font-size: 0.875em;
+  line-height: 1.5;
   color: var(--fgos-color-muted);
   text-align: center;
   margin-top: var(--fgos-gap-sm);
@@ -80,29 +92,39 @@
   text-underline-offset: 2px;
 }
 
-/* Wide tables scroll instead of breaking the layout. */
+.fgos-article > * + * {
+  margin-top: var(--fgos-gap);
+}
+
 .fgos-table-wrap,
 .fgos-article .table-wrap {
   width: 100%;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
+  margin: var(--fgos-gap-lg) 0;
 }
 
 .fgos-article table {
   width: 100%;
   border-collapse: collapse;
-  margin: var(--fgos-gap) 0;
+  font-size: 0.95em;
 }
 
 .fgos-article th,
 .fgos-article td {
-  padding: 0.6em 0.75em;
+  padding: 0.7em 0.85em;
   border: 1px solid var(--fgos-color-border);
   text-align: left;
   vertical-align: top;
 }
 
-/* ---- Headings: sizes only when the theme doesn't define them ---- */
+.fgos-article th {
+  font-weight: 600;
+}
+
+/* =====================================================================
+   Typography
+   ===================================================================== */
 .fgos-article h1,
 .fgos-article h2,
 .fgos-article h3,
@@ -112,51 +134,113 @@
   font-family: var(--fgos-font-heading);
   color: var(--fgos-color-heading);
   line-height: 1.25;
-  margin: calc(var(--fgos-gap) * 1.5) 0 var(--fgos-gap-sm);
+  margin: 0;
   text-wrap: balance;
 }
 
-.fgos-article h1 { font-size: clamp(1.75rem, 1.2rem + 2.2vw, 2.5rem); }
-.fgos-article h2 { font-size: clamp(1.35rem, 1.1rem + 1.2vw, 1.75rem); }
-.fgos-article h3 { font-size: clamp(1.15rem, 1.05rem + 0.5vw, 1.35rem); }
-.fgos-article h4,
+.fgos-article h1 { font-size: clamp(1.85rem, 1.2rem + 2.6vw, 2.6rem); }
+.fgos-article h2 { font-size: clamp(1.4rem, 1.12rem + 1.3vw, 1.85rem); }
+.fgos-article h3 { font-size: clamp(1.15rem, 1.06rem + 0.45vw, 1.35rem); }
+.fgos-article h4 { font-size: 1.08em; }
 .fgos-article h5,
-.fgos-article h6 { font-size: 1.05em; }
+.fgos-article h6 { font-size: 1em; }
+
+/* A heading starts a section: space above, snug below. */
+.fgos-article h2,
+.fgos-article h3,
+.fgos-article .fgos-section-title {
+  margin-top: var(--fgos-gap-xl);
+}
+
+.fgos-article > h2 + *,
+.fgos-article > h3 + * {
+  margin-top: var(--fgos-gap-sm);
+}
 
 .fgos-article p,
 .fgos-article ul,
 .fgos-article ol {
-  margin: 0 0 var(--fgos-gap);
+  margin: 0;
 }
 
 .fgos-article ul,
 .fgos-article ol {
-  padding-inline-start: 1.35em;
+  padding-inline-start: 1.4em;
 }
 
 .fgos-article li + li {
-  margin-top: 0.35em;
+  margin-top: 0.4em;
 }
 
-/* ---- Hero ---- */
+/* =====================================================================
+   Hero
+   ===================================================================== */
 .fgos-hero {
+  margin: 0 0 var(--fgos-gap-xl);
+}
+
+.fgos-hero__img {
+  max-width: 100%;
+  border-radius: var(--fgos-radius);
+  margin-bottom: var(--fgos-gap);
+}
+
+.fgos-hero__title {
+  margin: 0 0 var(--fgos-gap-sm);
+}
+
+.fgos-hero__sub {
+  font-size: 1.1em;
+  line-height: 1.5;
+  color: var(--fgos-color-muted);
   margin: 0 0 var(--fgos-gap);
 }
 
-.fgos-hero img {
-  width: 100%;
-  border-radius: var(--fgos-radius);
+.fgos-hero__body > * + * {
+  margin-top: var(--fgos-gap-sm);
 }
 
-/* ---- Cards grid ---- */
-.fgos-cards,
-.fgos-auto-cols {
+.fgos-badge {
+  display: inline-block;
+  padding: 0.28em 0.7em;
+  margin-bottom: var(--fgos-gap-sm);
+  border-radius: 999px;
+  background: var(--fgos-color-primary);
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  line-height: 1.5;
+}
+
+/* =====================================================================
+   Cards
+   ===================================================================== */
+.fgos-cards {
+  margin: var(--fgos-gap-xl) 0;
+}
+
+.fgos-cards__title {
+  margin: 0 0 var(--fgos-gap);
+}
+
+.fgos-cards__intro {
+  color: var(--fgos-color-muted);
+  margin-bottom: var(--fgos-gap);
+}
+
+.fgos-cards__intro > * + * {
+  margin-top: var(--fgos-gap-sm);
+}
+
+.fgos-cards__grid {
   display: grid;
   gap: var(--fgos-gap);
-  margin: var(--fgos-gap) 0;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  align-items: stretch;
 }
 
+.fgos-auto-cols { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
 .fgos-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .fgos-cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .fgos-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
@@ -164,43 +248,7 @@
 .fgos-card {
   display: flex;
   flex-direction: column;
-  gap: 0.5em;
-  padding: var(--fgos-gap);
-  border: 1px solid var(--fgos-color-border);
-  border-radius: var(--fgos-radius);
-  background: var(--fgos-color-surface);
-  min-width: 0; /* let long words wrap inside grid cells */
-}
-
-.fgos-card img {
-  width: 100%;
-  border-radius: calc(var(--fgos-radius) / 2);
-  margin: 0;
-}
-
-.fgos-card h3,
-.fgos-card h4 {
-  margin: 0;
-  font-size: 1.05em;
-}
-
-.fgos-card p {
-  margin: 0;
-  color: var(--fgos-color-muted);
-}
-
-/* ---- Product cards ---- */
-.fgos-products {
-  display: grid;
-  gap: var(--fgos-gap);
-  margin: var(--fgos-gap) 0;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-}
-
-.fgos-product {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5em;
+  gap: var(--fgos-gap-sm);
   padding: var(--fgos-gap);
   border: 1px solid var(--fgos-color-border);
   border-radius: var(--fgos-radius);
@@ -208,43 +256,135 @@
   min-width: 0;
 }
 
-.fgos-product h3 {
+.fgos-card__img {
+  width: 100%;
+  border-radius: var(--fgos-radius-sm);
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
   margin: 0;
-  font-size: 1em;
 }
 
-.fgos-product .fgos-product__price {
+.fgos-card__title {
+  margin: 0;
+  font-size: 1.05em;
+}
+
+.fgos-card__body {
+  color: var(--fgos-color-muted);
+  flex: 1 1 auto;
+}
+
+.fgos-card__body > * + * {
+  margin-top: 0.5em;
+}
+
+.fgos-card__btn {
+  align-self: flex-start;
+  margin-top: auto;
+}
+
+/* =====================================================================
+   Products
+   ===================================================================== */
+.fgos-products {
+  margin: var(--fgos-gap-xl) 0;
+}
+
+.fgos-product {
+  display: grid;
+  grid-template-columns: minmax(0, 220px) minmax(0, 1fr);
+  gap: var(--fgos-gap);
+  align-items: center;
+  padding: var(--fgos-gap);
+  border: 1px solid var(--fgos-color-border);
+  border-radius: var(--fgos-radius);
+  background: var(--fgos-color-surface);
+}
+
+.fgos-product__img {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+  border-radius: var(--fgos-radius-sm);
+  margin: 0;
+}
+
+.fgos-product__inner {
+  min-width: 0;
+}
+
+.fgos-product__title {
+  margin: 0 0 0.35em;
+  font-size: 1.15em;
+}
+
+.fgos-product__sub {
+  color: var(--fgos-color-muted);
+  margin: 0 0 0.5em;
+}
+
+.fgos-product__body > * + * {
+  margin-top: 0.5em;
+}
+
+.fgos-product__btn {
+  margin-top: var(--fgos-gap-sm);
+}
+
+/* =====================================================================
+   Buttons
+   ===================================================================== */
+.fgos-cta__btn,
+.fgos-card__btn,
+.fgos-product__btn {
+  display: inline-block;
+  padding: 0.7em 1.4em;
+  border-radius: var(--fgos-radius-sm);
+  background: var(--fgos-color-primary);
+  color: #fff;
   font-weight: 600;
-  color: var(--fgos-color-primary);
+  line-height: 1.3;
+  text-decoration: none;
+  max-width: 100%;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
 }
 
-/* ---- CTAs ---- */
+.fgos-cta__btn:hover,
+.fgos-card__btn:hover,
+.fgos-product__btn:hover {
+  transform: translateY(-1px);
+}
+
+/* =====================================================================
+   CTA band
+   ===================================================================== */
 .fgos-cta {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: var(--fgos-gap-sm);
-  padding: var(--fgos-gap);
+  padding: calc(var(--fgos-gap) * 1.5);
+  margin: var(--fgos-gap-xl) 0;
   border: 1px solid var(--fgos-color-border);
   border-radius: var(--fgos-radius);
+  background: var(--fgos-color-surface);
   text-align: center;
-  margin: var(--fgos-gap) 0;
 }
 
-.fgos-cta__btn {
-  display: inline-block;
-  padding: 0.7em 1.4em;
-  border-radius: var(--fgos-radius);
-  background: var(--fgos-color-primary);
-  color: #fff;
-  font-weight: 600;
-  text-decoration: none;
-  max-width: 100%;
+.fgos-cta__title {
+  margin: 0;
 }
 
-/* ---- Quote ---- */
+.fgos-cta__body {
+  color: var(--fgos-color-muted);
+  max-width: 60ch;
+}
+
+/* =====================================================================
+   Quote
+   ===================================================================== */
 .fgos-quote {
-  margin: var(--fgos-gap) 0;
+  margin: var(--fgos-gap-xl) 0;
   padding: var(--fgos-gap) 0 var(--fgos-gap) var(--fgos-gap);
   border-inline-start: 4px solid var(--fgos-color-primary);
   font-size: 1.05em;
@@ -258,55 +398,102 @@
   color: var(--fgos-color-muted);
 }
 
-/* ---- Callout ---- */
+/* =====================================================================
+   Callout / Daniel's tip
+   ===================================================================== */
 .fgos-callout {
-  margin: var(--fgos-gap) 0;
+  margin: var(--fgos-gap-xl) 0;
   padding: var(--fgos-gap);
   border-inline-start: 4px solid var(--fgos-color-primary);
-  background: var(--fgos-color-surface);
   border-radius: 0 var(--fgos-radius) var(--fgos-radius) 0;
+  background: var(--fgos-color-surface);
 }
 
 .fgos-callout--info { border-inline-start-color: var(--fgos-color-primary); }
 .fgos-callout--warn { border-inline-start-color: #b45309; }
 .fgos-callout--key  { border-inline-start-color: #a16207; }
 
-.fgos-callout > :last-child {
+.fgos-callout__title {
+  margin: 0 0 0.5em;
+  font-weight: 700;
+  font-size: 0.95em;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.fgos-callout > *:last-child {
   margin-bottom: 0;
 }
 
-/* ---- Key takeaways ---- */
+/* =====================================================================
+   Key takeaways
+   ===================================================================== */
 .fgos-takeaways {
-  margin: var(--fgos-gap) 0;
+  margin: var(--fgos-gap-xl) 0;
   padding: var(--fgos-gap);
   border: 1px solid var(--fgos-color-border);
   border-radius: var(--fgos-radius);
   background: var(--fgos-color-surface);
 }
 
-.fgos-takeaways > :last-child {
+.fgos-takeaways__title {
+  margin: 0 0 var(--fgos-gap-sm);
+}
+
+.fgos-takeaways > *:last-child {
   margin-bottom: 0;
 }
 
-/* ---- FAQ ---- */
+/* =====================================================================
+   FAQ — native <details>, no JS
+   ===================================================================== */
 .fgos-faq {
-  margin: var(--fgos-gap) 0;
+  margin: var(--fgos-gap-xl) 0;
+}
+
+.fgos-faq__title {
+  margin: 0 0 var(--fgos-gap);
+}
+
+.fgos-faq__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--fgos-gap-sm);
 }
 
 .fgos-faq__item {
   border: 1px solid var(--fgos-color-border);
   border-radius: var(--fgos-radius);
-  margin-bottom: var(--fgos-gap-sm);
   background: var(--fgos-color-surface);
+  overflow: hidden;
 }
 
-.fgos-faq__item summary {
-  padding: 0.75em var(--fgos-gap);
+.fgos-faq__q {
+  padding: 0.85em var(--fgos-gap);
   font-weight: 600;
   cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--fgos-gap-sm);
 }
 
-.fgos-faq__item[open] summary {
+.fgos-faq__q::-webkit-details-marker { display: none; }
+
+.fgos-faq__q::after {
+  content: "+";
+  flex: 0 0 auto;
+  font-size: 1.2em;
+  line-height: 1;
+  color: var(--fgos-color-muted);
+}
+
+.fgos-faq__item[open] .fgos-faq__q::after {
+  content: "\2212";
+}
+
+.fgos-faq__item[open] .fgos-faq__q {
   border-bottom: 1px solid var(--fgos-color-border);
 }
 
@@ -314,26 +501,19 @@
   padding: var(--fgos-gap);
 }
 
-.fgos-faq__answer > :last-child {
+.fgos-faq__answer > *:last-child {
   margin-bottom: 0;
 }
 
-/* ---- Table of contents ---- */
-.fgos-toc {
-  margin: var(--fgos-gap) 0;
-  padding: var(--fgos-gap);
-  border: 1px solid var(--fgos-color-border);
-  border-radius: var(--fgos-radius);
-  background: var(--fgos-color-surface);
-}
-
-.fgos-toc > :last-child {
-  margin-bottom: 0;
-}
-
-/* ---- Carousel ---- */
+/* =====================================================================
+   Carousel
+   ===================================================================== */
 .fgos-carousel {
-  margin: var(--fgos-gap) 0;
+  margin: var(--fgos-gap-xl) 0;
+}
+
+.fgos-carousel__title {
+  margin: 0 0 var(--fgos-gap);
 }
 
 .fgos-carousel__track {
@@ -344,21 +524,46 @@
   padding-bottom: var(--fgos-gap-sm);
 }
 
-.fgos-carousel__track > figure {
-  flex: 0 0 min(85%, 420px);
+.fgos-carousel__item {
+  flex: 0 0 min(85%, 400px);
   scroll-snap-align: start;
   margin: 0;
   min-width: 0;
 }
 
-.fgos-carousel__track img {
+.fgos-carousel__img {
   width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
   border-radius: var(--fgos-radius);
+  margin: 0;
 }
 
-/* ---- Article frame (byline / share / author / related / newsletter) ---- */
+.fgos-carousel__caption {
+  font-weight: 600;
+  margin-top: var(--fgos-gap-sm);
+}
+
+/* =====================================================================
+   Table of contents
+   ===================================================================== */
+.fgos-toc {
+  margin: var(--fgos-gap-xl) 0;
+  padding: var(--fgos-gap);
+  border: 1px solid var(--fgos-color-border);
+  border-radius: var(--fgos-radius);
+  background: var(--fgos-color-surface);
+}
+
+.fgos-toc > *:last-child {
+  margin-bottom: 0;
+}
+
+/* =====================================================================
+   Article frame
+   ===================================================================== */
 .fgos-frame {
-  margin-top: calc(var(--fgos-gap) * 2);
+  margin-top: var(--fgos-gap-xl);
   padding-top: var(--fgos-gap);
   border-top: 1px solid var(--fgos-color-border);
 }
@@ -378,7 +583,7 @@
 .fgos-share a {
   padding: 0.4em 0.8em;
   border: 1px solid var(--fgos-color-border);
-  border-radius: var(--fgos-radius);
+  border-radius: var(--fgos-radius-sm);
   text-decoration: none;
 }
 
@@ -392,29 +597,107 @@
   margin-bottom: 0.35em;
 }
 
-/* ---- Responsive: collapse grids on small screens ---- */
+/* =====================================================================
+   Responsive
+   ===================================================================== */
+@media (max-width: 1024px) {
+  .fgos-cols-4 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .fgos-product {
+    grid-template-columns: minmax(0, 180px) minmax(0, 1fr);
+  }
+}
+
 @media (max-width: 782px) {
+  .fgos-article {
+    --fgos-gap: 18px;
+    --fgos-gap-lg: 30px;
+    --fgos-gap-xl: 44px;
+  }
+
   .fgos-cols-2,
   .fgos-cols-3,
   .fgos-cols-4 {
     grid-template-columns: 1fr;
   }
 
-  .fgos-article {
-    --fgos-gap: 18px;
+  .fgos-product {
+    grid-template-columns: 1fr;
   }
 
-  .fgos-cta__btn {
+  .fgos-product__img {
+    max-width: 220px;
+  }
+
+  .fgos-cta__btn,
+  .fgos-card__btn,
+  .fgos-product__btn {
+    display: block;
+    width: 100%;
+    text-align: center;
+  }
+
+  .fgos-table-wrap,
+  .fgos-article .table-wrap {
+    overflow-x: visible;
+  }
+
+  .fgos-article table,
+  .fgos-article table thead,
+  .fgos-article table tbody,
+  .fgos-article table tr,
+  .fgos-article table th,
+  .fgos-article table td {
     display: block;
     width: 100%;
   }
+
+  .fgos-article table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .fgos-article table tr {
+    margin-bottom: var(--fgos-gap-sm);
+    border: 1px solid var(--fgos-color-border);
+    border-radius: var(--fgos-radius-sm);
+    overflow: hidden;
+  }
+
+  .fgos-article table th,
+  .fgos-article table td {
+    border: 0;
+    border-bottom: 1px solid var(--fgos-color-border);
+    text-align: left;
+    padding: 0.6em 0.85em;
+  }
+
+  .fgos-article table tr > *:last-child {
+    border-bottom: 0;
+  }
 }
 
-/* ---- Print ---- */
+/* =====================================================================
+   Print
+   ===================================================================== */
 @media print {
   .fgos-share,
   .fgos-toc,
-  .fgos-carousel__track {
+  .fgos-carousel__track,
+  .fgos-badge {
     display: none;
+  }
+
+  .fgos-faq__item {
+    break-inside: avoid;
   }
 }

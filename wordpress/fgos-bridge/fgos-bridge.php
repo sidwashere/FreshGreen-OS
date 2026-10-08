@@ -34,6 +34,7 @@ define( 'FGOS_OPT_CSS', 'fgos_css' );
 define( 'FGOS_META_GENERATOR', '_fgos_generator' );
 
 require_once FGOS_BRIDGE_DIR . 'includes/class-fgos-signature.php';
+require_once FGOS_BRIDGE_DIR . 'includes/class-fgos-blocks.php';
 require_once FGOS_BRIDGE_DIR . 'includes/class-fgos-settings.php';
 require_once FGOS_BRIDGE_DIR . 'includes/class-fgos-theme-probe.php';
 require_once FGOS_BRIDGE_DIR . 'includes/class-fgos-html2elementor.php';

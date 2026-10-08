@@ -162,6 +162,31 @@ class FGOS_Webhook {
 	}
 
 	/**
+	 * Resolve the article HTML for rendering.
+	 *
+	 * FGOS sends BOTH a structured `blocks` array and a flattened `html` string.
+	 * The flattened string is a bare sequence of <p>/<h2>/<img> with almost no
+	 * classes, which produces an unstyled wall of text. When blocks are present
+	 * we rebuild real markup (hero, cards, tips, FAQ, products) tagged with the
+	 * design-system classes; otherwise we fall back to the raw HTML so nothing is
+	 * ever lost.
+	 *
+	 * @param array $data Payload.
+	 * @return string
+	 */
+	private static function resolve_html( array $data ) {
+		$raw = isset( $data['html'] ) ? (string) $data['html'] : '';
+
+		if ( ! empty( $data['blocks'] ) && is_array( $data['blocks'] ) ) {
+			$built = FGOS_Blocks::render( $data['blocks'] );
+			if ( '' !== trim( $built ) ) {
+				return $built;
+			}
+		}
+		return $raw;
+	}
+
+	/**
 	 * Build wp_insert_post args from the payload.
 	 *
 	 * @param array  $data Payload.
@@ -176,7 +201,7 @@ class FGOS_Webhook {
 			$status = 'future';
 		}
 
-		$html = isset( $data['html'] ) ? (string) $data['html'] : '';
+		$html = self::resolve_html( $data );
 		if ( '' === trim( $html ) ) {
 			return new \WP_Error( 'fgos_empty', 'No article HTML supplied.' );
 		}
@@ -228,7 +253,7 @@ class FGOS_Webhook {
 	 * @return void
 	 */
 	private static function write_content( $post_id, array $data, $mode ) {
-		$html = isset( $data['html'] ) ? (string) $data['html'] : '';
+		$html = self::resolve_html( $data );
 		if ( '' === trim( $html ) ) {
 			return;
 		}
@@ -263,7 +288,7 @@ class FGOS_Webhook {
 		if ( 'elementor' !== FGOS_Renderer::effective_mode() ) {
 			return;
 		}
-		$html = isset( $data['html'] ) ? (string) $data['html'] : '';
+		$html = self::resolve_html( $data );
 		$html = wp_kses( $html, wp_kses_allowed_html( 'post' ) );
 
 		$converter = new FGOS_HTML2Elementor( $html );

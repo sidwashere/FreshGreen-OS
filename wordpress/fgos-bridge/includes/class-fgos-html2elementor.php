@@ -168,6 +168,12 @@ class FGOS_HTML2Elementor {
 		$text    = trim( $node->textContent );
 		$child_elements = $this->elements_of( $node->childNodes );
 
+		// <figure> is a structural wrapper for images + captions. Make sure the
+		// design-system class survives even when FGOS emitted a bare <figure>.
+		if ( 'figure' === $tag && '' === $classes ) {
+			$classes = 'fgos-figure';
+		}
+
 		// Containers we should recurse into.
 		$is_container_tag = in_array(
 			$tag,
@@ -197,6 +203,12 @@ class FGOS_HTML2Elementor {
 				'alt' => trim( $node->getAttribute( 'alt' ) ),
 				'id'  => $this->id(),
 			);
+			// Constrain the image. Without this a 3000px hero renders at natural
+			// size and swamps the page — the single biggest layout defect we saw.
+			$settings['image_size']       = 'full';
+			$settings['image_width']      = array( 'unit' => '%', 'size' => 100, 'sizes' => array() );
+			$settings['image_custom_width'] = array( 'unit' => '%', 'size' => 100, 'sizes' => array() );
+			$settings['space_between']    = array( 'unit' => 'px', 'size' => 0, 'sizes' => array() );
 		} elseif ( $is_text_block ) {
 			$widget   = 'text-editor';
 			$settings['editor'] = $this->inner_html( $node );

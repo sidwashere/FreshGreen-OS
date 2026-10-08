@@ -154,6 +154,10 @@ async function publishViaBridge(
     post_type: item.contentType === 'page' ? 'page' : 'post',
     theme: item.title || '',
     html,
+    // Structured blocks matter: bodyHtml alone is a flat sequence of bare tags
+    // with no classes, which renders as an unstyled wall of text. The bridge
+    // rebuilds real markup (hero, cards, tips, FAQ, products) from these.
+    blocks: Array.isArray(item.blocks) ? item.blocks : [],
     description: item.metaDescription || '',
     main_keyword: item.primaryKeyword || '',
     keywords: Array.isArray(item.secondaryKeywords) ? item.secondaryKeywords : [],
