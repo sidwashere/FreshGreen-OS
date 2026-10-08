@@ -4633,16 +4633,25 @@ app.post('/api/wp/bridge-status', async (req, res) => {
     }
     const cleanUrl = String(wpUrl).replace(/\/+$/, '');
 
-    // 1. Is the plugin installed? The route exists only when it is.
-    let installed = false;
+    // Probe the endpoint directly. Reading the `wp-json/` namespace index is
+    // unreliable: full-page caches (LiteSpeed et al.) serve a cached index that
+    // can predate the plugin being installed, which reports a working plugin as
+    // missing. A direct POST always reaches origin.
+    //
+    // Send a deliberately invalid signature: any HTTP response other than 404
+    // proves the route exists and the plugin is active. A 404 means not installed.
+    const endpoint = `${cleanUrl}/wp-json/fgos/v1/publish`;
+    let reachable = false;
+    let probeStatus = 0;
     try {
-      const probe = await fetch(`${cleanUrl}/wp-json/`, {
-        headers: { 'User-Agent': 'FGOS/1.0' },
-        signal: AbortSignal.timeout(15_000),
+      const probe = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'status', sign: 'fgos-probe-no-signature' }),
+        signal: AbortSignal.timeout(20_000),
       });
-      const routes = await probe.json();
-      const namespaces = routes?.namespaces || [];
-      installed = namespaces.includes('fgos/v1');
+      probeStatus = probe.status;
+      reachable = probe.status !== 404;
     } catch {
       return res.json({
         success: false,
@@ -4651,24 +4660,25 @@ app.post('/api/wp/bridge-status', async (req, res) => {
       });
     }
 
-    if (!installed) {
+    if (!reachable) {
       return res.json({
         success: false,
         installed: false,
+        httpStatus: probeStatus,
         message:
           'FGOS Bridge is not installed. Upload wordpress/fgos-bridge to /wp-content/plugins/ and activate it.',
       });
     }
 
-    // 2. Prove the shared secret works with a harmless signed request.
+    // 2. Prove the shared secret works with a correctly signed request.
     const body: Record<string, unknown> = { action: 'status', secret };
     body.sign = bridgeSign(body, String(secret));
     try {
-      const resp = await fetch(`${cleanUrl}/wp-json/fgos/v1/publish`, {
+      const resp = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(15_000),
+        signal: AbortSignal.timeout(20_000),
       });
       const text = await resp.text();
       let json: any = {};
@@ -4685,8 +4695,10 @@ app.post('/api/wp/bridge-status', async (req, res) => {
         installed: true,
         message: 'FGOS Bridge connected.',
         mode: json.mode,
+        configured: json.configured,
         elementor: !!json.elementor,
         splitBlocks: json.split_blocks,
+        version: json.version,
         tokens: json.tokens || {},
       });
     } catch (err: any) {
