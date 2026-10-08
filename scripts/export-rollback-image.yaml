@@ -1,0 +1,36 @@
+# Preserve the known-good pre-Bridge build as a standalone, tagged image in
+# Artifact Registry — a repository the build service account CAN write to.
+#
+# Why: every image currently in cloud-run-source-deploy/fgos is an UNTAGGED
+# digest, which Artifact Registry is free to garbage-collect. This re-publishes
+# the good build under explicit, stable rollback tags.
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        docker pull "$_OLD_IMAGE"
+        docker tag "$_OLD_IMAGE" "$_REPO:$_TAG_COMMIT"
+        docker tag "$_OLD_IMAGE" "$_REPO:$_TAG_REVISION"
+        docker tag "$_OLD_IMAGE" "$_REPO:rollback-last-known-good"
+        echo "Tagged:"
+        docker images "$_REPO" --format '{{.Repository}}:{{.Tag}}  {{.ID}}'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        for t in "$_TAG_COMMIT" "$_TAG_REVISION" "rollback-last-known-good"; do
+          docker push "$_REPO:$t"
+          echo "pushed $t"
+        done
+
+substitutions:
+  _OLD_IMAGE: 'europe-west1-docker.pkg.dev/gen-lang-client-0697329654/cloud-run-source-deploy/fgos@sha256:9aaccba44399654d58aefdf9567100a3a6a4339ffae2d4a95ef1d92b62fd7ccf'
+  _REPO: 'europe-west1-docker.pkg.dev/gen-lang-client-0697329654/cloud-run-source-deploy/fgos-rollback'
+  _TAG_COMMIT: 'commit-1ec5817'
+  _TAG_REVISION: 'revision-fgos-00063-bdf'
