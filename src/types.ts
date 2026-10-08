@@ -56,6 +56,26 @@ export interface Brand {
   masterTemplateId?: number;
   masterTemplateType?: 'page' | 'post';
   masterTemplateTitle?: string;
+  /** FGOS Bridge (wordpress/fgos-bridge) connection.
+   *
+   * When enabled, FGOS publishes through the bridge webhook
+   * `{wpUrl}/wp-json/fgos/v1/publish` instead of `/wp/v2/posts`. The plugin
+   * decides the render mode — native Elementor containers, or semantic HTML —
+   * so the article inherits the site's own theme layout, fonts and colours
+   * instead of landing as inline-styled HTML in a default template.
+   *
+   * Opt-in per brand: when absent or disabled, FGOS uses the existing REST
+   * publish path unchanged. */
+  wpBridge?: {
+    enabled?: boolean;
+    /** Shared secret copied from Settings → FGOS Bridge in wp-admin. */
+    secret?: string;
+    /** Informational only — the plugin owns render mode at publish time. */
+    mode?: 'auto' | 'elementor' | 'html';
+    /** Informational — set from the bridge's response for display. */
+    lastMode?: string;
+    lastUsedAt?: string;
+  };
   masterTemplateUrl?: string;
   /** What the "Related Products/Services" section should recommend for this
    *  brand. Universal across themes: 'products' (WooCommerce store), 'services'

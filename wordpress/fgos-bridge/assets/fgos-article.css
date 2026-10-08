@@ -1,0 +1,420 @@
+/*!
+ * FGOS Bridge — article design system
+ *
+ * Contract: this stylesheet never overrides the theme. Every token defaults to
+ * `inherit`, so an unconfigured article renders with the site's own font-family,
+ * size, colour and measure. Brand tokens are opt-in via per-site overrides or a
+ * theme probe.
+ *
+ * All selectors are scoped to `.fgos-article`, so the theme header, footer, nav,
+ * sidebar and its own buttons are never affected.
+ */
+
+.fgos-article {
+  /* ---- Design tokens (override per site; default = inherit the theme) ---- */
+  --fgos-font-body: inherit;
+  --fgos-font-heading: inherit;
+  --fgos-size-body: inherit;
+  --fgos-line-height: inherit;
+  --fgos-measure: 68ch;
+
+  --fgos-color-body: inherit;
+  --fgos-color-heading: inherit;
+  --fgos-color-muted: inherit;
+  --fgos-color-primary: inherit;
+  --fgos-color-accent: inherit;
+  --fgos-color-surface: inherit;
+  --fgos-color-border: inherit;
+
+  --fgos-gap: 24px;
+  --fgos-gap-sm: 12px;
+  --fgos-radius: 8px;
+
+  /* ---- Inherit from the theme by default ---- */
+  font-family: var(--fgos-font-body);
+  font-size: var(--fgos-size-body);
+  line-height: var(--fgos-line-height);
+  color: var(--fgos-color-body);
+  max-width: var(--fgos-measure);
+  margin-inline: auto;
+}
+
+/* ---- Layout safety: nothing ever overflows the column ---- */
+.fgos-article img,
+.fgos-article video,
+.fgos-article canvas,
+.fgos-article svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.fgos-article img {
+  display: block;
+}
+
+.fgos-article iframe,
+.fgos-article embed,
+.fgos-article object {
+  max-width: 100%;
+}
+
+.fgos-article figure {
+  margin: var(--fgos-gap) 0;
+}
+
+.fgos-article figure img {
+  margin-inline: auto;
+}
+
+.fgos-article figcaption,
+.fgos-figure__caption {
+  font-size: 0.875em;
+  color: var(--fgos-color-muted);
+  text-align: center;
+  margin-top: var(--fgos-gap-sm);
+}
+
+.fgos-article a {
+  color: var(--fgos-color-primary);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+/* Wide tables scroll instead of breaking the layout. */
+.fgos-table-wrap,
+.fgos-article .table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.fgos-article table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: var(--fgos-gap) 0;
+}
+
+.fgos-article th,
+.fgos-article td {
+  padding: 0.6em 0.75em;
+  border: 1px solid var(--fgos-color-border);
+  text-align: left;
+  vertical-align: top;
+}
+
+/* ---- Headings: sizes only when the theme doesn't define them ---- */
+.fgos-article h1,
+.fgos-article h2,
+.fgos-article h3,
+.fgos-article h4,
+.fgos-article h5,
+.fgos-article h6 {
+  font-family: var(--fgos-font-heading);
+  color: var(--fgos-color-heading);
+  line-height: 1.25;
+  margin: calc(var(--fgos-gap) * 1.5) 0 var(--fgos-gap-sm);
+  text-wrap: balance;
+}
+
+.fgos-article h1 { font-size: clamp(1.75rem, 1.2rem + 2.2vw, 2.5rem); }
+.fgos-article h2 { font-size: clamp(1.35rem, 1.1rem + 1.2vw, 1.75rem); }
+.fgos-article h3 { font-size: clamp(1.15rem, 1.05rem + 0.5vw, 1.35rem); }
+.fgos-article h4,
+.fgos-article h5,
+.fgos-article h6 { font-size: 1.05em; }
+
+.fgos-article p,
+.fgos-article ul,
+.fgos-article ol {
+  margin: 0 0 var(--fgos-gap);
+}
+
+.fgos-article ul,
+.fgos-article ol {
+  padding-inline-start: 1.35em;
+}
+
+.fgos-article li + li {
+  margin-top: 0.35em;
+}
+
+/* ---- Hero ---- */
+.fgos-hero {
+  margin: 0 0 var(--fgos-gap);
+}
+
+.fgos-hero img {
+  width: 100%;
+  border-radius: var(--fgos-radius);
+}
+
+/* ---- Cards grid ---- */
+.fgos-cards,
+.fgos-auto-cols {
+  display: grid;
+  gap: var(--fgos-gap);
+  margin: var(--fgos-gap) 0;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.fgos-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.fgos-cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.fgos-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+.fgos-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5em;
+  padding: var(--fgos-gap);
+  border: 1px solid var(--fgos-color-border);
+  border-radius: var(--fgos-radius);
+  background: var(--fgos-color-surface);
+  min-width: 0; /* let long words wrap inside grid cells */
+}
+
+.fgos-card img {
+  width: 100%;
+  border-radius: calc(var(--fgos-radius) / 2);
+  margin: 0;
+}
+
+.fgos-card h3,
+.fgos-card h4 {
+  margin: 0;
+  font-size: 1.05em;
+}
+
+.fgos-card p {
+  margin: 0;
+  color: var(--fgos-color-muted);
+}
+
+/* ---- Product cards ---- */
+.fgos-products {
+  display: grid;
+  gap: var(--fgos-gap);
+  margin: var(--fgos-gap) 0;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.fgos-product {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5em;
+  padding: var(--fgos-gap);
+  border: 1px solid var(--fgos-color-border);
+  border-radius: var(--fgos-radius);
+  background: var(--fgos-color-surface);
+  min-width: 0;
+}
+
+.fgos-product h3 {
+  margin: 0;
+  font-size: 1em;
+}
+
+.fgos-product .fgos-product__price {
+  font-weight: 600;
+  color: var(--fgos-color-primary);
+}
+
+/* ---- CTAs ---- */
+.fgos-cta {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--fgos-gap-sm);
+  padding: var(--fgos-gap);
+  border: 1px solid var(--fgos-color-border);
+  border-radius: var(--fgos-radius);
+  text-align: center;
+  margin: var(--fgos-gap) 0;
+}
+
+.fgos-cta__btn {
+  display: inline-block;
+  padding: 0.7em 1.4em;
+  border-radius: var(--fgos-radius);
+  background: var(--fgos-color-primary);
+  color: #fff;
+  font-weight: 600;
+  text-decoration: none;
+  max-width: 100%;
+}
+
+/* ---- Quote ---- */
+.fgos-quote {
+  margin: var(--fgos-gap) 0;
+  padding: var(--fgos-gap) 0 var(--fgos-gap) var(--fgos-gap);
+  border-inline-start: 4px solid var(--fgos-color-primary);
+  font-size: 1.05em;
+}
+
+.fgos-quote__cite {
+  display: block;
+  margin-top: var(--fgos-gap-sm);
+  font-size: 0.9em;
+  font-style: normal;
+  color: var(--fgos-color-muted);
+}
+
+/* ---- Callout ---- */
+.fgos-callout {
+  margin: var(--fgos-gap) 0;
+  padding: var(--fgos-gap);
+  border-inline-start: 4px solid var(--fgos-color-primary);
+  background: var(--fgos-color-surface);
+  border-radius: 0 var(--fgos-radius) var(--fgos-radius) 0;
+}
+
+.fgos-callout--info { border-inline-start-color: var(--fgos-color-primary); }
+.fgos-callout--warn { border-inline-start-color: #b45309; }
+.fgos-callout--key  { border-inline-start-color: #a16207; }
+
+.fgos-callout > :last-child {
+  margin-bottom: 0;
+}
+
+/* ---- Key takeaways ---- */
+.fgos-takeaways {
+  margin: var(--fgos-gap) 0;
+  padding: var(--fgos-gap);
+  border: 1px solid var(--fgos-color-border);
+  border-radius: var(--fgos-radius);
+  background: var(--fgos-color-surface);
+}
+
+.fgos-takeaways > :last-child {
+  margin-bottom: 0;
+}
+
+/* ---- FAQ ---- */
+.fgos-faq {
+  margin: var(--fgos-gap) 0;
+}
+
+.fgos-faq__item {
+  border: 1px solid var(--fgos-color-border);
+  border-radius: var(--fgos-radius);
+  margin-bottom: var(--fgos-gap-sm);
+  background: var(--fgos-color-surface);
+}
+
+.fgos-faq__item summary {
+  padding: 0.75em var(--fgos-gap);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.fgos-faq__item[open] summary {
+  border-bottom: 1px solid var(--fgos-color-border);
+}
+
+.fgos-faq__answer {
+  padding: var(--fgos-gap);
+}
+
+.fgos-faq__answer > :last-child {
+  margin-bottom: 0;
+}
+
+/* ---- Table of contents ---- */
+.fgos-toc {
+  margin: var(--fgos-gap) 0;
+  padding: var(--fgos-gap);
+  border: 1px solid var(--fgos-color-border);
+  border-radius: var(--fgos-radius);
+  background: var(--fgos-color-surface);
+}
+
+.fgos-toc > :last-child {
+  margin-bottom: 0;
+}
+
+/* ---- Carousel ---- */
+.fgos-carousel {
+  margin: var(--fgos-gap) 0;
+}
+
+.fgos-carousel__track {
+  display: flex;
+  gap: var(--fgos-gap);
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  padding-bottom: var(--fgos-gap-sm);
+}
+
+.fgos-carousel__track > figure {
+  flex: 0 0 min(85%, 420px);
+  scroll-snap-align: start;
+  margin: 0;
+  min-width: 0;
+}
+
+.fgos-carousel__track img {
+  width: 100%;
+  border-radius: var(--fgos-radius);
+}
+
+/* ---- Article frame (byline / share / author / related / newsletter) ---- */
+.fgos-frame {
+  margin-top: calc(var(--fgos-gap) * 2);
+  padding-top: var(--fgos-gap);
+  border-top: 1px solid var(--fgos-color-border);
+}
+
+.fgos-frame__meta {
+  font-size: 0.9em;
+  color: var(--fgos-color-muted);
+}
+
+.fgos-share {
+  display: flex;
+  gap: var(--fgos-gap-sm);
+  flex-wrap: wrap;
+  margin: var(--fgos-gap) 0;
+}
+
+.fgos-share a {
+  padding: 0.4em 0.8em;
+  border: 1px solid var(--fgos-color-border);
+  border-radius: var(--fgos-radius);
+  text-decoration: none;
+}
+
+.fgos-related {
+  margin: var(--fgos-gap) 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fgos-related li {
+  margin-bottom: 0.35em;
+}
+
+/* ---- Responsive: collapse grids on small screens ---- */
+@media (max-width: 782px) {
+  .fgos-cols-2,
+  .fgos-cols-3,
+  .fgos-cols-4 {
+    grid-template-columns: 1fr;
+  }
+
+  .fgos-article {
+    --fgos-gap: 18px;
+  }
+
+  .fgos-cta__btn {
+    display: block;
+    width: 100%;
+  }
+}
+
+/* ---- Print ---- */
+@media print {
+  .fgos-share,
+  .fgos-toc,
+  .fgos-carousel__track {
+    display: none;
+  }
+}

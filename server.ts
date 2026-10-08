@@ -22,6 +22,7 @@ import {
 import { tipLabel, isDanielsBrand } from './src/lib/tipLabel.js';
 import { initializeApp as initAdminApp, applicationDefault } from 'firebase-admin/app';
 import { getFirestore as getAdminFirestore, FieldValue as AdminFieldValue } from 'firebase-admin/firestore';
+import crypto from 'node:crypto';
 
 dotenv.config();
 
@@ -30,8 +31,16 @@ dotenv.config();
 // even when no client is open. Uses Application Default Credentials: on Cloud
 // Run this is the service's runtime SA (needs roles/datastore.user); locally
 // set GOOGLE_APPLICATION_CREDENTIALS to a service-account key file.
+//
+// FIREBASE_DB: optional named Firestore database (Firestore now supports
+// multiple databases per project). The `staging` branch sets this to a
+// different name (e.g. "fgos-staging") so staging writes to its OWN Firestore
+// database and can never cross-write or corrupt the live data plane. When
+// unset, the server uses the project's (default) database — live behaviour is
+// unchanged.
 let adminDb: ReturnType<typeof getAdminFirestore> | null = null;
 try {
+  const namedDb = process.env.FIREBASE_DB ? String(process.env.FIREBASE_DB).trim() : '';
   if (process.env.FIRESTORE_EMULATOR_HOST) {
     // Local dev/testing against the Firestore emulator — no credentials needed.
     initAdminApp({ projectId: process.env.FIREBASE_PROJECT_ID || 'demo-fgos' });
@@ -43,7 +52,10 @@ try {
     initAdminApp({ credential: applicationDefault() });
     console.log('[FGOS] ✅ Firebase Admin initialized — server-side auto-publish armed');
   }
-  adminDb = getAdminFirestore();
+  // Named-database support: when FIREBASE_DB is set, attach to that dedicated
+  // Firestore database so the staging render plane is fully isolated from live.
+  adminDb = namedDb ? getAdminFirestore().database(namedDb) : getAdminFirestore();
+  if (namedDb) console.log(`[FGOS] ℹ️  Using named Firestore database "${namedDb}" — isolated data plane (staging/backup safe).`);
 } catch (err: any) {
   console.error('[FGOS] ⚠️ Firebase Admin init failed — server-side auto-publish disabled:', err?.message || err);
 }
@@ -79,6 +91,120 @@ async function logServerActivity(entry: {
   }
 }
 
+// ── FGOS Bridge (WordPress-side connector) ───────────────────────────────────
+// When a brand has the FGOS Bridge plugin installed, FGOS publishes through the
+// bridge webhook instead of the raw /wp/v2/posts endpoint. The bridge decides how
+// the article renders (native Elementor containers, or semantic HTML) so it
+// inherits the site's own theme layout, fonts and colours.
+//
+// The signing scheme must match includes/class-fgos-signature.php exactly:
+//   ksort by key, arrays → 'Array', values → PHP-style string, join '|', HMAC-SHA256.
+
+/** PHP-compatible string cast (true → '1', false/null → ''). */
+function phpString(value: unknown): string {
+  if (value === true) return '1';
+  if (value === false || value === null || value === undefined) return '';
+  if (Array.isArray(value)) return 'Array';
+  if (typeof value === 'object') return 'Array';
+  return String(value);
+}
+
+/** Canonical string for the bridge signature. */
+function bridgeCanonical(data: Record<string, unknown>): string {
+  const entries = Object.entries(data).filter(([k]) => k !== 'sign');
+  // PHP ksort on string keys ≈ JS default lexicographic sort on string keys.
+  entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return entries.map(([, v]) => phpString(v)).join('|');
+}
+
+/** Sign a bridge payload with the shared secret. */
+function bridgeSign(data: Record<string, unknown>, secret: string): string {
+  return crypto.createHmac('sha256', secret).update(bridgeCanonical(data)).digest('hex');
+}
+
+/** Bridge settings for a brand (opt-in, off by default). */
+function bridgeConfigFor(brand: any): { enabled: boolean; secret: string; mode?: string } {
+  const b = brand?.wpBridge || {};
+  return {
+    enabled: !!b.enabled && !!b.secret && !!brand?.wpUrl,
+    secret: String(b.secret || ''),
+    mode: b.mode || undefined,
+  };
+}
+
+/**
+ * Publish/update an item through the FGOS Bridge webhook.
+ * Returns null when the bridge is not configured or not installed (the caller
+ * then falls back to the normal WordPress REST publish).
+ */
+async function publishViaBridge(
+  brand: any,
+  item: any,
+  html: string,
+  opts: { publish: boolean },
+): Promise<{ wpPostId: number; wpLiveUrl: string; mode?: string } | null> {
+  const cfg = bridgeConfigFor(brand);
+  if (!cfg.enabled) return null;
+
+  const cleanUrl = brand.wpUrl.replace(/\/+$/, '');
+  const endpoint = `${cleanUrl}/wp-json/fgos/v1/publish`;
+
+  const body: Record<string, unknown> = {
+    action: item.wpPostId ? 'update' : 'publish',
+    post_type: item.contentType === 'page' ? 'page' : 'post',
+    theme: item.title || '',
+    html,
+    description: item.metaDescription || '',
+    main_keyword: item.primaryKeyword || '',
+    keywords: Array.isArray(item.secondaryKeywords) ? item.secondaryKeywords : [],
+    post_slug: item.slug || '',
+    publish: opts.publish ? 1 : 0,
+    excerpt: 1,
+    featured_image: item.featuredImageUrl || '',
+  };
+  if (item.wpPostId) body.post_id = item.wpPostId;
+  if (item.blogNumber) body.fgos_meta = { blogNumber: item.blogNumber };
+
+  body.secret = cfg.secret;
+  body.sign = bridgeSign(body, cfg.secret);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  let resp: Response;
+  try {
+    resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err: any) {
+    clearTimeout(timeout);
+    throw new Error(
+      err?.name === 'AbortError'
+        ? 'FGOS Bridge timed out after 30s'
+        : (err?.message || 'FGOS Bridge request failed'),
+    );
+  }
+  clearTimeout(timeout);
+
+  const text = await resp.text();
+  let json: any = {};
+  try { json = JSON.parse(text); } catch { /* non-JSON error page */ }
+
+  if (!resp.ok || json?.result !== 1) {
+    // 404 here almost always means the plugin is not installed → caller falls
+    // back to the REST publish rather than failing the whole sync.
+    throw new Error(json?.error || `FGOS Bridge ${resp.status}: ${text.slice(0, 180)}`);
+  }
+
+  return {
+    wpPostId: json.post_id,
+    wpLiveUrl: json.url || `${cleanUrl}/?p=${json.post_id}`,
+    mode: json.mode,
+  };
+}
+
 // ── Server-side auto-publish scheduler ───────────────────────────────────────
 // Two complementary mechanisms (both call runServerPublishCheck):
 //  1. A setInterval that runs every 60s while the process is alive.
@@ -90,6 +216,27 @@ const PUBLISH_LOCK_TTL_MS = 2 * 60_000; // a stuck lock expires after 2 min
 
 /** Publish a single content item to its brand's WordPress. */
 async function publishItemToWordPress(item: any, brand: any): Promise<{ wpPostId: number; wpLiveUrl: string }> {
+  // FGOS Bridge first (opt-in). It decides the render mode so the article
+  // inherits the site's theme. Falls through to plain REST when the plugin is
+  // absent or disabled, so existing sites are untouched.
+  if (bridgeConfigFor(brand).enabled) {
+    try {
+      const viaBridge = await publishViaBridge(brand, item, item.bodyHtml || '', {
+        publish: (item.autoBlogOverrides?.wpStatus || 'publish') !== 'draft',
+      });
+      if (viaBridge) {
+        return { wpPostId: viaBridge.wpPostId, wpLiveUrl: viaBridge.wpLiveUrl };
+      }
+    } catch (err: any) {
+      const msg = String(err?.message || err);
+      const looksMissing = /FGOS Bridge (404|403)|not found/i.test(msg);
+      if (!looksMissing) {
+        throw err; // Real bridge failure — surface it rather than double-publish.
+      }
+      console.warn(`[FGOS] Bridge unavailable (${msg}) — falling back to WordPress REST publish.`);
+    }
+  }
+
   const cleanUrl = brand.wpUrl.replace(/\/+$/, '');
   const authHeader = 'Basic ' + Buffer.from(`${brand.wpUsername}:${brand.wpAppPassword || ''}`).toString('base64');
   const wpStatus = item.autoBlogOverrides?.wpStatus || 'publish';
@@ -4473,6 +4620,86 @@ app.post('/api/ai/openrouter-models', async (req, res) => {
 // ==========================================
 // 2. WORDPRESS REST API CONNECTOR PROXIES
 // ==========================================
+
+// Endpoint: Probe the FGOS Bridge plugin for a Brand.
+// Reports whether the plugin is installed, its effective render mode, whether
+// Elementor is available, and the probed design tokens — so setup can be
+// verified before any article is published through it.
+app.post('/api/wp/bridge-status', async (req, res) => {
+  try {
+    const { wpUrl, secret } = req.body || {};
+    if (!wpUrl || !secret) {
+      return res.status(400).json({ success: false, message: 'wpUrl and secret are required.' });
+    }
+    const cleanUrl = String(wpUrl).replace(/\/+$/, '');
+
+    // 1. Is the plugin installed? The route exists only when it is.
+    let installed = false;
+    try {
+      const probe = await fetch(`${cleanUrl}/wp-json/`, {
+        headers: { 'User-Agent': 'FGOS/1.0' },
+        signal: AbortSignal.timeout(15_000),
+      });
+      const routes = await probe.json();
+      const namespaces = routes?.namespaces || [];
+      installed = namespaces.includes('fgos/v1');
+    } catch {
+      return res.json({
+        success: false,
+        installed: false,
+        message: 'Could not reach the site REST API. Check the WordPress URL.',
+      });
+    }
+
+    if (!installed) {
+      return res.json({
+        success: false,
+        installed: false,
+        message:
+          'FGOS Bridge is not installed. Upload wordpress/fgos-bridge to /wp-content/plugins/ and activate it.',
+      });
+    }
+
+    // 2. Prove the shared secret works with a harmless signed request.
+    const body: Record<string, unknown> = { action: 'status', secret };
+    body.sign = bridgeSign(body, String(secret));
+    try {
+      const resp = await fetch(`${cleanUrl}/wp-json/fgos/v1/publish`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(15_000),
+      });
+      const text = await resp.text();
+      let json: any = {};
+      try { json = JSON.parse(text); } catch { /* ignore */ }
+      if (!resp.ok || json?.result !== 1) {
+        return res.json({
+          success: false,
+          installed: true,
+          message: json?.error || `Bridge rejected the request (HTTP ${resp.status}). Check the shared secret.`,
+        });
+      }
+      return res.json({
+        success: true,
+        installed: true,
+        message: 'FGOS Bridge connected.',
+        mode: json.mode,
+        elementor: !!json.elementor,
+        splitBlocks: json.split_blocks,
+        tokens: json.tokens || {},
+      });
+    } catch (err: any) {
+      return res.json({
+        success: false,
+        installed: true,
+        message: `Bridge is installed but did not answer: ${err?.message || 'unknown error'}`,
+      });
+    }
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message || 'Bridge check failed.' });
+  }
+});
 
 // Endpoint: Test WordPress REST API connection for a Brand
 app.post('/api/wp/test-connection', async (req, res) => {
