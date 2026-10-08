@@ -34,19 +34,18 @@
  * FGOS release workflow requirement: this script runs and passes BEFORE every
  * live push. Enforced by the `fgos-release` skill.
  */
-import { execSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+const { execSync } = require('node:child_process');
+const { mkdirSync, writeFileSync } = require('node:fs');
+const { join } = require('node:path');
 
-const here = fileURLToPath(new URL('.', import.meta.url));
+const here = __dirname;
 const args = process.argv.slice(2);
 
-function argValue(flag: string, fallback = ''): string {
+function argValue(flag, fallback = '') {
   const i = args.indexOf(flag);
   return i >= 0 && args[i + 1] ? args[i + 1] : fallback;
 }
-function hasFlag(flag: string): boolean {
+function hasFlag(flag) {
   return args.includes(flag);
 }
 
@@ -67,7 +66,7 @@ console.log(`\n🧰 FGOS backup-before-live
   Drive    : ${wantDrive ? 'requested' : '(skipped)'}
 `);
 
-function run(cmd: string, opts: { stdio?: any } = {}) {
+function run(cmd, opts = {}) {
   console.log(`  $ ${cmd}`);
   return execSync(cmd, { cwd: root, stdio: opts.stdio || 'inherit', shell: '/bin/zsh' });
 }
@@ -83,15 +82,28 @@ if (process.env.FIRESTORE_EMULATOR_HOST) {
 } else {
   console.log('\n→ Exporting Firestore via gcloud');
   const dbFlag = db && db !== 'fgos-live' ? `--database=${db}` : '';
-  const target = gcsBucket ? `gs://${gcsBucket}/fgos-backups/${db}-${stamp}` : `${outDir}/firestore`;
-  try {
-    run(`gcloud firestore export ${dbFlag} ${target}`.trim());
-  } catch {
-    // The server also has a client-side Firestore export path (Content Hub →
-    // "Back up to Google Drive"). If gcloud isn't available, fall back to the
-    // local Firestore admin dump used by the app's own backup.
-    console.warn('  ⚠️ gcloud export failed — trying server export fallback');
-    run(`curl -s -X POST "${process.env.APP_URL || 'http://localhost:3000'}/api/admin/firestore-dump" -o "${outDir}/firestore-dump.json"`);
+  if (gcsBucket) {
+    // gcloud firestore export only accepts a gs:// destination.
+    run(`gcloud firestore export ${dbFlag} gs://${gcsBucket}/fgos-backups/${db}-${stamp}`.trim());
+  } else {
+    // No bucket supplied → we cannot use gcloud (it rejects local paths). Fall
+    // back to a JSON dump via the running server's Firestore admin SDK, which
+    // needs no gcloud credentials and no bucket. This still captures content.
+    console.log('  (no --gcs bucket supplied → using the server dump endpoint)');
+    const appUrl = (process.env.APP_URL || 'http://localhost:3000').replace(/\/+$/, '');
+    try {
+      run(`curl -sS -f -X POST "${appUrl}/api/admin/firestore-dump" -H "Content-Type: application/json" -d '{"database":"${db}"}' -o "${outDir}/firestore-dump.json"`);
+    } catch {
+      // If the endpoint is unavailable too, write a marker so the snapshot is
+      // honest about what it did and did not capture, then continue (WP content
+      // and git state are still captured).
+      console.warn('  ⚠️ Firestore dump endpoint unavailable — state NOT captured this run.');
+      writeFileSync(join(outDir, 'FIRESTORE_MISSING.txt'),
+        `Firestore export did not run (${new Date().toISOString()}).\n` +
+        'Reason: no --gcs bucket supplied and /api/admin/firestore-dump is not reachable.\n' +
+        'Remedy: re-run with --gcs <bucket> (gcloud firestore export requires gs://),\n' +
+        'or start the app and expose the dump endpoint.\n');
+    }
   }
 }
 
@@ -105,7 +117,7 @@ if (wpUrl) {
     try {
       run(`curl -s "${wpUrl}${p}" -o "${wpOut}/${k}.json"`);
       console.log(`    ${k}.json ✓`);
-    } catch (e: any) {
+    } catch (e) {
       console.warn(`    ${k}.json ⚠️ ${e?.message}`);
     }
   }
@@ -113,7 +125,7 @@ if (wpUrl) {
   try {
     run(`curl -s -X POST "${process.env.APP_URL || 'http://localhost:3000'}/api/wp/register-snapshot" -H "Content-Type: application/json" -d '{"wpUrl":"${wpUrl}"}' -o "${wpOut}/fgos-register.json"`);
     console.log('    fgos-register.json ✓');
-  } catch (e: any) {
+  } catch (e) {
     console.warn(`    fgos-register.json ⚠️ ${e?.message}`);
   }
 }
@@ -142,7 +154,7 @@ if (wantDrive) {
     // needs_admin_setup step — rclone must be installed + the remote authed.
     run(`rclone copy "${outDir}" fgos:FreshGreen-OS/state-backups/${db}/${stamp} --create-empty-src-dirs`);
     console.log('  Drive copy ✓');
-  } catch (e: any) {
+  } catch (e) {
     console.warn(`  ⚠️ Drive copy skipped: ${e?.message?.split('\n')[0] || 'rclone not configured'}`);
     console.warn('    → rclone is a one-time setup: `brew install rclone && rclone config` (name the remote `fgos`)');
     if (!commited) process.exit(3);
