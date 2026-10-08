@@ -1,0 +1,59 @@
+# ─── Live deploy — FreshGreen-OS (main branch) ────────────────────────────────
+# Builds to Artifact Registry and deploys to the live Cloud Run service `fgos`,
+# which fgos.freshgreenclassics.co.uk points at.
+#
+# This replaces the old gcr.io/ Container Registry flow in cloudbuild.yaml.
+# Google Container Registry (gcr.io) is retired and rejects new pushes, so the
+# image now goes to Artifact Registry — the same registry the live service already
+# pulls from (cloud-run-source-deploy/fgos).
+#
+# Manual deploy (this is what runs today; there is no automatic trigger yet):
+#   gcloud builds submit --config=cloudbuild-live.yaml --region=europe-west1 .
+#
+# To add automation later, create a GitHub trigger bound to the `main` branch
+# pointing at this file. Pair it with cloudbuild-staging.yaml bound to `staging`
+# so an unverified commit cannot reach production.
+steps:
+  # 1. Build the container image into Artifact Registry.
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      [
+        'build',
+        '-t',
+        'europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/fgos:$SHORT_SHA',
+        '-t',
+        'europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/fgos:latest',
+        '.',
+      ]
+
+  # 2. Push both tags.
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/fgos:$SHORT_SHA'
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/fgos:latest'
+
+  # 3. Deploy to Cloud Run.
+  #    FIREBASE_DB is intentionally NOT set: the live service uses the project's
+  #    default Firestore database. Staging sets FIREBASE_DB=fgos-staging to keep
+  #    its data plane separate.
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'fgos'
+      - '--image=europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/fgos:$SHORT_SHA'
+      - '--platform=managed'
+      - '--region=europe-west1'
+      - '--allow-unauthenticated'
+      - '--set-env-vars=NODE_ENV=production'
+      - '--memory=512Mi'
+      - '--cpu=1'
+
+images:
+  - 'europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/fgos:$SHORT_SHA'
+  - 'europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/fgos:latest'

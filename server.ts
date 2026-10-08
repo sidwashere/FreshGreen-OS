@@ -7915,6 +7915,60 @@ function mapBaseOrder(o: any): any {
   };
 }
 
+// POST /api/admin/firestore-dump — full state snapshot for the pre-live backup.
+// Returns every FGOS collection as JSON. Used by scripts/backup-before-live.cjs
+// when no GCS bucket is supplied (gcloud firestore export only accepts gs://).
+// Read-only: this never writes to Firestore.
+app.post('/api/admin/firestore-dump', async (req, res) => {
+  try {
+    if (!adminDb) {
+      return res.status(503).json({ success: false, message: 'Firestore is not initialised on this server.' });
+    }
+    // Optional: require the tick secret when one is configured, so the dump is
+    // never an open door on a deployed instance.
+    const tickSecret = process.env.AUTOBLOG_TICK_SECRET || process.env.FGOS_TICK_SECRET;
+    if (tickSecret && req.body?.secret !== tickSecret) {
+      return res.status(403).json({ success: false, message: 'Invalid tick secret.' });
+    }
+
+    const wanted = String(req.body?.database || '');
+    const collections = ['brands', 'content_items', 'blog_register', 'blog_counters', 'activity_logs'];
+    const dump: Record<string, any[]> = {};
+    const counts: Record<string, number> = {};
+
+    for (const name of collections) {
+      try {
+        const snap = await adminDb.collection(name).get();
+        const rows = snap.docs.map((d) => {
+          const data: any = d.data();
+          return { __id: d.id, ...data };
+        });
+        dump[name] = rows;
+        counts[name] = rows.length;
+      } catch (err: any) {
+        dump[name] = [];
+        counts[name] = -1;
+        console.warn(`[firestore-dump] collection "${name}" failed: ${err?.message}`);
+      }
+    }
+
+    const out = {
+      success: true,
+      exportedAt: new Date().toISOString(),
+      database: wanted || '(default)',
+      counts,
+      data: dump,
+    };
+
+    // Write straight to stdout when the caller pipes it (curl -o file works
+    // too, so just always return JSON).
+    return res.json(out);
+  } catch (err: any) {
+    console.error('[firestore-dump] failed:', err);
+    return res.status(500).json({ success: false, message: err?.message || 'Dump failed.' });
+  }
+});
+
 // GET /api/base/status — connection check + connected order sources
 app.get('/api/base/status', async (req, res) => {
   try {
