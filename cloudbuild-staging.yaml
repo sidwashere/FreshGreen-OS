@@ -1,0 +1,51 @@
+# ─── Staging deploy — FreshGreen-OS ─────────────────────────────────────────
+# Deploys the `staging` branch to a SEPARATE Cloud Run service (`fgos-staging`)
+# with its own named Firestore database (`fgos-staging`). It is the render/test
+# plane: the Testing Area renders here, and it can never reach the live service
+# or the live data plane because:
+#   • different Cloud Run service name  → different URL (fgos-staging-…)
+#   • FIREBASE_DB=fgos-staging         → its OWN named Firestore database
+#   • APP_URL points at the staging URL → generated links target staging
+#
+# Live is untouched: this file is only wired to the `staging` branch trigger,
+# and the prod `cloudbuild.yaml` still deploys service `fgos` from `main`.
+#
+# Manual kick if the branch trigger isn't set yet:
+#   gcloud builds submit --config=cloudbuild-staging.yaml \
+#     --substitutions=_SERVICE=fgos-staging,_REGION=europe-west1,_IMAGE=fgos-staging
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'europe-west1-docker.pkg.dev/$PROJECT_ID/fgos/fgos-staging', '.']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'europe-west1-docker.pkg.dev/$PROJECT_ID/fgos/fgos-staging']
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'fgos-staging'
+      - '--image=europe-west1-docker.pkg.dev/$PROJECT_ID/fgos/fgos-staging'
+      - '--platform=managed'
+      - '--region=europe-west1'
+      - '--allow-unauthenticated'
+      - '--service-account=${_STAGING_SA}'
+      - '--set-env-vars=NODE_ENV=production,FIREBASE_DB=fgos-staging,APP_URL=https://fgos-staging.europe-west1.run.app'
+      - '--memory=512Mi'
+      - '--cpu=1'
+
+images:
+  - 'europe-west1-docker.pkg.dev/$PROJECT_ID/fgos/fgos-staging'
+
+# ── Required substitutions ────────────────────────────────────────────────────
+# _STAGING_SA: service account email for the staging service. It should have a
+# SEPARATE (usually stripped-down) role set vs the live SA, and its Firestore
+# grant is scoped to the named `fgos-staging` database only. Supply at submit:
+#   --substitutions=_STAGING_SA=fgos-staging-sa@<PROJECT>.iam.gserviceaccount.com
+# When omitted the service falls back to the project default compute SA — fine
+# for a quick smoke test, but set a dedicated SA before real staging work.
+availableSecrets:
+  secretManager:
+    - versionName: projects/$PROJECT_ID/secrets/fgos-staging-env/versions/latest
+      env: 'FGOS_STAGING_ENV'
