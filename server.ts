@@ -4831,7 +4831,10 @@ app.post('/api/wp/test-connection', async (req, res) => {
 function blocksToCleanHtml(blocks: any[], brand?: any): string {
   if (!blocks || !blocks.length) return '';
 
-  const isElementor = !!brand?.elementorScaffold;
+  // Always emit clean, semantically-structured HTML. The Elementor widget
+  // scaffold that used to be gated behind brand.elementorScaffold is superseded by
+  // the FGOS Bridge plugin, which builds real Elementor containers server-side.
+  const isElementor = false;
 
   const innerHtml = blocks.map(block => {
     let html = '';
@@ -6115,11 +6118,6 @@ app.post('/api/wp/install-snippet-all', async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 });
-
-// ==========================================
-// 3. HOSTINGER / CPANEL EXPORT ENDPOINTS
-// ==========================================
-
 
 // ==========================================
 // 4. WORDPRESS STATS ENDPOINT
@@ -7691,195 +7689,6 @@ app.get('/api/autoblog/server-status', (req, res) => {
     lockTtlMs: PUBLISH_LOCK_TTL_MS,
     at: new Date().toISOString(),
   });
-});
-
-app.get('/api/export/sql', (req, res) => {
-  const sql = `-- FGOS (Fresh Green Operating System) - MySQL Schema for Hostinger / cPanel
--- Database: fgos_studio
-
-CREATE TABLE IF NOT EXISTS \`brands\` (
-  \`id\` INT AUTO_INCREMENT PRIMARY KEY,
-  \`name\` VARCHAR(255) NOT NULL,
-  \`slug\` VARCHAR(100) UNIQUE NOT NULL,
-  \`wp_url\` VARCHAR(255) NOT NULL,
-  \`wp_username\` VARCHAR(100) NOT NULL,
-  \`wp_app_password\` TEXT NULL,
-  \`voice_guidelines\` TEXT NULL,
-  \`banned_words\` TEXT NULL,
-  \`primary_color\` VARCHAR(7) DEFAULT '#10b981',
-  \`page_templates\` TEXT NULL,
-  \`default_status\` VARCHAR(20) DEFAULT 'draft',
-  \`created_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE TABLE IF NOT EXISTS \`content_items\` (
-  \`id\` INT AUTO_INCREMENT PRIMARY KEY,
-  \`brand_id\` INT NOT NULL,
-  \`title\` VARCHAR(255) NOT NULL,
-  \`slug\` VARCHAR(255) NOT NULL,
-  \`content_type\` ENUM('post', 'page') DEFAULT 'post',
-  \`wp_template\` VARCHAR(100) DEFAULT 'default',
-  \`status\` ENUM('Planned', 'Researching', 'Generating', 'Draft_Ready', 'Published', 'Error') DEFAULT 'Planned',
-  \`primary_keyword\` VARCHAR(255) NULL,
-  \`secondary_keywords\` TEXT NULL,
-  \`seo_brief\` TEXT NULL,
-  \`meta_title\` VARCHAR(255) NULL,
-  \`meta_description\` TEXT NULL,
-  \`body_html\` LONGTEXT NULL,
-  \`nano_banana_prompt\` TEXT NULL,
-  \`featured_image_url\` VARCHAR(500) NULL,
-  \`wp_post_id\` INT NULL,
-  \`wp_preview_url\` TEXT NULL,
-  \`wp_live_url\` TEXT NULL,
-  \`created_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  \`updated_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  FOREIGN KEY (\`brand_id\`) REFERENCES \`brands\`(\`id\`) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-`;
-  res.setHeader('Content-Type', 'text/plain');
-  res.setHeader('Content-Disposition', 'attachment; filename="fgos_studio_schema.sql"');
-  return res.send(sql);
-});
-
-app.get('/api/export/wordpress-connector-php', (req, res) => {
-  const phpCode = `<?php
-
-namespace App\\Services;
-
-use Illuminate\\Support\\Facades\\Http;
-use Illuminate\\Support\\Facades\\Log;
-
-/**
- * FGOS (Fresh Green Operating System) - WordPress REST API Service Connector
- * Optimized for Laravel 11 on Hostinger / cPanel
- */
-class WordPressConnector
-{
-    /**
-     * Test REST API Connection
-     */
-    public function testConnection($brand): array
-    {
-        $cleanUrl = rtrim($brand->wp_url, '/');
-        
-        $response = Http::withBasicAuth($brand->wp_username, $brand->wp_app_password)
-            ->timeout(8)
-            ->get($cleanUrl . '/wp-json/wp/v2/users/me');
-
-        if ($response->successful()) {
-            return [
-                'success' => true,
-                'user' => $response->json()['name'] ?? 'Authorized User',
-                'status' => $response->status()
-            ];
-        }
-
-        return [
-            'success' => false,
-            'message' => 'WP REST API returned HTTP ' . $response->status() . ': ' . $response->body()
-        ];
-    }
-
-    /**
-     * Push Post or Page to WordPress REST API
-     */
-    public function pushToWP($contentItem): array|false
-    {
-        $brand = $contentItem->brand;
-        $cleanUrl = rtrim($brand->wp_url, '/');
-        $endpoint = ($contentItem->content_type === 'page') ? '/wp-json/wp/v2/pages' : '/wp-json/wp/v2/posts';
-
-        $payload = [
-            'title'    => $contentItem->title,
-            'content'  => $contentItem->body_html,
-            'status'   => $brand->default_status ?? 'draft',
-            'slug'     => $contentItem->slug,
-        ];
-
-        if (!empty($contentItem->wp_template) && $contentItem->wp_template !== 'default') {
-            $payload['template'] = self::mapWpTemplate($contentItem->wp_template);
-        }
-
-        if (!empty($contentItem->wp_media_id)) {
-            $payload['featured_media'] = $contentItem->wp_media_id;
-        }
-
-        $response = Http::withBasicAuth($brand->wp_username, $brand->wp_app_password)
-            ->timeout(12)
-            ->post($cleanUrl . $endpoint, $payload);
-
-        if ($response->successful()) {
-            $data = $response->json();
-            return [
-                'success' => true,
-                'wp_id' => $data['id'],
-                'link' => $data['link'],
-                'preview_url' => $data['link'] . '&preview=true',
-            ];
-        }
-
-        Log::error("WP REST API Sync Failed for Brand: " . $brand->name, $response->json());
-        return false;
-    }
-
-    /**
-     * Upload Nano Banana AI Image to WP Media Library
-     */
-    public function uploadMedia($brand, string $imageUrl, string $filename): int|null
-    {
-        $imageContent = @file_get_contents($imageUrl);
-        if (!$imageContent) return null;
-
-        $cleanUrl = rtrim($brand->wp_url, '/');
-
-        $response = Http::withBasicAuth($brand->wp_username, $brand->wp_app_password)
-            ->withBody($imageContent, 'image/jpeg')
-            ->post($cleanUrl . '/wp-json/wp/v2/media', [
-                'headers' => [
-                    'Content-Disposition' => 'attachment; filename="' . $filename . '.jpg"',
-                ]
-            ]);
-
-        return $response->successful() ? $response->json()['id'] : null;
-    }
-
-    /**
-     * Map legacy .php page template slugs to valid Hello Elementor / WP REST API
-     * template values.  The REST API rejects anything outside the three
-     * Elementor-registered slugs, so custom theme templates must be translated.
-     */
-    private static function mapWpTemplate(string $slug): string
-    {
-        $map = [
-            'template-full-width.php'     => 'elementor_canvas',
-            'template-pet-landing.php'    => 'elementor_canvas',
-            'template-clean-guide.php'    => 'elementor_canvas',
-            'template-community-care.php' => 'elementor_canvas',
-            'template-recipe.php'         => 'elementor_canvas',
-            'page-wide.php'               => 'elementor_header_footer',
-        ];
-
-        if (empty($slug) || $slug === 'default') {
-            return $slug;
-        }
-
-        if (isset($map[$slug])) {
-            return $map[$slug];
-        }
-
-        // Fallback heuristic: full-width / canvas / landing → blank canvas;
-        // otherwise keep the site header and footer.
-        if (preg_match('/full[-_]?width|canvas|landing/i', $slug)) {
-            return 'elementor_canvas';
-        }
-
-        return 'elementor_header_footer';
-    }
-}
-`;
-  res.setHeader('Content-Type', 'text/plain');
-  res.setHeader('Content-Disposition', 'attachment; filename="WordPressConnector.php"');
-  return res.send(phpCode);
 });
 
 // ==========================================

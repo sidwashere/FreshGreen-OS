@@ -227,16 +227,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
         <div className="absolute -right-4 -top-4 w-24 h-24 bg-indigo-600/5 rounded-full blur-2xl group-hover:bg-indigo-600/10 transition-colors" />
         <div className="relative z-10">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-[12px] font-bold text-slate-900">cPanel Stack</span>
+            <span className="text-[12px] font-bold text-slate-900">FGOS Stack</span>
           </div>
           <p className="text-[11px] text-slate-500 leading-relaxed mb-4">
-            Laravel 11 + MySQL + Gemini AI + WP REST API.
+            React 19 + Express + Firestore + Gemini AI + WordPress Bridge.
           </p>
           <button
             onClick={() => onNavigateTab('settings')}
             className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-[11px] font-bold transition-colors shadow-sm"
           >
-            Deployment & Configs
+            Release & Configs
           </button>
         </div>
       </div>

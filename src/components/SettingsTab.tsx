@@ -1,12 +1,11 @@
 import { doc, getDoc, setDoc, collection, query, onSnapshot, deleteDoc } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import React, { useState, useEffect } from 'react';
-import { Key, Save, CheckCircle2, ShieldAlert, Globe, Server, Users, Settings, UserPlus, Trash2, ShieldCheck, UserCheck, UserX, Cpu, Zap, RefreshCcw, Download, Upload, DatabaseBackup } from 'lucide-react';
+import { Key, Save, CheckCircle2, ShieldAlert, Globe, Users, Settings, UserPlus, Trash2, ShieldCheck, UserCheck, UserX, Cpu, Zap, RefreshCcw, Download, Upload, DatabaseBackup } from 'lucide-react';
 import { Brand, AppUser, AiModelPref } from '../types';
 import { fetchAiPref, saveAiPref, AI_MODEL_OPTIONS } from '../lib/keys';
 import { fetchAllAutoblogConfigsCloud, restoreAllAutoblogConfigsCloud, AutoblogConfig } from '../lib/autoblogConfig';
 import { WPBridgeTester } from './WPBridgeTester';
-import { CPanelExporter } from './CPanelExporter';
 import { Wizard } from './Wizard';
 import { BrandSwitcher } from './BrandSwitcher';
 
@@ -913,13 +912,12 @@ const BackupTab: React.FC = () => {
 };
 
 export const SettingsTab: React.FC<SettingsProps> = ({ brands, selectedBrandId, onSelectBrand, currentUser }) => {
-  const [activeSubTab, setActiveSubTab] = useState<'api-keys' | 'ai-models' | 'wp-bridge' | 'deployment' | 'users' | 'wizard' | 'backup'>('api-keys');
+  const [activeSubTab, setActiveSubTab] = useState<'api-keys' | 'ai-models' | 'wp-bridge' | 'users' | 'wizard' | 'backup'>('api-keys');
 
   const subTabs = [
     { id: 'api-keys', label: 'API Keys & BYOK', icon: Key },
     { id: 'ai-models', label: 'AI Models & Fallback', icon: Cpu },
-    { id: 'wp-bridge', label: 'WP REST API Bridge', icon: Globe },
-    { id: 'deployment', label: 'cPanel Deployment', icon: Server },
+    { id: 'wp-bridge', label: 'WordPress Bridge & Plugins', icon: Globe },
     { id: 'users', label: 'User Management', icon: Users },
     { id: 'wizard', label: 'Setup Wizard', icon: Settings },
     { id: 'backup', label: 'Backup & Restore', icon: DatabaseBackup }
@@ -966,7 +964,6 @@ export const SettingsTab: React.FC<SettingsProps> = ({ brands, selectedBrandId, 
           {activeSubTab === 'api-keys' && <ApiKeysTab />}
           {activeSubTab === 'ai-models' && <AiModelsTab />}
           {activeSubTab === 'wp-bridge' && <WPBridgeTester brands={brands} selectedBrandId={selectedBrandId} />}
-          {activeSubTab === 'deployment' && <CPanelExporter />}
           {activeSubTab === 'users' && <UserManagementTab currentUser={currentUser} />}
           {activeSubTab === 'wizard' && <Wizard />}
           {activeSubTab === 'backup' && <BackupTab />}

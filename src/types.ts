@@ -36,7 +36,6 @@ export interface Brand {
    * even though the editor's HTML carries no theme-specific classes. Kadence
    * (and other fully-styled themes) are unaffected. Per-brand DNA/Vault
    * toggle — defaults to OFF. */
-  elementorScaffold?: boolean;
   /** WooCommerce REST API credentials — enables authenticated access to
    * products, orders, customers, coupons and other WC endpoints beyond the
    * public Store API.  When absent, the public `/wc/store/v1/` endpoint is

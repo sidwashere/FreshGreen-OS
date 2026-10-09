@@ -21,6 +21,41 @@ export const BrandManager: React.FC<BrandManagerProps> = ({
 }) => {
   const activeBrand = brands.find((b) => b.id === selectedBrandId) || brands[0];
   const [editingBrand, setEditingBrand] = useState<Brand | null>(activeBrand || null);
+
+  // FGOS Bridge connection diagnostics for the brand being edited.
+  const [bridgeState, setBridgeState] = useState<{
+    installed: boolean; success?: boolean; message: string; mode?: string; elementor?: boolean;
+  } | null>(null);
+  const [bridgeTesting, setBridgeTesting] = useState(false);
+
+  /** Verify the bridge plugin is installed and the pasted secret authenticates. */
+  const testBridge = async (brand: Brand) => {
+    const secret = brand.wpBridge?.secret || '';
+    if (!brand.wpUrl || !secret) {
+      setBridgeState({ installed: false, message: 'Enter the WordPress URL and a shared secret first.' });
+      return;
+    }
+    setBridgeTesting(true);
+    try {
+      const res = await fetch('/api/wp/bridge-status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ wpUrl: brand.wpUrl, secret }),
+      });
+      const d = await res.json();
+      setBridgeState({
+        installed: !!d.installed,
+        success: !!d.success,
+        message: d.message || (d.success ? 'FGOS Bridge connected.' : 'Could not verify the bridge.'),
+        mode: d.mode,
+        elementor: d.elementor,
+      });
+    } catch (err: any) {
+      setBridgeState({ installed: false, message: `Check failed: ${err?.message || 'network error'}` });
+    } finally {
+      setBridgeTesting(false);
+    }
+  };
   const [showAppPassword, setShowAppPassword] = useState(false);
   const [savedNotice, setSavedNotice] = useState(false);
   const [newBannedWord, setNewBannedWord] = useState('');
@@ -413,39 +448,89 @@ export const BrandManager: React.FC<BrandManagerProps> = ({
               </div>
             </div>
 
-            {/* Section 1.5: Elementor Scaffold */}
+            {/* Section 1.5: FGOS Bridge — replaces the old Elementor Scaffold toggle.
+                The Bridge plugin owns render mode (native Elementor containers, or
+                scoped semantic HTML on non-Elementor sites) so articles inherit the
+                theme instead of arriving as inline-styled HTML. */}
             <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-4">
               <div className="flex items-center justify-between">
                 <div className="flex items-center space-x-2 text-slate-900 font-semibold text-sm">
                   <LayoutTemplate className="w-4 h-4 text-emerald-600" />
-                  <span>Elementor Scaffold</span>
+                  <span>FGOS Bridge (WordPress render plugin)</span>
                 </div>
+                {bridgeState && (
+                  <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full ${
+                    bridgeState.installed
+                      ? (bridgeState.success ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700')
+                      : 'bg-slate-200 text-slate-500'
+                  }`}>
+                    {bridgeState.installed ? (bridgeState.success ? bridgeState.mode || 'connected' : 'bad secret') : 'not installed'}
+                  </span>
+                )}
               </div>
               <p className="text-[11px] text-slate-500 leading-relaxed -mt-2">
-                Enable this if your WordPress site uses Hello Elementor or a similar blank-canvas theme. It wraps your content in Elementor's standard widget structure so the theme's CSS aligns it properly.
+                Publishes go through <code className="text-[10.5px]">/wp-json/fgos/v1/publish</code> so the
+                article is built as native Elementor containers (or scoped semantic HTML on non-Elementor
+                sites) and inherits your theme's layout, fonts and colours. Install the plugin from{' '}
+                <code className="text-[10.5px]">wordpress/fgos-bridge</code>, then paste the shared secret
+                from <em>Settings → FGOS Bridge</em> in wp-admin.
               </p>
 
               <label className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2.5 cursor-pointer transition hover:border-emerald-300">
                 <span className="text-xs font-semibold text-slate-700 leading-snug">
-                  Elementor-family widget scaffold
+                  Publish through FGOS Bridge
                   <span className="block text-[10.5px] font-normal text-slate-500 -mt-0.5">
-                    Wrap every block in Elementor's standard widget+container scaffold.
+                    Off = articles are pushed as raw HTML to /wp/v2/posts (previous behaviour).
                   </span>
                 </span>
                 <input
                   type="checkbox"
-                  checked={!!editingBrand.elementorScaffold}
-                  onChange={(e) => setEditingBrand({ ...editingBrand, elementorScaffold: e.target.checked })}
+                  checked={!!editingBrand.wpBridge?.enabled}
+                  onChange={(e) => setEditingBrand({
+                    ...editingBrand,
+                    wpBridge: { ...(editingBrand.wpBridge || {}), enabled: e.target.checked },
+                  })}
                   className="w-4 h-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 shrink-0"
                 />
               </label>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Bridge shared secret</label>
+                <input
+                  type="password"
+                  value={editingBrand.wpBridge?.secret || ''}
+                  onChange={(e) => setEditingBrand({
+                    ...editingBrand,
+                    wpBridge: { ...(editingBrand.wpBridge || {}), secret: e.target.value },
+                  })}
+                  placeholder="Paste from Settings → FGOS Bridge in wp-admin"
+                  className="w-full text-xs bg-white border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-400"
+                />
+              </div>
+
+              <button
+                type="button"
+                onClick={() => testBridge(editingBrand)}
+                disabled={bridgeTesting}
+                className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg px-3 py-1.5 transition disabled:opacity-50"
+              >
+                {bridgeTesting ? 'Testing connection…' : 'Test connection'}
+              </button>
+              {bridgeState && (
+                <p className={`text-[11px] -mt-1 ${bridgeState.installed && bridgeState.success ? 'text-emerald-700' : 'text-amber-700'}`}>
+                  {bridgeState.message}
+                  {bridgeState.elementor !== undefined && bridgeState.success ? (
+                    <> · Elementor {bridgeState.elementor ? 'detected' : 'not detected'}</>
+                  ) : null}
+                </p>
+              )}
             </div>
 
             {/* Section 2: WordPress REST API Bridge Vault */}
             <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-4">
               <div className="flex items-center space-x-2 text-slate-900 font-semibold text-sm">
                 <Key className="w-4 h-4 text-emerald-600" />
-                <span>WordPress REST API Vault (Hostinger / cPanel Target)</span>
+                <span>WordPress REST API Vault</span>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">

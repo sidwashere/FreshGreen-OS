@@ -57,7 +57,7 @@ export const WPBridgeTester: React.FC<WPBridgeTesterProps> = ({
           WordPress REST API Bridge Diagnostic Tool
         </h1>
         <p className="text-sm text-slate-500 mt-1">
-          Verify Basic Authentication, SSL Handshake, Application Passwords, and REST endpoints for your hostinger/cPanel sites.
+          Verify Basic Authentication, SSL, Application Passwords and REST endpoints, and check whether the FGOS Bridge render plugin is installed and connected.
         </p>
       </div>
 

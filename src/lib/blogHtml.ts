@@ -728,12 +728,9 @@ export function blocksToHtml(
   // widget scaffold so Hello Elementor's own CSS flex-aligns it. Kadence and
   // other fully-styled themes ignore these wrappers and keep working
   // untouched — this is strictly additive for Elementor-target brands.
-  const emitBlock = (b: VisualBlock) => {
-    const html = renderBlock(b, kit, brand);
-    return brand?.elementorScaffold
-      ? `<div class="elementor-widget elementor-widget-fg-block"><div class="elementor-widget-container">${html}</div></div>`
-      : html;
-  };
+  // The Elementor widget scaffold that used to live here was superseded by the
+  // FGOS Bridge plugin, which builds real Elementor containers server-side.
+  const emitBlock = (b: VisualBlock) => renderBlock(b, kit, brand);
 
   return `<div class="fg-art fg-art-${scope}" style="font-family:${kit.bodyFont} !important;color:${kit.text} !important;line-height:1.7 !important;max-width:800px !important;margin:0 auto !important;padding:0 !important;box-sizing:border-box !important;background:transparent !important;">
 ${scopedStyles(scope, kit)}
