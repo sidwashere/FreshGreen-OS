@@ -37,9 +37,13 @@ steps:
       - 'europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/fgos:latest'
 
   # 3. Deploy to Cloud Run.
-  #    FIREBASE_DB is intentionally NOT set: the live service uses the project's
-  #    default Firestore database. Staging sets FIREBASE_DB=fgos-staging to keep
-  #    its data plane separate.
+  #
+  #    CRITICAL: do NOT use a bare `--set-env-vars` here. `--set-env-vars`
+  #    REPLACES the service's entire environment, so a partial list silently
+  #    deletes every credential the service needs (GEMINI_API_KEY,
+  #    MAILERLITE_API_KEY, DGC_NOTIFY_SECRET…). That happened on 2026-10-09 and
+  #    took live AI down. The flag is therefore omitted entirely below — Cloud
+  #    Run preserves the service's existing environment when it is absent.
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
@@ -50,9 +54,13 @@ steps:
       - '--platform=managed'
       - '--region=europe-west1'
       - '--allow-unauthenticated'
-      - '--set-env-vars=NODE_ENV=production'
       - '--memory=512Mi'
       - '--cpu=1'
+      # NOTE: no --set-env-vars flag here, deliberately. Cloud Run keeps the
+      # service's existing environment when the flag is absent. Passing it
+      # REPLACES the whole env list — that wiped GEMINI_API_KEY,
+      # MAILERLITE_API_KEY and DGC_NOTIFY_SECRET on 2026-10-09 and took live AI
+      # down. If you ever must change env, pass EVERY key in one call.
 
 images:
   - 'europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/fgos:${_TAG}'
