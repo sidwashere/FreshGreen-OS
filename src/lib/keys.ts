@@ -22,20 +22,17 @@ export const fetchGlobalKeys = async () => {
 
 export const DEFAULT_AI_PREF: AiModelPref = {
   provider: 'gemini',
-  model: 'gemini-3.5-flash',
+  // Free tier by default. gemini-3.5-flash / gemini-2.5-flash were retired for
+  // new users (API returns 404); 3.8-flash is the current free-tier slug.
+  model: 'gemini-3.8-flash',
   autoFallback: true,
 };
 
 export const AI_MODEL_OPTIONS: { provider: AiModelPref['provider']; label: string; model: string }[] = [
-  { provider: 'gemini', label: 'Gemini Flash 3.5', model: 'gemini-3.5-flash' },
+  { provider: 'gemini', label: 'Gemini Flash 3.8 (free)', model: 'gemini-3.8-flash' },
   { provider: 'gemini', label: 'Gemini Flash Latest', model: 'gemini-flash-latest' },
-  { provider: 'gemini', label: 'Gemini 2.5 Flash', model: 'gemini-2.5-flash' },
-  { provider: 'openrouter', label: 'OpenRouter · GPT-OSS 20B (free)', model: 'openai/gpt-oss-20b:free' },
-  { provider: 'openrouter', label: 'OpenRouter · Nemotron 120B (free)', model: 'nvidia/nemotron-3-super-120b-a12b:free' },
-  { provider: 'openrouter', label: 'OpenRouter · Cohere North Mini (free)', model: 'cohere/north-mini-code:free' },
-  { provider: 'openrouter', label: 'OpenRouter · Gemma 4 31B (free)', model: 'google/gemma-4-31b-it:free' },
-  { provider: 'openrouter', label: 'OpenRouter · Nemotron Ultra (free)', model: 'nvidia/nemotron-3-ultra-550b-a55b:free' },
   { provider: 'openrouter', label: 'OpenRouter · Auto free tier', model: 'openrouter/free' },
+  { provider: 'openrouter', label: 'OpenRouter · Nemotron 120B (free)', model: 'nvidia/nemotron-3-super-120b-a12b:free' },
 ];
 
 /** True if a stored pref points at a known model option (or a custom endpoint). */

@@ -498,7 +498,11 @@ const DEFAULT_WP_HEADERS = {
   'Accept-Language': 'en-US,en;q=0.9',
 };
 
-const GEMINI_TEXT_MODEL = 'gemini-3.5-flash';
+// Gemini text models on the free tier.
+// `gemini-2.5-flash` and `gemini-3.5-flash` were retired for new users (the API
+// returns 404 "no longer available to new users"), so the defaults point at the
+// current free-tier slugs. `gemini-flash-latest` is kept as an alias fallback.
+const GEMINI_TEXT_MODEL = 'gemini-3.8-flash';
 const GEMINI_TEXT_FALLBACK_MODEL = 'gemini-flash-latest';
 // Free-tier quota buckets are per-model, so we fall through the chain when one
 // model is exhausted (RESOURCE_EXHAUSTED) and try the next.
@@ -837,12 +841,17 @@ async function* streamWithModelFallback(ai: any, params: any, onFallback?: (mode
 // Current OpenRouter free tier (verified live, 2026): pricing prompt=0 & completion=0.
 // Reasoning models (gpt-oss) answer in `content` when given enough tokens — the
 // router also falls back to `reasoning` text when content comes back empty.
+// OpenRouter free tier. `openrouter/free` is the router slug that always
+// resolves to a genuinely zero-cost model, so it leads the chain and the
+// individual pinned slugs follow as backups.
+//
+// NOTE: `openai/gpt-oss-20b:free` was removed — OpenRouter now returns
+// "404: This model is unavailable for free" for it and only offers the paid
+// slug. Leaving it in the list wasted a chain step and produced a confusing
+// error in Settings > Test Connections.
 const OPENROUTER_FREE_MODELS = [
-  'openai/gpt-oss-20b:free',
+  'openrouter/free',                            // router: always free
   'nvidia/nemotron-3-super-120b-a12b:free',
-  'cohere/north-mini-code:free',
-  'google/gemma-4-31b-it:free',
-  'nvidia/nemotron-3-ultra-550b-a55b:free',
   'nvidia/nemotron-3-nano-30b-a3b:free',
   'inclusionai/ling-3.0-tiny:free',
   'poolside/laguna-s-2.1:free',
@@ -4357,28 +4366,45 @@ async function generateAiImage(opts: {
     message: `Placeholder image — no AI image model could be reached (${reason}). Add a Gemini server key, or an OpenAI / Hugging Face / Replicate key in Settings, to generate a real image that follows this prompt.`,
   });
 
-  // --- 1. Gemini Nano Banana — the default quality path. Imagen was shut
-  // down June 30 2026; image generation now runs through generateContent with
-  // the native image models (gemini-3.1-flash-image — the PAID Nano Banana 2).
-  // Tries the saved (BYOK) key first, then the server key — a rejected saved
-  // key must not silently drop real AI images for a placeholder.
+  // --- 1. Gemini native image models — FREE FIRST.
+  // Imagen was shut down June 30 2026, so images come from generateContent with
+  // the native image models. Verified live on the server key (HTTP 200, real
+  // inlineData): `gemini-3.1-flash-lite-image` is the cheapest and is tried
+  // first to keep running costs down, then the larger Lite/full variants.
+  // Tries the server key and the saved (BYOK) key — a rejected saved key must
+  // not silently drop real AI images for a placeholder.
+  const GEMINI_IMAGE_MODELS = [
+    'gemini-3.1-flash-lite-image',
+    'gemini-3.1-flash-image',
+    'gemini-2.5-flash-image',
+  ];
+
   const tryGeminiImage = async (apiKey: string): Promise<AiImageResult> => {
-    const ai = new GoogleGenAI({ apiKey });
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.1-flash-image',
-      contents: finalPrompt,
-      config: {
-        responseModalities: ['IMAGE'],
-        imageConfig: { aspectRatio: aspectRatio || '1:1' },
-      },
-    });
-    const parts = response?.candidates?.[0]?.content?.parts || [];
-    const imagePart = parts.find((p: any) => p?.inlineData?.data);
-    if (imagePart?.inlineData?.data) {
-      const mime = imagePart.inlineData.mimeType || 'image/png';
-      return { imageUrl: `data:${mime};base64,${imagePart.inlineData.data}`, isAiGenerated: true, model: 'gemini-3.1-flash-image', provider: 'gemini' };
+    let lastErr: any = null;
+    for (const model of GEMINI_IMAGE_MODELS) {
+      try {
+        const ai = new GoogleGenAI({ apiKey });
+        const response = await ai.models.generateContent({
+          model,
+          contents: finalPrompt,
+          config: {
+            responseModalities: ['IMAGE'],
+            imageConfig: { aspectRatio: aspectRatio || '1:1' },
+          },
+        });
+        const parts = response?.candidates?.[0]?.content?.parts || [];
+        const imagePart = parts.find((p: any) => p?.inlineData?.data);
+        if (imagePart?.inlineData?.data) {
+          const mime = imagePart.inlineData.mimeType || 'image/png';
+          return { imageUrl: `data:${mime};base64,${imagePart.inlineData.data}`, isAiGenerated: true, model, provider: 'gemini' };
+        }
+        lastErr = new Error(`${model} returned no image parts.`);
+      } catch (err: any) {
+        lastErr = err;
+        console.warn(`[Image] ${model} unavailable on this key:`, String(err?.message || err).slice(0, 120));
+      }
     }
-    throw new Error('Gemini returned no image parts.');
+    throw lastErr || new Error('Gemini returned no image parts.');
   };
   if (!modelProvider || modelProvider === 'auto' || modelProvider === 'gemini') {
         const geminiKeys = [process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY, byokKeys?.gemini].filter((k, i, a): k is string => !!k && a.indexOf(k) === i);
